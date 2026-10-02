@@ -17,8 +17,12 @@ the reference's own.
   leaf 2  collaborative, m = 1              signCsfs by owner and operator
   node B  [gated timed UNROLL, RECLAIM]   reclaimed: four SWK releases + signTapscript
 
-Negative cases are forced into a block with generateblock; SWK's refusals
-are recorded with their error strings.
+Negative cases are forced into a block with generateblock, on a node started
+with -par=1 so that the block's error names the script failure, and each is
+asserted to fail for its own reason in the mempool and in the block. SWK's
+refusals are recorded with their error strings: a signature for another chain
+than the signer's network, a rebind that leaves more than its ceiling to
+whoever broadcasts, and a sighash type that leaves outputs free.
 """
 import json
 import os as _os
@@ -58,8 +62,14 @@ class Swk:
         self.p.wait(timeout=30)
 
 
+SIG = "Invalid Schnorr signature"
+
+
 class ArcaSigners(Ark3, ArkBase, BitcoinTestFramework):
     NAME = "swk_signers"
+    # Scripts checked one at a time: a block refused for a script failure then
+    # names it, instead of the generic block-validation-failed.
+    EXTRA = ["-par=1"]
 
     def set_test_params(self):
         self.ark_params()
@@ -81,12 +91,22 @@ class ArcaSigners(Ark3, ArkBase, BitcoinTestFramework):
     def children_json(self, kids):
         return [{"asset": self.X, "value": v, "scriptPubkey": (bytes([0x51, 0x20]) + p).hex()} for (_, v, p) in kids]
 
-    def csfs(self, signer, path, message, expect_digest):
+    def csfs(self, signer, path, message, expect_digest, limits=None):
         """SWK rebuilds the digest from the fields; it must equal the
-        reference's, and SWK signs only that digest."""
+        reference's, and SWK signs only that digest. A rebind may leave the
+        fee, FEE atoms, to whoever broadcasts."""
         d = self.swk.ok(op="digest", message=message)
         assert d == expect_digest.hex(), (message["kind"], d, expect_digest.hex())
-        return bytes.fromhex(self.swk.ok(op="csfs", signer=signer, path=path, message=message, digest=d))
+        limits = limits or {"maxUncommitted": FEE}
+        return bytes.fromhex(self.swk.ok(op="csfs", signer=signer, path=path, message=message, digest=d,
+                                         limits=limits))
+
+    def refuse(self, tx, label, why):
+        """Refused by the mempool and when forced into a block, each time for
+        `why`."""
+        self.reject(tx, label, expect=why)
+        block = self.R[label]["block-error"]
+        assert why in block, (label, block)
 
     def tapscript(self, signer, path, tx, idx, tap, name, genesis=None, check=True):
         self.pad(tx)
@@ -125,7 +145,8 @@ class ArcaSigners(Ark3, ArkBase, BitcoinTestFramework):
         self.genesis_display = self.node.getblockhash(0)
         self.genesis_reversed = self.gen.hex()          # the internal bytes read as display hex: the wrong order
         self.ctag = chain_tag(self.gen)
-        op, own = self.swk.ok(op="new"), self.swk.ok(op="new")
+        net = dict(genesis=self.genesis_display, policyAsset=self.X)
+        op, own = self.swk.ok(op="new", **net), self.swk.ok(op="new", **net)
         self.s_x = self.key(op, "m/6/0")
         self.ox = [self.key(own, "m/6/%d" % i) for i in range(4)]
         self.rec("keys", {"operator": self.s_x.hex(), "owners": [x.hex() for x in self.ox],
@@ -153,13 +174,13 @@ class ArcaSigners(Ark3, ArkBase, BitcoinTestFramework):
             self.setwit(tx, 0, wit + [bytes(A["tap"].leaves["unroll"].script), control_block(A["tap"], "unroll")])
             return tx
         later = dict(auth, time=t + 1)
-        self.reject(unroll_tx(self.csfs(own, "m/6/0", later, unroll_auth3(A["kids"], t + 1))),
-                    "neg/unroll_auth_signed_for_another_time")
+        self.refuse(unroll_tx(self.csfs(own, "m/6/0", later, unroll_auth3(A["kids"], t + 1))),
+                    "neg/unroll_auth_signed_for_another_time", SIG)
         other = dict(auth, children=self.children_json(B["kids"]))
-        self.reject(unroll_tx(self.csfs(own, "m/6/0", other, unroll_auth3(B["kids"], t))),
-                    "neg/unroll_auth_signed_for_another_node")
-        self.reject(unroll_tx(self.csfs(own, "m/6/1", auth, unroll_auth3(A["kids"], t))),
-                    "neg/unroll_auth_by_another_members_key")
+        self.refuse(unroll_tx(self.csfs(own, "m/6/0", other, unroll_auth3(B["kids"], t))),
+                    "neg/unroll_auth_signed_for_another_node", SIG)
+        self.refuse(unroll_tx(self.csfs(own, "m/6/1", auth, unroll_auth3(A["kids"], t))),
+                    "neg/unroll_auth_by_another_members_key", SIG)
         txid = self.send(unroll_tx(sig), "pos/unroll_with_swk_authorisation")
         ls = [Utxo(txid, i, self.utxo_at(txid, i).txout) for i in range(4)]
 
@@ -179,11 +200,26 @@ class ArcaSigners(Ark3, ArkBase, BitcoinTestFramework):
         chg = leaf3_taptree(self.ox[1], self.s_x, _os.urandom(32), self.ctag, DELAY, fold=True)[0]
         outs3 = [(self.X_ID, 6000_000, bytes(recv.scriptPubKey)),
                  (self.X_ID, LEAF - 6000_000 - FEE, bytes(chg.scriptPubKey))]
-        rb = {"kind": "rebind", "genesisHash": self.genesis_display, "leafSalt": A["salts"][1].hex(),
+        # The leaves are in no batch here, so each is named by its own witness program.
+        def source(leaf_tap, salt):
+            return {"path": "leaf", "leafId": bytes(leaf_tap.scriptPubKey)[2:].hex(),
+                    "genesisHash": self.genesis_display, "salt": salt.hex()}
+        rb = {"kind": "rebind", "source": source(tap1, A["salts"][1]),
               "assetIn": self.X, "valueIn": LEAF, "outputs": self.outputs_json(outs3)}
         self.rec("describe/rebind", self.swk.ok(op="describe", message=rb))
         ref = rebind_msg3(self.ctag, A["salts"][1], self.X_ID, LEAF, outs3, fold=True)
         sA, sS = self.csfs(own, "m/6/1", rb, ref), self.csfs(op, "m/6/0", rb, ref)
+        # The fee margin at the relay floor the node gives X (listed 1:1) is
+        # four times the floor for a 359 vB spend, less than the FEE this
+        # transfer leaves; and a rebind for the chain's genesis in display
+        # order is for another chain.
+        floor = int(self.node.getmempoolinfo()["minrelaytxfee"] * 100_000_000)
+        d_rb = self.swk.ok(op="digest", message=rb)
+        self.refusal("swk/refuses_rebind_above_the_fee_margin", op="csfs", signer=own, path="m/6/1", message=rb,
+                     digest=d_rb, limits={"feeFloorPerKvb": floor})
+        wrong = dict(rb, source=dict(rb["source"], genesisHash=self.genesis_reversed))
+        self.refusal("swk/refuses_rebind_for_display_order_genesis", op="csfs", signer=own, path="m/6/1",
+                     message=wrong, digest=self.swk.ok(op="digest", message=wrong))
 
         def collab_tx(u, tap, lv, outs3_, sig_s, sig_a, m=None, shave=0):
             outs = [self.out(v - (shave if j == 0 else 0), spk, self.X_OUT) for j, (_, v, spk) in enumerate(outs3_)]
@@ -192,23 +228,21 @@ class ArcaSigners(Ark3, ArkBase, BitcoinTestFramework):
             self.setwit(tx, 0, [sig_s, sig_a, bytes([m or len(outs3_)]), bytes(lv["collab"]),
                                 control_block(tap, "collab")])
             return tx
-        self.reject(collab_tx(ls[1], tap1, lv1, outs3, sS, sA, shave=1), "neg/collab_output_one_atom_less")
-        self.reject(collab_tx(ls[1], tap1, lv1, outs3, sA, sS), "neg/collab_signatures_swapped")
-        self.reject(collab_tx(ls[1], tap1, lv1, outs3, sS, sA, m=1), "neg/collab_wrong_m")
-        wrong = dict(rb, genesisHash=self.genesis_reversed)
-        wref = rebind_msg3(chain_tag(self.gen[::-1]), A["salts"][1], self.X_ID, LEAF, outs3, fold=True)
-        self.reject(collab_tx(ls[1], tap1, lv1, outs3, self.csfs(op, "m/6/0", wrong, wref),
-                              self.csfs(own, "m/6/1", wrong, wref)), "neg/collab_signed_for_display_order_genesis")
+        self.refuse(collab_tx(ls[1], tap1, lv1, outs3, sS, sA, shave=1), "neg/collab_output_one_atom_less", SIG)
+        self.refuse(collab_tx(ls[1], tap1, lv1, outs3, sA, sS), "neg/collab_signatures_swapped", SIG)
+        self.refuse(collab_tx(ls[1], tap1, lv1, outs3, sS, sA, m=1), "neg/collab_wrong_m", SIG)
         coin = dict(rb, valueIn=LEAF + 1)
         cref = rebind_msg3(self.ctag, A["salts"][1], self.X_ID, LEAF + 1, outs3, fold=True)
-        self.reject(collab_tx(ls[1], tap1, lv1, outs3, self.csfs(op, "m/6/0", coin, cref),
-                              self.csfs(own, "m/6/1", coin, cref)), "neg/collab_signed_for_another_coin_value")
+        more = {"maxUncommitted": FEE + 1}
+        self.refuse(collab_tx(ls[1], tap1, lv1, outs3, self.csfs(op, "m/6/0", coin, cref, more),
+                              self.csfs(own, "m/6/1", coin, cref, more)), "neg/collab_signed_for_another_coin_value",
+                    SIG)
         self.send(collab_tx(ls[1], tap1, lv1, outs3, sS, sA), "pos/collab_m2_swk_owner_and_operator")
 
         # ---- leaf 2: collaborative path, m = 1
         tap2, lv2 = A["leaves"][2]
         outs3 = [(self.X_ID, LEAF - FEE, bytes(recv.scriptPubKey))]
-        rb2 = dict(rb, leafSalt=A["salts"][2].hex(), outputs=self.outputs_json(outs3))
+        rb2 = dict(rb, source=source(tap2, A["salts"][2]), outputs=self.outputs_json(outs3))
         ref2 = rebind_msg3(self.ctag, A["salts"][2], self.X_ID, LEAF, outs3, fold=True)
         self.send(collab_tx(ls[2], tap2, lv2, outs3, self.csfs(op, "m/6/0", rb2, ref2),
                             self.csfs(own, "m/6/2", rb2, ref2)), "pos/collab_m1_swk_owner_and_operator")
@@ -225,9 +259,14 @@ class ArcaSigners(Ark3, ArkBase, BitcoinTestFramework):
                      tx=tx.serialize().hex(), inputIndex=0, prevouts=[ls[0].txout.serialize().hex()],
                      leaf=bytes(lv0["exit"]).hex(), controlBlock=control_block(tap0, "collab").hex(), sighashType=0,
                      genesis=self.genesis_display)
-        bad = self.tapscript(own, "m/6/0", tx, 0, tap0, "exit", genesis=self.genesis_reversed, check=False)
-        self.setwit(tx, 0, [bad, bytes(lv0["exit"]), control_block(tap0, "exit")])
-        self.reject(tx, "neg/exit_signed_for_display_order_genesis")
+        exit_req = dict(tx=tx.serialize().hex(), inputIndex=0, prevouts=[ls[0].txout.serialize().hex()],
+                        leaf=bytes(lv0["exit"]).hex(), controlBlock=control_block(tap0, "exit").hex())
+        self.refusal("swk/refuses_exit_for_display_order_genesis", op="tapscript", signer=own, path="m/6/0",
+                     sighashType=0, genesis=self.genesis_reversed, **exit_req)
+        self.refusal("swk/refuses_exit_under_sighash_none", op="tapscript", signer=own, path="m/6/0",
+                     sighashType=2, genesis=self.genesis_display, **exit_req)
+        self.rec("describe/exit_under_sighash_none",
+                 self.swk.ok(op="tapdescribe", sighashType=2, genesis=self.genesis_display, **exit_req))
         sig = self.tapscript(own, "m/6/0", tx, 0, tap0, "exit")
         self.setwit(tx, 0, [sig, bytes(lv0["exit"]), control_block(tap0, "exit")])
         self.send(tx, "pos/exit_claim_signed_by_sign_tapscript")
@@ -238,18 +277,25 @@ class ArcaSigners(Ark3, ArkBase, BitcoinTestFramework):
         rref = release_msg(self.gen, B["kids"])
         rsigs = [self.csfs(own, "m/6/%d" % i, rel, rref) for i in range(4)]
         relw = dict(rel, genesisHash=self.genesis_reversed)
-        wrel = sha256(RTAG + self.gen[::-1] + children_hash(B["kids"]))
-        wsigs = [self.csfs(own, "m/6/%d" % i, relw, wrel) for i in range(4)]
+        self.refusal("swk/refuses_release_for_display_order_genesis", op="csfs", signer=own, path="m/6/0",
+                     message=relw, digest=self.swk.ok(op="digest", message=relw))
 
-        def reclaim_tx(owner_sigs, s_genesis=None):
+        def reclaim_tx(owner_sigs):
             tx = self.mktx([uB], [self.out(uB.amount - FEE, self.wallet_spk(), self.X_OUT), self.fee(FEE, self.X_OUT)])
-            s = self.tapscript(op, "m/6/0", tx, 0, B["tap"], "reclaim", genesis=s_genesis, check=s_genesis is None)
+            s = self.tapscript(op, "m/6/0", tx, 0, B["tap"], "reclaim")
             leaf = B["tap"].leaves["reclaim"].script
             self.setwit(tx, 0, [s] + list(reversed(owner_sigs)) + [bytes(leaf), control_block(B["tap"], "reclaim")])
             return tx
-        self.reject(reclaim_tx(wsigs), "neg/release_signed_for_display_order_genesis")
-        self.reject(reclaim_tx(rsigs[:3] + [b""]), "neg/three_releases_of_four")
-        self.reject(reclaim_tx(rsigs, s_genesis=self.genesis_reversed), "neg/reclaim_operator_sig_for_another_genesis")
+        self.refuse(reclaim_tx(rsigs[:3] + [b""]), "neg/three_releases_of_four",
+                    "Script failed an OP_CHECKSIGVERIFY operation")
+        self.refuse(reclaim_tx(rsigs[1:] + rsigs[:1]), "neg/releases_in_the_wrong_slots", SIG)
+        rtx = self.mktx([uB], [self.out(uB.amount - FEE, self.wallet_spk(), self.X_OUT), self.fee(FEE, self.X_OUT)])
+        self.pad(rtx)
+        self.refusal("swk/refuses_reclaim_for_display_order_genesis", op="tapscript", signer=op, path="m/6/0",
+                     tx=rtx.serialize().hex(), inputIndex=0, prevouts=[uB.txout.serialize().hex()],
+                     leaf=bytes(B["tap"].leaves["reclaim"].script).hex(),
+                     controlBlock=control_block(B["tap"], "reclaim").hex(), sighashType=0,
+                     genesis=self.genesis_reversed)
         self.send(reclaim_tx(rsigs), "pos/reclaim_swk_releases_and_sign_tapscript")
 
 

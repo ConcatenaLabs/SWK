@@ -2,7 +2,8 @@
 //!
 //! The signing itself is [`crate::Signer::sign_tapscript`]; this module holds
 //! the parsing it shares with [`tapscript_sighash`], which lets a page or a
-//! watcher compute the hash a signature must cover without holding a key.
+//! watcher compute the hash a signature must cover without holding a key, and
+//! [`tapscript_describe`], which says what a signature would authorise.
 //!
 //! Byte order at this edge: the genesis hash is display hex (as
 //! `getblockhash` prints it); transactions and prevouts are consensus
@@ -114,4 +115,34 @@ pub fn tapscript_sighash(
     let spend = parts.spend();
     spend.check_commitment(&elements::secp256k1_zkp::Secp256k1::verification_only())?;
     Ok(spend.sighash()?.to_hex())
+}
+
+/// What a signature over this spend would authorise, as plain lines for the
+/// wallet to show before it asks for approval: the coin and the leaf, what the
+/// sighash type covers (under `SIGHASH_NONE`, no output at all), the outputs,
+/// the fee and the locks. Takes the same arguments as `tapscriptSighash` and
+/// refuses the same spends.
+#[wasm_bindgen(js_name = tapscriptDescribe)]
+#[allow(clippy::too_many_arguments)]
+pub fn tapscript_describe(
+    tx_hex: &str,
+    input_index: u32,
+    prevouts_hex: Vec<String>,
+    leaf_script_hex: &str,
+    control_block_hex: &str,
+    sighash_type: u8,
+    genesis_hex: &str,
+) -> Result<Vec<String>, Error> {
+    let parts = SpendParts::parse(
+        tx_hex,
+        input_index,
+        &prevouts_hex,
+        leaf_script_hex,
+        control_block_hex,
+        sighash_type,
+        genesis_hex,
+    )?;
+    let spend = parts.spend();
+    spend.check_commitment(&elements::secp256k1_zkp::Secp256k1::verification_only())?;
+    Ok(spend.describe()?)
 }

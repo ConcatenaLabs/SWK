@@ -212,6 +212,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69f7f8c3906b62b754cd5326047894316021dcfe5a194c8ea52bdd94934a3457"
 
 [[package]]
+name = "arca-covenant"
+version = "0.1.0"
+source = "git+https://github.com/ConcatenaLabs/arca?rev=d81ccecbdc10b9929e8df5714a56b5777aae1aa7#d81ccecbdc10b9929e8df5714a56b5777aae1aa7"
+dependencies = [
+ "elements 0.25.3",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2726,6 +2735,7 @@ dependencies = [
 name = "lwk_signer"
 version = "0.18.1"
 dependencies = [
+ "arca-covenant",
  "base64 0.21.7",
  "bip39",
  "elements-miniscript",
@@ -2789,6 +2799,7 @@ dependencies = [
 name = "lwk_wasm"
 version = "0.18.0"
 dependencies = [
+ "arca-covenant",
  "byteorder",
  "console_error_panic_hook",
  "lwk_boltz",

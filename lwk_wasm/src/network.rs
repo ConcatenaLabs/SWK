@@ -68,6 +68,27 @@ impl Network {
         .into()
     }
 
+    /// Creates a regtest `Network` whose chain has the genesis hash
+    /// `genesisHash` (display hex), as a regtest or custom chain started with
+    /// its own parameters does. The genesis hash is what binds a signature to
+    /// a chain, so a signer for such a chain needs it.
+    #[wasm_bindgen(js_name = regtestWithGenesis)]
+    pub fn regtest_with_genesis(
+        policy_asset: &AssetId,
+        genesis_hash: &str,
+    ) -> Result<Network, crate::Error> {
+        use std::str::FromStr;
+        let genesis = lwk_wollet::elements::BlockHash::from_str(genesis_hash)?;
+        Ok(lwk_common::Network::CustomElements(
+            lwk_common::ElementsParamsBuilder::new()
+                .with_policy_asset(policy_asset.into())
+                .with_genesis_hash(genesis)
+                .build()
+                .expect("static"),
+        )
+        .into())
+    }
+
     /// Creates the default regtest `Network` with the policy asset `5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225`
     #[wasm_bindgen(js_name = regtestDefault)]
     pub fn regtest_default() -> Network {
@@ -112,7 +133,8 @@ impl Network {
     /// Sequentia by construction (it is a custom Elements network).
     #[wasm_bindgen(js_name = isSequentia)]
     pub fn is_sequentia(&self) -> bool {
-        matches!(&self.inner, &lwk_common::Network::CustomElements(_)) && self.to_string_js().starts_with("sequentia")
+        matches!(&self.inner, &lwk_common::Network::CustomElements(_))
+            && self.to_string_js().starts_with("sequentia")
     }
 
     /// Return a string representation of the network, like "liquid", "liquid-testnet" or "liquid-regtest"

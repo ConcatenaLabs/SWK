@@ -12,6 +12,9 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct Signer {
     pub(crate) inner: lwk_signer::SwSigner,
+    /// The network the signer was made for. Script-path and Arca message
+    /// signatures commit to its genesis hash, and the signer refuses any other.
+    pub(crate) network: lwk_common::Network,
 }
 
 #[wasm_bindgen]
@@ -20,7 +23,10 @@ impl Signer {
     #[wasm_bindgen(constructor)]
     pub fn new(mnemonic: &Mnemonic, network: &Network) -> Result<Signer, Error> {
         let inner = lwk_signer::SwSigner::new(&mnemonic.to_string(), network.is_mainnet())?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            network: network.into(),
+        })
     }
 
     /// Sign and consume the given PSET, returning the signed one
@@ -152,12 +158,20 @@ impl Signer {
     /// - `leafScriptHex`, `controlBlockHex`: the leaf and its control block,
     ///   as they go in the witness.
     /// - `sighashType`: the BIP341 type byte; 0 is `SIGHASH_DEFAULT`.
-    /// - `genesisHex`: the chain's genesis hash, display hex.
+    /// - `genesisHex`: the chain's genesis hash, display hex. It must be the
+    ///   genesis hash of the network this signer was made for.
+    /// - `allowSighash`: optional. The signer signs `SIGHASH_DEFAULT` (0) and
+    ///   `SIGHASH_ALL` (1) only, which cover every input and output. To sign
+    ///   any other type, name it here: `"none"`, `"single"`,
+    ///   `"all|anyonecanpay"`, `"none|anyonecanpay"` or
+    ///   `"single|anyonecanpay"`, and show `tapscriptDescribe` first.
     ///
     /// Refuses when the control block does not commit the leaf to the output
-    /// the input spends, and when the key at `path` is not pushed in the leaf.
-    /// Returns the witness signature as hex: 64 bytes for `SIGHASH_DEFAULT`,
-    /// 65 otherwise.
+    /// the input spends, when the key at `path` is not checked by a signature
+    /// opcode in the leaf, when the genesis hash is not this signer's
+    /// network's, and when the sighash type is neither `SIGHASH_DEFAULT`,
+    /// `SIGHASH_ALL` nor the one named. Returns the witness signature as hex:
+    /// 64 bytes for `SIGHASH_DEFAULT`, 65 otherwise.
     #[wasm_bindgen(js_name = signTapscript)]
     #[allow(clippy::too_many_arguments)]
     pub fn sign_tapscript(
@@ -170,6 +184,7 @@ impl Signer {
         control_block_hex: &str,
         sighash_type: u8,
         genesis_hex: &str,
+        allow_sighash: Option<String>,
     ) -> Result<String, Error> {
         use lwk_wollet::elements::hex::ToHex;
         let path = parse_path(path)?;
@@ -182,8 +197,32 @@ impl Signer {
             sighash_type,
             genesis_hex,
         )?;
-        let sig = self.inner.sign_tapscript(&path, &parts.spend())?;
+        self.check_genesis(&parts.genesis)?;
+        let sig = match allow_sighash {
+            None => self.inner.sign_tapscript(&path, &parts.spend())?,
+            Some(name) => {
+                let allow = lwk_signer::tapscript::sighash_type_from_name(&name)?;
+                self.inner
+                    .sign_tapscript_allowing(&path, &parts.spend(), allow)?
+            }
+        };
         Ok(sig.to_vec().to_hex())
+    }
+
+    /// The genesis hash (display hex) of the network this signer was made for.
+    #[wasm_bindgen(js_name = genesisHash)]
+    pub fn genesis_hash(&self) -> String {
+        self.network.genesis_hash().to_string()
+    }
+
+    fn check_genesis(&self, genesis: &lwk_wollet::elements::BlockHash) -> Result<(), Error> {
+        let mine = self.network.genesis_hash();
+        if *genesis != mine {
+            return Err(Error::Generic(format!(
+                "the spend is for the chain with genesis {genesis}, not this signer's network ({mine})"
+            )));
+        }
+        Ok(())
     }
 
     /// Sign an Arca message for `OP_CHECKSIGFROMSTACK` with the key at `path`.
@@ -192,14 +231,27 @@ impl Signer {
     /// shape) and `digestHex` the 32-byte hash the caller expects to be
     /// signed. The signer rebuilds the digest from the fields and refuses when
     /// the two differ, so it never signs a hash whose meaning it has not
-    /// checked. Returns a 64-byte BIP340 signature as hex, made with no
-    /// auxiliary randomness.
+    /// checked. A rebind or a release for another chain than this signer's
+    /// network is refused.
+    ///
+    /// `limits` bounds what a rebind leaves uncommitted, which goes to
+    /// whoever broadcasts: `{ feeFloorPerKvb }`, the relay floor in atoms of
+    /// the coin's asset per 1,000 vbytes, gives the specification's fee
+    /// margin, four times the floor for the spend; `{ maxUncommitted }` sets
+    /// the ceiling in atoms. Without either, a rebind must commit the whole
+    /// coin. Amounts are numbers or decimal strings. A rebind built from the
+    /// leaf's record is also refused when the key at `path` is not the
+    /// record's owner key or the coin is not the record's.
+    ///
+    /// Returns a 64-byte BIP340 signature as hex, made with no auxiliary
+    /// randomness.
     #[wasm_bindgen(js_name = signCsfs)]
     pub fn sign_csfs(
         &self,
         path: &str,
         message: JsValue,
         digest_hex: &str,
+        limits: JsValue,
     ) -> Result<String, Error> {
         use lwk_wollet::elements::hex::ToHex;
         let path = parse_path(path)?;
@@ -207,7 +259,8 @@ impl Signer {
         let digest: [u8; 32] = crate::tapscript::unhex(digest_hex, "digest")?
             .try_into()
             .map_err(|_| Error::Generic("digest must be 32 bytes".into()))?;
-        let sig = self.inner.sign_csfs(&path, &message, &digest)?;
+        let policy = crate::csfs::parse_limits(limits, self.network.genesis_hash())?;
+        let sig = self.inner.sign_csfs(&path, &message, &digest, &policy)?;
         Ok(sig.serialize().to_hex())
     }
 

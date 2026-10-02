@@ -15,6 +15,7 @@ bip39 = { version = "2.0.0", features = ["rand"] }
 elements-miniscript.workspace = true
 thiserror = { workspace = true }
 base64 = "0.21.7"
+arca-covenant = { workspace = true, optional = true }
 
 [dev-dependencies]
 lwk_test_util = { version = "0.18.0" }
@@ -25,6 +26,8 @@ default = ["jade", "amp0"]
 jade = ["lwk_jade"]
 ledger = ["lwk_ledger"]
 amp0 = []
+# Arca: sign a leaf's rebindable path from its record (`csfs::RebindSource::leaf`).
+ark = ["arca-covenant"]
 
 [package.metadata.docs.rs]
 all-features = true
