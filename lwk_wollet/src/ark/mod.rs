@@ -10,8 +10,13 @@
 //!
 //! - [`keys`]: one key for every leaf instance, derived from the leaf's random
 //!   owner nonce, so a restore needs no index scan;
-//! - the scripts, the record and the client's checks, re-exported from the
-//!   Arca library (`arca-covenant`, [`covenant`]), never written a second time.
+//! - [`verify`]: a leaf checked against its round, a coin received out of
+//!   round checked back to its rounds, and a leaf checked again after a
+//!   rollback;
+//! - [`store`]: the wallet's leaves over the kit's store;
+//! - the scripts, the leaf and coin records and the client's checks,
+//!   re-exported from the Arca library (`arca-covenant`, [`covenant`]), never
+//!   written a second time.
 //!
 //! The signers are in `lwk_signer`: `SwSigner::sign_tapscript` for the exit
 //! and the other ordinary script-path signatures, `SwSigner::sign_csfs` for
@@ -34,8 +39,9 @@ pub mod verify;
 /// client's checks on a round.
 pub use arca_covenant as covenant;
 pub use arca_covenant::{
-    check_round, Branch, Chain, ClockSchedule, ExplicitOutput, LeafId, LeafPolicy, LeafRecord,
-    MedianTime, RecordError, RelativeTime, RoundCheckFailure, Template, ValidLeaf, WalletPolicy,
+    check_round, Branch, Chain, ClockSchedule, CoinRecord, ExplicitOutput, LeafId, LeafPolicy,
+    LeafRecord, MedianTime, NewLeaf, RecordError, RelativeTime, RoundCheckFailure, Template,
+    Transfer, TransferError, TransferInput, ValidCoin, ValidLeaf, ValidOrigin, WalletPolicy,
 };
 
 /// Errors from the Arca module.
