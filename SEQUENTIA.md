@@ -262,6 +262,15 @@ Changes by file:
     repository's `regtest/vectors/records.json`, copied unchanged; every
     record in it verifies against its round, and every refusal vector is
     refused by its kind.
+  - `store.rs`: `ArkStore`, the wallet's leaves over any of the kit's stores
+    (`Arc<dyn DynStore>`), every key under `ark/`: each leaf's record by leaf
+    id with the round txid and batch output index it was verified against,
+    the entry's unlock preimage, unroll authorisations by node level, and the
+    owner nonces of leaves asked for whose records have not arrived. Nothing
+    the mnemonic rebuilds is kept, and no key ever is. It refuses a second
+    leaf under an owner nonce or key it already holds, a preimage that does
+    not open the record's unlock hash, and an unroll authorisation that is
+    not the record owner's signature over that node's message.
 - `src/adaptor.rs` (feature `adaptor`): BIP340 Schnorr adaptor signatures
   (`adaptor_sign`, `adaptor_verify`, `adaptor_complete`, `adaptor_extract`),
   built in-house on `secp256k1` point arithmetic because the vendored
