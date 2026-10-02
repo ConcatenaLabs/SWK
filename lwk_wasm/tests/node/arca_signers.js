@@ -155,6 +155,28 @@ assert.throws(() => signer.signCsfs('m/6/0', rebindElsewhere, lwk.csfsDigest(reb
     /not this wallet's/);
 assert.throws(() => lwk.csfsDigest({ ...rebind, source: { ...rebind.source, path: 'exit' } }), /unknown rebindable path/);
 
+// What a reassignment leaves is reckoned over every input (review R4, F9):
+// a checkpoint of 100,000 atoms over outputs of 150,000 and 10,000.
+const spk = (b) => '5120' + b.repeat(32);
+const reassign = {
+    kind: 'rebind',
+    source: { path: 'checkpoint', leafId: '07'.repeat(32), genesisHash: genesis, salt: '09'.repeat(32) },
+    assetIn: X, valueIn: '100000',
+    outputs: [{ asset: X, value: 150000, scriptPubkey: spk('01') }, { asset: X, value: 10000, scriptPubkey: spk('02') }],
+};
+const rd = lwk.csfsDigest(reassign);
+assert.ok(!lwk.csfsDescribe(reassign).lines.some((l) => l.includes('none of it is left')));
+for (const limits of [undefined, { maxUncommitted: '0' }, { maxUncommitted: '18446744073709551615' }, { feeFloorPerKvb: 1000 }]) {
+    assert.throws(() => signer.signCsfs('m/6/0', reassign, rd, limits), /other inputs are not named/);
+}
+const both = { ...reassign, otherInputs: [{ asset: X, value: '100000' }] };
+assert.strictEqual(lwk.csfsDigest(both), rd);
+assert.ok(lwk.csfsDescribe(both).lines.some((l) => l.includes('the inputs hold 200000 atoms and the committed outputs take 160000: 40000 atoms are left to whoever broadcasts')));
+assert.throws(() => signer.signCsfs('m/6/0', both, rd), /leave 40000 atoms .* the ceiling is 0/);
+assert.strictEqual(signer.signCsfs('m/6/0', both, rd, { maxUncommitted: 40000 }).length, 128);
+assert.throws(() => signer.signCsfs('m/6/0', { ...reassign, otherInputs: [{ asset: X, value: 50000 }] }, rd, { maxUncommitted: 40000 }),
+    /an input is missing/);
+
 const exit = v.spends.find((s) => s.name === 'leaf/exit');
 const tap = (type, g, allow) => signer.signTapscript('m/6/0', exit.tx, 0, exit.prevouts, exit.witness[1], exit.witness[2], type, g, allow);
 assert.throws(() => tap(0, genesis), /is not pushed in the leaf script/);

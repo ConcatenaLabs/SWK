@@ -152,6 +152,7 @@ mod tests {
                 value: output.value,
                 script_pubkey: output.script_pubkey.clone(),
             }],
+            other_inputs: Some(vec![]),
         });
         assert_eq!(
             signer_msg.digest().unwrap().to_hex(),
