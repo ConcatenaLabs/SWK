@@ -32,8 +32,9 @@
 //!   payment made in a round) must leave the policy's acceptance horizon,
 //!   by default 27 days ([`verify_leaf`]);
 //! - a leaf or a coin the wallet is given out of round ([`verify_round`],
-//!   [`verify_coin`]), and a leaf it already holds when it checks it again
-//!   ([`recheck`]), need only leave the exit deadline:
+//!   [`verify_coin`]), and a leaf it already holds, when it checks it again
+//!   ([`recheck`]) or finds it in a restore ([`verify_held_leaf`]), need only
+//!   leave the exit deadline:
 //!   `E_0 ≥ now + EXIT_DEADLINE_MARGIN`. These build that policy from the
 //!   caller's ([`exit_deadline_policy`]) and ignore its horizon, so a leaf
 //!   is not refused, and unrolled, merely for being days old.
@@ -186,6 +187,25 @@ pub fn verify_leaf(
     Ok(VerifiedLeaf::new(record, valid, true))
 }
 
+/// Verify the wallet's own leaf that it already holds, such as one found in a
+/// restore: as [`verify_leaf`], with the exit deadline in place of the
+/// acceptance horizon ([`exit_deadline_policy`]).
+pub fn verify_held_leaf(
+    record: &LeafRecord,
+    round: &Transaction,
+    policy: &WalletPolicy,
+    owner: &XOnlyPublicKey,
+    owner_nonce: &OwnerNonce,
+) -> Result<VerifiedLeaf, VerifyError> {
+    verify_leaf(
+        record,
+        round,
+        &exit_deadline_policy(policy),
+        owner,
+        owner_nonce,
+    )
+}
+
 /// Verify a leaf the wallet does not own, such as the coin a sender is about
 /// to give it: the same checks as [`verify_leaf`] without the owner's key and
 /// nonce, and with the exit deadline in place of the acceptance horizon
@@ -258,10 +278,7 @@ pub fn recheck(
     owner: &XOnlyPublicKey,
     owner_nonce: &OwnerNonce,
 ) -> Result<Recheck, VerifyError> {
-    let valid = record
-        .validate(round, &exit_deadline_policy(policy), owner, owner_nonce)
-        .map_err(VerifyError)?;
-    let now = VerifiedLeaf::new(record, valid, true);
+    let now = verify_held_leaf(record, round, policy, owner, owner_nonce)?;
     if now.round_txid == *previous_round {
         Ok(Recheck::Same(now))
     } else {
@@ -711,8 +728,14 @@ mod tests {
             let mut none = p;
             none.horizon = 0;
             assert!(recheck_at(&c.round, &none).is_ok());
-            // A leaf received out of round needs the same and no more.
+            // A leaf received out of round, or found in a restore, needs the
+            // same and no more.
             assert!(!verify_round(&c.record, &c.round, &p).unwrap().owned);
+            assert!(
+                verify_held_leaf(&c.record, &c.round, &none, &c.owner, &c.nonce)
+                    .unwrap()
+                    .owned
+            );
         }
         // From one second past the exit deadline, the exit must have started:
         // the re-check refuses, whatever horizon the caller passes.
@@ -725,6 +748,8 @@ mod tests {
                 assert!(err.to_string().contains("first expiry"), "{err}");
             }
             let err = verify_round(&c.record, &c.round, &p).unwrap_err();
+            assert_eq!(err.failed(), "wallet policy", "{err}");
+            let err = verify_held_leaf(&c.record, &c.round, &p, &c.owner, &c.nonce).unwrap_err();
             assert_eq!(err.failed(), "wallet policy", "{err}");
         }
         // A new leaf taken from a round still needs the acceptance horizon:
