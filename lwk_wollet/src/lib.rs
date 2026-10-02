@@ -93,6 +93,8 @@ pub mod amp0;
 #[cfg(feature = "amp2")]
 pub mod amp2;
 
+#[cfg(feature = "ark")]
+pub mod ark;
 mod async_util;
 mod cache;
 pub mod clients;
