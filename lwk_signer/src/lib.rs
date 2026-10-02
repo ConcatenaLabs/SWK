@@ -7,7 +7,9 @@
 #![warn(missing_docs)]
 
 mod software;
+pub mod tapscript;
 pub use crate::software::{sign_with_seckey, NewError, SignError, SwSigner};
+pub use crate::tapscript::{ScriptPathSpend, TapscriptError};
 pub use bip39;
 
 use elements_miniscript::bitcoin::bip32::{self, DerivationPath, Fingerprint};

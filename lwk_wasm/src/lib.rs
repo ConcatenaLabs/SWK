@@ -57,6 +57,7 @@ mod seqdex_swap;
 mod serial;
 mod signer;
 mod store;
+mod tapscript;
 #[cfg(feature = "simplicity")]
 mod tweak;
 mod tx_builder;
@@ -161,6 +162,7 @@ pub use staking_rewards::{
 pub use seqdex_swap::SwapRequest;
 pub use signer::Signer;
 pub use store::{JsStorage, JsStoreLink, JsTestStore};
+pub use tapscript::tapscript_sighash;
 #[cfg(feature = "simplicity")]
 pub use tweak::Tweak;
 pub use tx_builder::TxBuilder;

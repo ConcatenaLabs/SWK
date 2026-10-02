@@ -2733,6 +2733,7 @@ dependencies = [
  "lwk_jade",
  "lwk_ledger",
  "lwk_test_util",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

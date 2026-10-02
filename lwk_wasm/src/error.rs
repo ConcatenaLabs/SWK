@@ -55,6 +55,9 @@ pub enum Error {
     SignerNew(#[from] lwk_signer::NewError),
 
     #[error(transparent)]
+    Tapscript(#[from] lwk_signer::TapscriptError),
+
+    #[error(transparent)]
     Jade(#[from] lwk_jade::Error),
 
     #[error(transparent)]
@@ -198,6 +201,7 @@ impl Error {
             Error::Bip32(_) => "Bip32",
             Error::Sign(_) => "Sign",
             Error::SignerNew(_) => "SignerNew",
+            Error::Tapscript(_) => "Tapscript",
             Error::Jade(_) => "Jade",
             Error::Qr(_) => "Qr",
             Error::Keyorigin(_) => "Keyorigin",
