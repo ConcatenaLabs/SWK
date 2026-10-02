@@ -239,9 +239,13 @@ impl Signer {
     /// the coin's asset per 1,000 vbytes, gives the specification's fee
     /// margin, four times the floor for the spend; `{ maxUncommitted }` sets
     /// the ceiling in atoms. Without either, a rebind must commit the whole
-    /// coin. Amounts are numbers or decimal strings. A rebind built from the
-    /// leaf's record is also refused when the key at `path` is not the
-    /// record's owner key or the coin is not the record's.
+    /// coin. What is left is reckoned over the transaction's inputs: the
+    /// coin and the rebind's `otherInputs`; without that field a reassignment
+    /// (`path: "checkpoint"`), or a rebind whose outputs take more of the
+    /// coin's asset than it holds, is refused under any limit. Amounts are
+    /// numbers or decimal strings. A rebind built from the leaf's record is
+    /// also refused when the key at `path` is not the record's owner key or
+    /// the coin is not the record's.
     ///
     /// Returns a 64-byte BIP340 signature as hex, made with no auxiliary
     /// randomness.

@@ -117,8 +117,9 @@ script-path signing for covenant protocols whose leaves name the wallet's key.
 - `src/csfs.rs`: `SwSigner::sign_csfs(path, &ArcaMessage, &digest, &CsfsPolicy)`,
   a BIP340 signature over a 32-byte digest for `OP_CHECKSIGFROMSTACK`, for the
   three messages Arca's scripts verify: `RebindMessage` (a rebindable path: the
-  output it spends, the spent coin's asset and value, and the 1 to 4 committed
-  outputs), `UnrollAuthorisation` (a node's children and the median time `t`)
+  output it spends, the spent coin's asset and value, the 1 to 4 committed
+  outputs, and the transaction's other inputs, which the digest does not name),
+  `UnrollAuthorisation` (a node's children and the median time `t`)
   and `ReleaseMessage` (genesis hash and a lowest node's children).
   The caller presents the digest together with the fields it was built from;
   the signer rebuilds the digest and refuses when the two differ, so it never
@@ -137,8 +138,17 @@ script-path signing for covenant protocols whose leaves name the wallet's key.
     uncommitted, which goes to whoever broadcasts. The default,
     `CsfsPolicy::new(genesis, floor_per_kvb)`, is the specification's fee
     margin: four times the relay floor (atoms of the coin's asset per 1,000
-    vbytes) for the spend's measured size; `with_ceiling` sets the ceiling in
-    atoms.
+    vbytes) for the spend's measured size, once for each input of the coin's
+    asset; `with_ceiling` sets the ceiling in atoms.
+  - What a rebind leaves is reckoned over the whole transaction
+    (`RebindMessage::uncommitted`): its inputs of the coin's asset, the coin
+    and `other_inputs`, less what the committed outputs take, since a
+    signature names no other input and every owner in a reassignment signs
+    the same outputs. `other_inputs` is `Some(vec![])` for a coin spent
+    alone. When it is `None`, the signer refuses, under any ceiling, a
+    reassignment (the checkpoint path) and any rebind whose outputs take more
+    of the coin's asset than the coin holds; it refuses named inputs that
+    hold less of an asset than the outputs take.
   - `ArcaMessage::describe` gives the plain-language lines a wallet shows
     before asking for approval: the path and the leaf id, the outputs, and the
     amount in each asset the committed outputs leave to whoever broadcasts.
@@ -386,9 +396,11 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   `{ asset, value, scriptPubkey }`; asset ids and the genesis hash in display
   hex, amounts in atoms as a number or a decimal string. A rebind's `source`
   is the leaf's record, `{ record }` (its JSON text or its binary form as hex), or
-  `{ path, leafId, genesisHash, salt }`. `limits` is `{ feeFloorPerKvb }` for
-  the specification's fee margin or `{ maxUncommitted }` for a ceiling in
-  atoms; without it a rebind must commit the whole coin.
+  `{ path, leafId, genesisHash, salt }`; its `otherInputs`, `[{ asset, value }]`,
+  are the transaction's other inputs, `[]` for a coin spent alone. `limits` is
+  `{ feeFloorPerKvb }` for the specification's fee margin or
+  `{ maxUncommitted }` for a ceiling in atoms; without it a rebind must commit
+  the whole coin.
 - `src/ark.rs`: Arca leaves. `arkNewOwnerNonce()`, `arkLeafKeyPath(account,
   ownerNonce)`, `Signer.arkLeafKey(account, ownerNonce)` and
   `Signer.arkRestoreKey(account, record)` for the leaf keys;

@@ -39,10 +39,21 @@
 //! signing key is the record's owner key and that the coin is the record's
 //! asset and value. [`SwSigner::sign_csfs`] takes a [`CsfsPolicy`] and
 //! refuses a message for another chain than the wallet's and a rebind that
-//! leaves more of the coin uncommitted than the policy's ceiling, by default
-//! the specification's fee margin: four times the relay floor for the spend.
+//! leaves more uncommitted than the policy's ceiling, by default the
+//! specification's fee margin: four times the relay floor for the spend.
 //! [`ArcaMessage::describe`] names the leaf, the path, and the amount in each
 //! asset left to whoever broadcasts.
+//!
+//! What is left is reckoned over the whole transaction. A signature names no
+//! other input, so when several coins are spent into one set of outputs (a
+//! reassignment of several checkpoints, every owner signing the same
+//! outputs), what the transaction leaves is what all of them hold less what
+//! the outputs take. A rebind therefore names the transaction's other inputs
+//! ([`RebindMessage::other_inputs`]), none for a coin spent alone. When they
+//! are not named, the signer refuses a reassignment (the checkpoint path),
+//! whose outputs are shared by every input it spends, and any rebind whose
+//! outputs take more of the coin's asset than the coin holds, under any
+//! ceiling.
 
 use elements_miniscript::elements::{
     bitcoin::bip32::{self, DerivationPath},
@@ -107,6 +118,23 @@ pub enum CsfsError {
         message: String,
         /// The wallet's genesis hash, display hex.
         wallet: String,
+    },
+
+    /// What the transaction leaves to whoever broadcasts depends on inputs
+    /// the rebind does not name.
+    #[error("the transaction's other inputs are not named, and {0}: what it leaves to whoever broadcasts depends on them")]
+    InputsUnknown(String),
+
+    /// The committed outputs take more of an asset than the named inputs
+    /// hold, so an input is missing from them.
+    #[error("the committed outputs take {committed} atoms of asset {asset}, more than the {held} the named inputs hold: an input is missing")]
+    InputsShort {
+        /// The asset, display hex.
+        asset: String,
+        /// What the outputs take.
+        committed: u128,
+        /// What the named inputs hold.
+        held: u128,
     },
 
     /// A rebind leaves more of the coin uncommitted than the ceiling.
@@ -360,6 +388,17 @@ impl RebindSource {
     }
 }
 
+/// Another input of the transaction a rebind is spent in: a coin the
+/// committed outputs draw on as well. For a reassignment, another checkpoint
+/// and its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtherInput {
+    /// The coin's asset.
+    pub asset: AssetId,
+    /// The coin's value, in atoms.
+    pub value: u64,
+}
+
 /// The spend of an Arca output through a rebindable path, which the parties
 /// each sign: the coin being spent and the outputs it may move into.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,20 +411,85 @@ pub struct RebindMessage {
     pub value_in: u64,
     /// The outputs at indices `0..m`, in order.
     pub outputs: Vec<CommittedOutput>,
+    /// The transaction's other inputs: `Some(vec![])` when this coin is
+    /// spent alone, `None` when they are not known. They are not part of the
+    /// digest, which names no other input; they are what the signer reckons
+    /// the whole transaction's remainder from.
+    pub other_inputs: Option<Vec<OtherInput>>,
 }
 
 impl RebindMessage {
-    /// The atoms of the coin's asset that the committed outputs leave
-    /// uncommitted. Whoever broadcasts the transaction takes them, as its fee
-    /// or as an output of their own.
-    pub fn uncommitted(&self) -> u64 {
-        let committed: u128 = self
-            .outputs
+    /// What the named inputs hold in each asset, the coin's asset first, or
+    /// `None` when the other inputs are not named.
+    pub fn inputs_by_asset(&self) -> Option<Vec<(AssetId, u128)>> {
+        let others = self.other_inputs.as_ref()?;
+        let mut held: Vec<(AssetId, u128)> = vec![(self.asset_in, self.value_in as u128)];
+        for i in others {
+            match held.iter_mut().find(|(a, _)| *a == i.asset) {
+                Some((_, v)) => *v += i.value as u128,
+                None => held.push((i.asset, i.value as u128)),
+            }
+        }
+        Some(held)
+    }
+
+    /// The inputs of the coin's asset: this coin and every named other one of
+    /// that asset. 1 when the others are not named.
+    pub fn inputs_of_asset(&self) -> usize {
+        1 + self
+            .other_inputs
             .iter()
-            .filter(|o| o.asset == self.asset_in)
-            .map(|o| o.value as u128)
-            .sum();
-        (self.value_in as u128).saturating_sub(committed) as u64
+            .flatten()
+            .filter(|i| i.asset == self.asset_in)
+            .count()
+    }
+
+    /// The atoms of the coin's asset that the transaction leaves
+    /// uncommitted: what its inputs of that asset hold less what the
+    /// committed outputs take. Whoever broadcasts the transaction takes them,
+    /// as its fee or as an output of their own.
+    ///
+    /// Refuses ([`CsfsError::InputsUnknown`]) when that depends on inputs
+    /// the rebind does not name: a reassignment (the checkpoint path), or
+    /// outputs that take more of the coin's asset than the coin holds. Refuses
+    /// ([`CsfsError::InputsShort`]) when the outputs take more of any asset
+    /// than the named inputs hold.
+    pub fn uncommitted(&self) -> Result<u64, CsfsError> {
+        let committed = self.committed_by_asset();
+        let taken = committed[0].1;
+        match self.inputs_by_asset() {
+            None => {
+                if self.source.path == RebindPath::Checkpoint {
+                    return Err(CsfsError::InputsUnknown(
+                        "a reassignment's outputs are shared by every input it spends".into(),
+                    ));
+                }
+                if taken > self.value_in as u128 {
+                    return Err(CsfsError::InputsUnknown(format!(
+                        "the committed outputs take {taken} atoms of asset {}, more than this coin's {}",
+                        self.asset_in, self.value_in
+                    )));
+                }
+                Ok((self.value_in as u128 - taken) as u64)
+            }
+            Some(held) => {
+                for (asset, c) in &committed {
+                    let h = held
+                        .iter()
+                        .find(|(a, _)| a == asset)
+                        .map(|(_, v)| *v)
+                        .unwrap_or(0);
+                    if *c > h {
+                        return Err(CsfsError::InputsShort {
+                            asset: asset.to_string(),
+                            committed: *c,
+                            held: h,
+                        });
+                    }
+                }
+                Ok((held[0].1 - taken).min(u64::MAX as u128) as u64)
+            }
+        }
     }
 
     /// What the committed outputs take in each asset, the coin's asset first.
@@ -456,14 +560,17 @@ impl CsfsPolicy {
         }
     }
 
-    /// The most `message` may leave uncommitted.
+    /// The most `message` may leave uncommitted. The fee margin is one
+    /// spend's for each input of the coin's asset, since each signer of a
+    /// reassignment leaves its own.
     pub fn ceiling_for(&self, message: &RebindMessage) -> u64 {
         match self.ceiling {
             Ceiling::Atoms(a) => a,
             Ceiling::FeeMargin { floor_per_kvb } => fee_margin(
                 floor_per_kvb,
                 message.source.path.spend_vsize(message.outputs.len()),
-            ),
+            )
+            .saturating_mul(message.inputs_of_asset() as u64),
         }
     }
 }
@@ -637,21 +744,78 @@ impl ArcaMessage {
                     ),
                 ];
                 v.extend(m.outputs.iter().enumerate().map(|(i, o)| out_line(i, o)));
-                for (asset, committed) in m.committed_by_asset() {
-                    v.push(if asset != m.asset_in {
-                        format!(
-                            "Of asset {asset}, the committed outputs take {committed} atoms, which other inputs must pay; this coin holds none and leaves none uncommitted."
-                        )
-                    } else if committed >= m.value_in as u128 {
-                        format!(
-                            "Of asset {asset}, the committed outputs take {committed} atoms, the whole coin: none of it is left to whoever broadcasts."
-                        )
-                    } else {
-                        format!(
-                            "Of asset {asset}, the committed outputs take {committed} atoms and leave {} atoms uncommitted: whoever broadcasts the transaction takes them, as its fee or otherwise.",
-                            m.uncommitted()
-                        )
-                    });
+                match m.inputs_by_asset() {
+                    Some(held) => {
+                        let others = m.other_inputs.as_deref().unwrap_or_default();
+                        v.push(if others.is_empty() {
+                            "The transaction spends this coin alone.".to_string()
+                        } else {
+                            format!(
+                                "The transaction also spends {} other input{}: {}.",
+                                others.len(),
+                                if others.len() == 1 { "" } else { "s" },
+                                others
+                                    .iter()
+                                    .map(|i| format!("{} atoms of asset {}", i.value, i.asset))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        });
+                        let mut assets: Vec<AssetId> = held.iter().map(|(a, _)| *a).collect();
+                        for (a, _) in m.committed_by_asset() {
+                            if !assets.contains(&a) {
+                                assets.push(a);
+                            }
+                        }
+                        let committed = m.committed_by_asset();
+                        for asset in assets {
+                            let h = held.iter().find(|(a, _)| *a == asset).map_or(0, |x| x.1);
+                            let c = committed
+                                .iter()
+                                .find(|(a, _)| *a == asset)
+                                .map_or(0, |x| x.1);
+                            v.push(match c.cmp(&h) {
+                                std::cmp::Ordering::Greater => format!(
+                                    "Of asset {asset}, the committed outputs take {c} atoms, more than the {h} the inputs hold: an input is missing, and the signer refuses."
+                                ),
+                                std::cmp::Ordering::Equal => format!(
+                                    "Of asset {asset}, the inputs hold {h} atoms and the committed outputs take all of them: none is left to whoever broadcasts."
+                                ),
+                                std::cmp::Ordering::Less => format!(
+                                    "Of asset {asset}, the inputs hold {h} atoms and the committed outputs take {c}: {} atoms are left to whoever broadcasts the transaction, as its fee or otherwise.",
+                                    h - c
+                                ),
+                            });
+                        }
+                    }
+                    None => {
+                        if m.source.path == RebindPath::Checkpoint {
+                            v.push(
+                                "This is a reassignment, whose outputs are shared by every input it spends; those inputs are not named, so what it leaves to whoever broadcasts cannot be known, and the signer refuses.".to_string()
+                            );
+                        }
+                        for (asset, committed) in m.committed_by_asset() {
+                            v.push(if asset != m.asset_in {
+                                format!(
+                                    "Of asset {asset}, the committed outputs take {committed} atoms, which other inputs must pay; this coin holds none."
+                                )
+                            } else if committed > m.value_in as u128 {
+                                format!(
+                                    "Of asset {asset}, the committed outputs take {committed} atoms, more than this coin's {}: other inputs pay the rest, and what the transaction leaves to whoever broadcasts depends on them, which are not named; the signer refuses.",
+                                    m.value_in
+                                )
+                            } else if committed == m.value_in as u128 {
+                                format!(
+                                    "Of asset {asset}, the committed outputs take {committed} atoms, the whole coin: none of it is left to whoever broadcasts."
+                                )
+                            } else {
+                                format!(
+                                    "Of asset {asset}, the committed outputs take {committed} atoms and leave {} atoms uncommitted: whoever broadcasts the transaction takes them, as its fee or otherwise.",
+                                    m.value_in as u128 - committed
+                                )
+                            });
+                        }
+                    }
                 }
                 v.push(format!(
                     "The signature is valid for any coin of {} atoms of asset {} under this script; the leaf's salt {} makes the script unique to it.",
@@ -713,10 +877,12 @@ impl SwSigner {
     /// signature made with no auxiliary randomness.
     ///
     /// `policy` names the wallet's chain, and a rebind or a release for any
-    /// other chain is refused. A rebind is refused when it leaves more of the
-    /// coin uncommitted than the policy's ceiling; when it was built from the
-    /// leaf's record, also when the key at `path` is not the record's owner key
-    /// or the coin is not the record's asset and value.
+    /// other chain is refused. A rebind is refused when the transaction
+    /// leaves more of the coin's asset uncommitted than the policy's ceiling,
+    /// or when that cannot be known because its other inputs are not named
+    /// ([`RebindMessage::uncommitted`]); when it was built from the leaf's
+    /// record, also when the key at `path` is not the record's owner key or
+    /// the coin is not the record's asset and value.
     pub fn sign_csfs(
         &self,
         path: &DerivationPath,
@@ -765,7 +931,7 @@ impl SwSigner {
                 }
             }
             let ceiling = policy.ceiling_for(m);
-            let uncommitted = m.uncommitted();
+            let uncommitted = m.uncommitted()?;
             if uncommitted > ceiling {
                 return Err(CsfsError::AboveCeiling {
                     asset: m.asset_in.to_string(),
@@ -957,11 +1123,27 @@ mod tests {
                 let id: [u8; 32] = coin.script_pubkey.as_bytes()[2..].try_into().unwrap();
                 let source = RebindSource::new(vector_path(spend), id, g, salt);
                 assert_eq!(source.leaf_constant().to_hex(), k.as_str().unwrap());
+                // The transaction's other inputs, from its prevouts.
+                let others: Vec<OtherInput> = spend["prevouts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, p)| {
+                        let o = explicit(&deserialize::<TxOut>(&bytes(p)).unwrap());
+                        OtherInput {
+                            asset: o.asset,
+                            value: o.value,
+                        }
+                    })
+                    .collect();
                 let msg = ArcaMessage::Rebind(RebindMessage {
                     source,
                     asset_in: coin.asset,
                     value_in: coin.value,
                     outputs: tx.output[..m].iter().map(explicit).collect(),
+                    other_inputs: Some(others),
                 });
                 sigs += check(&v, &msg, &spend["message"], &spend["digest"], &labelled);
                 rebind += 1;
@@ -1025,6 +1207,7 @@ mod tests {
             asset_in: kids[0].asset,
             value_in: kids[0].value,
             outputs: vec![kids[1].clone()],
+            other_inputs: None,
         });
         let unroll = ArcaMessage::Unroll(UnrollAuthorisation {
             children: kids.clone(),
@@ -1194,8 +1377,9 @@ mod tests {
                 value: 1_000,
                 script_pubkey: mine,
             }],
+            other_inputs: None,
         };
-        assert_eq!(rebind.uncommitted(), 9_999_000);
+        assert_eq!(rebind.uncommitted().unwrap(), 9_999_000);
         let msg = ArcaMessage::Rebind(rebind.clone());
         let text = msg.describe().join("\n");
         assert!(
@@ -1277,6 +1461,7 @@ mod tests {
                 asset_in: x,
                 value_in: 10_000_000,
                 outputs: vec![out.clone()],
+                other_inputs: None,
             })
         };
         let (a, b) = (
@@ -1322,6 +1507,7 @@ mod tests {
                     value: 4_000,
                     script_pubkey: Script::from(vec![0x51]),
                 }],
+                other_inputs: None,
             });
             let first = msg.describe()[0].clone();
             assert!(
@@ -1381,6 +1567,184 @@ mod tests {
             .sign_csfs(&master, &rebind, &rebind.digest().unwrap(), &elsewhere)
             .unwrap_err();
         assert!(matches!(err, CsfsError::WrongChain { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_reassignment_is_reckoned_over_every_input() {
+        // Review R4, F9: a checkpoint of 100,000 atoms rebound over outputs
+        // of 150,000 and 10,000 of the same asset was described as "the
+        // whole coin: none of it is left to whoever broadcasts" and signed
+        // under a ceiling of 0; the transaction spending it with a second
+        // checkpoint of 100,000 leaves 40,000 to whoever broadcasts.
+        let v = vectors();
+        let g = genesis(&v);
+        let x = x_asset(&v);
+        let y = AssetId::from_slice(&[0x55; 32]).unwrap();
+        let signer = signer_for(v["inputs"]["keys"]["A5"]["secret"].as_str().unwrap());
+        let master = DerivationPath::master();
+        let spk = |b: u8| Script::from([&[0x51, 0x20][..], &[b; 32][..]].concat());
+        let out = |asset: AssetId, value: u64, b: u8| CommittedOutput {
+            asset,
+            value,
+            script_pubkey: spk(b),
+        };
+        let msg =
+            |path: RebindPath, outputs: Vec<CommittedOutput>, others: Option<Vec<OtherInput>>| {
+                ArcaMessage::Rebind(RebindMessage {
+                    source: RebindSource::new(path, [7; 32], g, [9; 32]),
+                    asset_in: x,
+                    value_in: 100_000,
+                    outputs,
+                    other_inputs: others,
+                })
+            };
+        let sign = |m: &ArcaMessage, policy: CsfsPolicy| {
+            signer.sign_csfs(&master, m, &m.digest().unwrap(), &policy)
+        };
+        let probe = vec![out(x, 150_000, 1), out(x, 10_000, 2)];
+
+        // The other inputs not named: refused under any ceiling, and the
+        // description says why.
+        let unknown = msg(RebindPath::Checkpoint, probe.clone(), None);
+        let text = unknown.describe().join("\n");
+        assert!(!text.contains("none of it is left"), "{text}");
+        assert!(
+            text.contains("more than this coin's 100000: other inputs pay the rest"),
+            "{text}"
+        );
+        assert!(text.contains("This is a reassignment"), "{text}");
+        for ceiling in [0, 40_000, u64::MAX] {
+            let err = sign(&unknown, CsfsPolicy::with_ceiling(g, ceiling)).unwrap_err();
+            assert!(matches!(err, CsfsError::InputsUnknown(_)), "{err}");
+        }
+        let err = sign(&unknown, CsfsPolicy::new(g, 1_000)).unwrap_err();
+        assert!(matches!(err, CsfsError::InputsUnknown(_)), "{err}");
+
+        // Named, the second checkpoint: 40,000 left, said and capped.
+        let named = msg(
+            RebindPath::Checkpoint,
+            probe.clone(),
+            Some(vec![OtherInput {
+                asset: x,
+                value: 100_000,
+            }]),
+        );
+        let ArcaMessage::Rebind(r) = &named else {
+            unreachable!()
+        };
+        assert_eq!(r.uncommitted().unwrap(), 40_000);
+        let text = named.describe().join("\n");
+        assert!(
+            text.contains("the inputs hold 200000 atoms and the committed outputs take 160000: 40000 atoms are left to whoever broadcasts"),
+            "{text}"
+        );
+        assert!(text.contains("also spends 1 other input"), "{text}");
+        let err = sign(&named, CsfsPolicy::with_ceiling(g, 0)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CsfsError::AboveCeiling {
+                    uncommitted: 40_000,
+                    ceiling: 0,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        // The fee margin is one spend's per input of the asset: 2 × 1,436.
+        let policy = CsfsPolicy::new(g, 1_000);
+        assert_eq!(policy.ceiling_for(r), 2 * 1_436);
+        let err = sign(&named, policy).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CsfsError::AboveCeiling {
+                    uncommitted: 40_000,
+                    ceiling: 2_872,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        sign(&named, CsfsPolicy::with_ceiling(g, 40_000)).unwrap();
+
+        // An honest reassignment of the two: each signer leaves its margin.
+        let honest = msg(
+            RebindPath::Checkpoint,
+            vec![out(x, 150_000, 1), out(x, 50_000 - 2 * 1_436, 2)],
+            Some(vec![OtherInput {
+                asset: x,
+                value: 100_000,
+            }]),
+        );
+        sign(&honest, CsfsPolicy::new(g, 1_000)).unwrap();
+
+        // A checkpoint spent alone must say so; then it is the coin alone.
+        let alone = vec![out(x, 100_000 - 1_120, 1)];
+        let err = sign(&msg(RebindPath::Checkpoint, alone.clone(), None), policy).unwrap_err();
+        assert!(matches!(err, CsfsError::InputsUnknown(_)), "{err}");
+        let said = msg(RebindPath::Checkpoint, alone, Some(vec![]));
+        assert!(said
+            .describe()
+            .join("\n")
+            .contains("spends this coin alone"));
+        sign(&said, policy).unwrap();
+
+        // Named inputs that cannot pay the outputs: one is missing.
+        let short = msg(
+            RebindPath::Checkpoint,
+            probe.clone(),
+            Some(vec![OtherInput {
+                asset: x,
+                value: 50_000,
+            }]),
+        );
+        let err = sign(&short, CsfsPolicy::with_ceiling(g, u64::MAX)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CsfsError::InputsShort {
+                    committed: 160_000,
+                    held: 150_000,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+
+        // A leaf's collaborative path whose outputs take more than the coin.
+        let err = sign(
+            &msg(RebindPath::Leaf, probe.clone(), None),
+            CsfsPolicy::with_ceiling(g, u64::MAX),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CsfsError::InputsUnknown(_)), "{err}");
+
+        // A swap: this coin of X, another owner's coin of Y. Each asset is
+        // reckoned; the ceiling bounds the coin's.
+        let swap = msg(
+            RebindPath::Checkpoint,
+            vec![out(y, 50_000, 3), out(x, 99_000, 4)],
+            Some(vec![OtherInput {
+                asset: y,
+                value: 50_000,
+            }]),
+        );
+        let text = swap.describe().join("\n");
+        assert!(text.contains(&format!("Of asset {x}, the inputs hold 100000 atoms and the committed outputs take 99000: 1000 atoms are left")), "{text}");
+        assert!(text.contains(&format!("Of asset {y}, the inputs hold 50000 atoms and the committed outputs take all of them")), "{text}");
+        sign(&swap, CsfsPolicy::with_ceiling(g, 1_000)).unwrap();
+        let err = sign(&swap, CsfsPolicy::with_ceiling(g, 999)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CsfsError::AboveCeiling {
+                    uncommitted: 1_000,
+                    ..
+                }
+            ),
+            "{err}"
+        );
     }
 
     #[cfg(feature = "ark")]
@@ -1461,6 +1825,7 @@ mod tests {
                 asset_in,
                 value_in,
                 outputs: vec![out.clone()],
+                other_inputs: None,
             })
         };
         let good = msg(x, rec.value);

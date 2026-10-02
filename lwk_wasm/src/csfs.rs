@@ -8,7 +8,8 @@
 //!
 //! ```js
 //! { kind: "rebind", source, assetIn, valueIn,
-//!   outputs: [{ asset, value, scriptPubkey }, ...] }   // 1 to 4 outputs
+//!   outputs: [{ asset, value, scriptPubkey }, ...],    // 1 to 4 outputs
+//!   otherInputs: [{ asset, value }, ...] }             // optional
 //! { kind: "unroll", children: [{ asset, value, scriptPubkey }, ...], time }
 //! { kind: "release", genesisHash, children: [{ asset, value, scriptPubkey }, ...] }
 //! ```
@@ -20,11 +21,17 @@
 //! is `leaf`, `checkpoint`, `htlc-claim`, `htlc-claim-both` or
 //! `htlc-refund-both` and `leafId` is the id of the leaf the output is, or
 //! was made from.
+//!
+//! A rebind's `otherInputs` are the transaction's other inputs, `[]` when the
+//! coin is spent alone; for a reassignment, every other checkpoint. What the
+//! transaction leaves to whoever broadcasts is reckoned over all of them.
+//! Without the field the signer refuses a reassignment (`path: "checkpoint"`)
+//! and any rebind whose outputs take more of the coin's asset than it holds.
 
 use std::str::FromStr;
 
 use lwk_signer::csfs::{
-    ArcaMessage, CommittedOutput, CsfsPolicy, RebindMessage, RebindPath, RebindSource,
+    ArcaMessage, CommittedOutput, CsfsPolicy, OtherInput, RebindMessage, RebindPath, RebindSource,
     ReleaseMessage, UnrollAuthorisation,
 };
 use lwk_wollet::elements::{hex::ToHex, AssetId, BlockHash, Script};
@@ -61,6 +68,12 @@ struct OutputDto {
 }
 
 #[derive(Deserialize)]
+struct InputDto {
+    asset: String,
+    value: Atoms,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordSourceDto {
     record: String,
@@ -91,6 +104,7 @@ enum MessageDto {
         asset_in: String,
         value_in: Atoms,
         outputs: Vec<OutputDto>,
+        other_inputs: Option<Vec<InputDto>>,
     },
     #[serde(rename_all = "camelCase")]
     Unroll { children: Vec<OutputDto>, time: u32 },
@@ -184,11 +198,25 @@ pub(crate) fn parse_message(message: JsValue) -> Result<ArcaMessage, Error> {
             asset_in,
             value_in,
             outputs: outs,
+            other_inputs,
         } => ArcaMessage::Rebind(RebindMessage {
             source: source(src)?,
             asset_in: asset(&asset_in)?,
             value_in: value_in.get()?,
             outputs: outputs(&outs)?,
+            other_inputs: match other_inputs {
+                None => None,
+                Some(list) => Some(
+                    list.iter()
+                        .map(|i| {
+                            Ok(OtherInput {
+                                asset: asset(&i.asset)?,
+                                value: i.value.get()?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?,
+                ),
+            },
         }),
         MessageDto::Unroll { children, time } => ArcaMessage::Unroll(UnrollAuthorisation {
             children: outputs(&children)?,
