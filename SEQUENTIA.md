@@ -398,7 +398,11 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   consensus accepts but a wallet must refuse, mined on an `elementsregtest`
   node; the bindings restore the wallet from its mnemonic, find its leaf keys
   from the records' nonces, fetch each round from the node, accept the honest
-  leaves and refuse each attack by the check that catches it.
+  leaves and refuse each attack by the check that catches it. The honest
+  round is then rolled back with `invalidateblock` and replaced by a round
+  paying the same batch output from the same issuing coin: `recheck` accepts
+  an honest replacement as such and refuses one carrying a second token atom
+  at `R`, by check 1.
 - `src/seqob_covenant.rs`: `buildCovenantFillTx`, `buildCovenantRefundTx`,
   `covenantMakerAddress`, `covenantMakerDescriptor`, `scriptToAddress`.
 - `src/sequentia_delegation.rs`: `sequentiaDelegationScript`,
