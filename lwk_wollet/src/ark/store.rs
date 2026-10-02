@@ -1,8 +1,8 @@
 //! The wallet's Arca leaves, kept over the kit's store.
 //!
 //! [`ArkStore`] keeps, under keys that begin `ark/`, what a wallet needs to
-//! take each of its leaves on-chain alone and that the mnemonic cannot give it
-//! back:
+//! take each of its leaves on-chain alone, and to never sign for two leaves
+//! with one key, that the mnemonic cannot give it back:
 //!
 //! - the leaf's record, in its binary form, by leaf id;
 //! - the round transaction's id and the batch output's index it was verified
@@ -10,20 +10,32 @@
 //! - the entry's unlock preimage, once the wallet has it;
 //! - unroll authorisations for the nodes above the leaf;
 //! - the owner nonces of leaves the wallet has asked for whose records have
-//!   not arrived yet.
+//!   not arrived yet;
+//! - every owner nonce and owner key it has ever kept a leaf under, with the
+//!   leaf, marked once the leaf is removed rather than forgotten.
 //!
-//! Nothing is kept that the mnemonic rebuilds: a leaf's key follows from the
-//! owner nonce in its record ([`super::keys`]), and no key is ever stored.
-//! None of what is kept is secret: the preimage is published when the
-//! operator claims a forfeit, and an unroll authorisation lets whoever holds
-//! it do only what any member of the node can. Wrap the store in an
-//! encrypting one for privacy.
+//! Nothing is kept that the mnemonic rebuilds: a leaf's private key follows
+//! from the owner nonce in its record ([`super::keys`]) and is never stored;
+//! the owner keys it remembers are the public ones its records name. None of
+//! what is kept is secret: the preimage is published when the operator claims
+//! a forfeit, and an unroll authorisation lets whoever holds it do only what
+//! any member of the node can. Wrap the store in an encrypting one for
+//! privacy. The marks of removed leaves are state too: a wallet restored into
+//! an empty store has none of them, so back the store up with the mnemonic.
 //!
-//! The store refuses what would hurt the wallet: a second leaf under an owner
-//! nonce it already holds (one key would then sign for two leaves, which lets
-//! the operator take one), a preimage that does not open the record's unlock
-//! hash, and an unroll authorisation that the record's owner key did not
-//! sign for a node on the leaf's path.
+//! The store refuses what would hurt the wallet:
+//!
+//! - a leaf under an owner nonce or key it has ever kept another leaf under,
+//!   or a leaf it has removed: one key would then sign for two leaves, and an
+//!   old signature made under the leaf's salt would fit the new one, which
+//!   lets the operator take it;
+//! - a leaf whose owner nonce the wallet is not waiting on
+//!   ([`ArkStore::put_pending`]), except in a restore
+//!   ([`ArkStore::put_restored_leaf`]), so that a record a server sends
+//!   unasked is never taken as the wallet's;
+//! - a preimage that does not open the record's unlock hash, and an unroll
+//!   authorisation that the record's owner key did not sign for a node on the
+//!   leaf's path.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -41,6 +53,7 @@ use super::{LeafId, LeafRecord, MedianTime, RecordError};
 
 const INDEX: &str = "ark/leaves";
 const PENDING: &str = "ark/pending";
+const USED: &str = "ark/used";
 
 fn leaf_key(id: &LeafId) -> String {
     format!("ark/leaf/{id}")
@@ -75,14 +88,24 @@ pub enum ArkStoreError {
         record: String,
     },
 
-    /// Another stored leaf has the same owner nonce, so the same key.
-    #[error("leaf {other} already has owner nonce {nonce}: one key would sign for two leaves")]
+    /// Another leaf the store has kept, now or before, has the same owner
+    /// nonce or key.
+    #[error("leaf {other} already has owner nonce {nonce} or its key: one key would sign for two leaves")]
     NonceReused {
         /// The other leaf's id.
         other: String,
         /// The owner nonce, hex.
         nonce: String,
     },
+
+    /// The leaf was kept and then removed; its nonce and key are not used
+    /// again.
+    #[error("leaf {0} was removed from the store; it is not kept again")]
+    Removed(String),
+
+    /// The owner nonce is not one the wallet is waiting on.
+    #[error("owner nonce {0} is not one this wallet is waiting on: a leaf is kept only for a nonce the wallet published, or in a restore")]
+    NotPending(String),
 
     /// No leaf with this id is stored.
     #[error("no leaf {0} in the store")]
@@ -136,6 +159,18 @@ pub struct StoredLeaf {
     pub preimage: Option<[u8; 32]>,
     /// Unroll authorisations, by node level.
     pub unroll: Vec<UnrollAuthorisation>,
+}
+
+/// What the store remembers of an owner nonce it has kept a leaf under.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Used {
+    /// The owner key, hex.
+    key: String,
+    /// The leaf's id.
+    leaf: String,
+    /// True once the leaf is removed.
+    #[serde(default)]
+    removed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -255,15 +290,96 @@ impl ArkStore {
             .collect()
     }
 
-    /// Keep a leaf the wallet has verified ([`super::verify`]). Refuses a
-    /// verification of another leaf, and a second leaf under an owner nonce
-    /// the store already holds. Storing the same leaf again keeps its
-    /// preimage and authorisations and takes the new round. The nonce leaves
-    /// the pending list.
+    fn used(&self) -> Result<BTreeMap<String, Used>, ArkStoreError> {
+        Ok(self.get_json(USED)?.unwrap_or_default())
+    }
+
+    /// Refuses `record` (leaf `id`) when the store has kept another leaf
+    /// under its owner nonce or key, or has removed this one. Leaves kept
+    /// before the store remembered nonces are found through the index.
+    fn check_unused(&self, record: &LeafRecord, id: &LeafId) -> Result<(), ArkStoreError> {
+        let nonce = record.owner_nonce.to_hex();
+        let key = record.owner.serialize().to_hex();
+        for (n, u) in self.used()? {
+            if n == nonce || u.key == key {
+                if u.leaf != id.to_string() {
+                    return Err(ArkStoreError::NonceReused {
+                        other: u.leaf,
+                        nonce,
+                    });
+                }
+                if u.removed {
+                    return Err(ArkStoreError::Removed(u.leaf));
+                }
+            }
+        }
+        for other in self.leaf_ids()? {
+            if other == *id {
+                continue;
+            }
+            let o = self.parse(&other, self.entry(&other)?)?;
+            if o.record.owner_nonce == record.owner_nonce || o.record.owner == record.owner {
+                return Err(ArkStoreError::NonceReused {
+                    other: other.to_string(),
+                    nonce,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn mark_used(
+        &self,
+        record: &LeafRecord,
+        id: &LeafId,
+        removed: bool,
+    ) -> Result<(), ArkStoreError> {
+        let mut used = self.used()?;
+        used.insert(
+            record.owner_nonce.to_hex(),
+            Used {
+                key: record.owner.serialize().to_hex(),
+                leaf: id.to_string(),
+                removed,
+            },
+        );
+        self.put_json(USED, &used)
+    }
+
+    /// Keep a leaf the wallet has verified ([`super::verify`]), whose owner
+    /// nonce it is waiting on ([`ArkStore::put_pending`]). Refuses a
+    /// verification of another leaf, a leaf under an owner nonce or key the
+    /// store has kept another leaf under (now or before), a leaf it has
+    /// removed, and a nonce it is not waiting on. Storing a leaf it holds
+    /// again keeps its preimage and authorisations and takes the new round.
+    /// The nonce leaves the pending list.
     pub fn put_leaf(
         &self,
         record: &LeafRecord,
         verified: &VerifiedLeaf,
+    ) -> Result<(), ArkStoreError> {
+        self.keep(record, verified, false)
+    }
+
+    /// Keep a leaf found in a restore: the wallet, restored from its
+    /// mnemonic, rebuilt the leaf's key from the record's owner nonce
+    /// ([`super::keys::restore_key`]) and verified it. The same as
+    /// [`ArkStore::put_leaf`] except that the nonce need not be pending; a
+    /// nonce or key the store has kept another leaf under, and a leaf it has
+    /// removed, are still refused.
+    pub fn put_restored_leaf(
+        &self,
+        record: &LeafRecord,
+        verified: &VerifiedLeaf,
+    ) -> Result<(), ArkStoreError> {
+        self.keep(record, verified, true)
+    }
+
+    fn keep(
+        &self,
+        record: &LeafRecord,
+        verified: &VerifiedLeaf,
+        restore: bool,
     ) -> Result<(), ArkStoreError> {
         let id = record.leaf_id()?;
         if id != verified.leaf_id {
@@ -272,17 +388,16 @@ impl ArkStore {
                 record: id.to_string(),
             });
         }
+        self.check_unused(record, &id)?;
         let mut ids = self.leaf_ids()?;
-        for other in &ids {
-            if *other == id {
-                continue;
-            }
-            let o = self.parse(other, self.entry(other)?)?;
-            if o.record.owner_nonce == record.owner_nonce || o.record.owner == record.owner {
-                return Err(ArkStoreError::NonceReused {
-                    other: other.to_string(),
-                    nonce: record.owner_nonce.to_hex(),
-                });
+        let held = ids.contains(&id);
+        if !held && !restore {
+            let waiting = self
+                .pending()?
+                .iter()
+                .any(|(n, _)| *n == record.owner_nonce);
+            if !waiting {
+                return Err(ArkStoreError::NotPending(record.owner_nonce.to_hex()));
             }
         }
         let previous = self.get_json::<Entry>(&leaf_key(&id))?;
@@ -293,6 +408,7 @@ impl ArkStore {
             preimage: previous.as_ref().and_then(|p| p.preimage.clone()),
             unroll: previous.map(|p| p.unroll).unwrap_or_default(),
         };
+        self.mark_used(record, &id, false)?;
         self.put_json(&leaf_key(&id), &entry)?;
         ids.push(id);
         self.put_index(&ids)?;
@@ -354,16 +470,37 @@ impl ArkStore {
         self.put_json(&leaf_key(id), &e)
     }
 
-    /// Forget a leaf, once it is spent and settled.
+    /// Remove a leaf, once it is spent and settled. Its record goes; its
+    /// owner nonce and key stay marked as used, with the leaf's id, so that
+    /// neither is kept again.
     pub fn remove_leaf(&self, id: &LeafId) -> Result<(), ArkStoreError> {
+        if let Some(leaf) = self.leaf(id)? {
+            self.mark_used(&leaf.record, id, true)?;
+        }
         self.store.remove(&leaf_key(id)).map_err(store_err)?;
         let ids: Vec<LeafId> = self.leaf_ids()?.into_iter().filter(|i| i != id).collect();
         self.put_index(&ids)
     }
 
     /// Remember the owner nonce of a leaf the wallet has asked for, or
-    /// published in a receive request, until its record arrives.
+    /// published in a receive request, until its record arrives. Refuses a
+    /// nonce the store has kept a leaf under.
     pub fn put_pending(&self, nonce: &OwnerNonce, note: &str) -> Result<(), ArkStoreError> {
+        let hex = nonce.to_hex();
+        if let Some(u) = self.used()?.remove(&hex) {
+            return Err(ArkStoreError::NonceReused {
+                other: u.leaf,
+                nonce: hex,
+            });
+        }
+        for id in self.leaf_ids()? {
+            if self.parse(&id, self.entry(&id)?)?.record.owner_nonce == *nonce {
+                return Err(ArkStoreError::NonceReused {
+                    other: id.to_string(),
+                    nonce: hex,
+                });
+            }
+        }
         let mut p: BTreeMap<String, String> = self.get_json(PENDING)?.unwrap_or_default();
         p.insert(nonce.to_hex(), note.to_string());
         self.put_json(PENDING, &p)
@@ -482,7 +619,7 @@ mod tests {
         s.put_pending(&[9; 32], "a request still open").unwrap();
         assert_eq!(s.pending().unwrap().len(), 2);
         s.put_leaf(&r0, &v0).unwrap();
-        s.put_leaf(&r1, &v1).unwrap();
+        s.put_restored_leaf(&r1, &v1).unwrap();
         // The nonce whose record arrived is no longer pending.
         assert_eq!(
             s.pending().unwrap(),
@@ -526,6 +663,7 @@ mod tests {
         let v = vectors();
         let s = store();
         let (r0, v0) = vector_leaf(&v, 2, 0);
+        s.put_pending(&r0.owner_nonce, "receive").unwrap();
         s.put_leaf(&r0, &v0).unwrap();
         // The same record again is the same leaf: allowed.
         s.put_leaf(&r0, &v0).unwrap();
@@ -536,6 +674,126 @@ mod tests {
         fake.leaf_id = other.leaf_id().unwrap();
         let err = s.put_leaf(&other, &fake).unwrap_err();
         assert!(matches!(err, ArkStoreError::NonceReused { .. }), "{err}");
+        let err = s.put_restored_leaf(&other, &fake).unwrap_err();
+        assert!(matches!(err, ArkStoreError::NonceReused { .. }), "{err}");
+    }
+
+    /// A leaf of the vectors as another batch could carry it: the same owner
+    /// nonce and key, so the same leaf script, under another leaf id.
+    fn replayed(
+        v: &Json,
+        record: &LeafRecord,
+        verified: &VerifiedLeaf,
+    ) -> (LeafRecord, VerifiedLeaf) {
+        let (mut other, _) = vector_leaf(v, 1, 0);
+        other.owner_nonce = record.owner_nonce;
+        other.owner = record.owner;
+        let mut fake = verified.clone();
+        fake.leaf_id = other.leaf_id().unwrap();
+        assert_ne!(fake.leaf_id, verified.leaf_id);
+        (other, fake)
+    }
+
+    #[test]
+    fn a_removed_leaf_and_its_nonce_are_never_kept_again() {
+        // Review R4, F8: the store compared a new leaf only with the leaves
+        // it still held, so a leaf stored, removed and stored again was
+        // accepted, and so was a replayed salt of a spent leaf.
+        let v = vectors();
+        let inner: Arc<dyn DynStore> = Arc::new(MemoryStore::new());
+        let s = ArkStore::new(inner.clone());
+        let (r0, v0) = vector_leaf(&v, 2, 0);
+        s.put_pending(&r0.owner_nonce, "receive").unwrap();
+        s.put_leaf(&r0, &v0).unwrap();
+        s.remove_leaf(&v0.leaf_id).unwrap();
+        assert!(s.leaf(&v0.leaf_id).unwrap().is_none());
+        assert!(s.leaf_ids().unwrap().is_empty());
+
+        // The same record, as a new leaf, in a restore, or with its nonce
+        // waited on again: each refused.
+        let err = s.put_leaf(&r0, &v0).unwrap_err();
+        assert!(
+            matches!(err, ArkStoreError::Removed(ref id) if *id == v0.leaf_id.to_string()),
+            "{err}"
+        );
+        let err = s.put_restored_leaf(&r0, &v0).unwrap_err();
+        assert!(matches!(err, ArkStoreError::Removed(_)), "{err}");
+        let err = s.put_pending(&r0.owner_nonce, "again").unwrap_err();
+        assert!(matches!(err, ArkStoreError::NonceReused { .. }), "{err}");
+        assert!(s.pending().unwrap().is_empty());
+
+        // The same nonce and key under another leaf id: the operator
+        // replaying the salt of a spent leaf. Refused even in a restore.
+        let (other, fake) = replayed(&v, &r0, &v0);
+        let err = s.put_restored_leaf(&other, &fake).unwrap_err();
+        assert!(
+            matches!(err, ArkStoreError::NonceReused { ref other, .. } if *other == v0.leaf_id.to_string()),
+            "{err}"
+        );
+        // The same key under another nonce is refused too.
+        let (mut key_only, _) = vector_leaf(&v, 1, 0);
+        key_only.owner = r0.owner;
+        let mut fake = v0.clone();
+        fake.leaf_id = key_only.leaf_id().unwrap();
+        let err = s.put_restored_leaf(&key_only, &fake).unwrap_err();
+        assert!(matches!(err, ArkStoreError::NonceReused { .. }), "{err}");
+
+        // The marks are kept in the underlying store: a new ArkStore over it
+        // refuses the same.
+        let reopened = ArkStore::new(inner);
+        let err = reopened.put_restored_leaf(&r0, &v0).unwrap_err();
+        assert!(matches!(err, ArkStoreError::Removed(_)), "{err}");
+    }
+
+    #[test]
+    fn a_leaf_is_kept_only_for_a_nonce_the_wallet_waits_on() {
+        let v = vectors();
+        let s = store();
+        let (r0, v0) = vector_leaf(&v, 2, 0);
+        // A record nobody asked for.
+        let err = s.put_leaf(&r0, &v0).unwrap_err();
+        assert!(
+            matches!(err, ArkStoreError::NotPending(ref n) if *n == r0.owner_nonce.to_hex()),
+            "{err}"
+        );
+        assert!(s.leaf_ids().unwrap().is_empty());
+        // Waited on, it is kept, and stops being waited on.
+        s.put_pending(&r0.owner_nonce, "receive").unwrap();
+        s.put_leaf(&r0, &v0).unwrap();
+        assert!(s.pending().unwrap().is_empty());
+        // A nonce the store holds a leaf under is not waited on again.
+        let err = s.put_pending(&r0.owner_nonce, "again").unwrap_err();
+        assert!(matches!(err, ArkStoreError::NonceReused { .. }), "{err}");
+        // In a restore no nonce is pending.
+        let (r1, v1) = vector_leaf(&v, 2, 7);
+        assert!(matches!(
+            s.put_leaf(&r1, &v1),
+            Err(ArkStoreError::NotPending(_))
+        ));
+        s.put_restored_leaf(&r1, &v1).unwrap();
+        assert_eq!(s.leaf_ids().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_store_written_before_nonces_were_remembered() {
+        // A leaf kept before the store recorded nonces: no entry under
+        // ark/used. The index still refuses its nonce; removing it marks it.
+        let v = vectors();
+        let inner: Arc<dyn DynStore> = Arc::new(MemoryStore::new());
+        let s = ArkStore::new(inner.clone());
+        let (r0, v0) = vector_leaf(&v, 2, 0);
+        s.put_restored_leaf(&r0, &v0).unwrap();
+        inner.remove(USED).unwrap();
+        let (other, fake) = replayed(&v, &r0, &v0);
+        let err = s.put_restored_leaf(&other, &fake).unwrap_err();
+        assert!(matches!(err, ArkStoreError::NonceReused { .. }), "{err}");
+        assert!(matches!(
+            s.put_pending(&r0.owner_nonce, "again"),
+            Err(ArkStoreError::NonceReused { .. })
+        ));
+        s.remove_leaf(&v0.leaf_id).unwrap();
+        let err = s.put_restored_leaf(&r0, &v0).unwrap_err();
+        assert!(matches!(err, ArkStoreError::Removed(_)), "{err}");
     }
 
     #[test]
@@ -615,6 +873,7 @@ mod tests {
             owned: true,
         };
         let s = store();
+        s.put_pending(&record.owner_nonce, "receive").unwrap();
         s.put_leaf(&record, &verified).unwrap();
 
         assert!(matches!(

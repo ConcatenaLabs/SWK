@@ -10,7 +10,8 @@
 // nonce; the wallet's policy and its key are enforced, a leaf taken from a
 // round against the acceptance horizon and a leaf held or given against the
 // exit deadline, at the time each call names; the store keeps what verifies
-// and refuses a second leaf under one nonce.
+// for a nonce the wallet waits on, refuses a second leaf under one nonce, and
+// never keeps a removed leaf or its nonce again.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -192,6 +193,8 @@ const storage = {
 const store = new lwk.ArkStore(storage);
 const ver1 = verifier();
 const t1 = created(b1);
+// A record nobody asked for is not kept.
+assert.throws(() => store.putLeaf(ver1, r1.json, b1.round.tx, l1.owner, l1.owner_nonce, t1), /is not one this wallet is waiting on/);
 store.putPending(l1.owner_nonce, 'receive');
 assert.strictEqual(store.pending().length, 1);
 const id = store.putLeaf(ver1, r1.json, b1.round.tx, l1.owner, l1.owner_nonce, t1);
@@ -215,6 +218,25 @@ assert.throws(() => store.putUnrollAuthorisation(id, 0, 1800000000, '00'.repeat(
 store.removeLeaf(other.leaf_id);
 assert.deepStrictEqual(store.leafIds(), [r1.leaf_id]);
 assert.strictEqual(store.leaf(other.leaf_id), undefined);
+// Review R4, F8: a removed leaf, and its nonce, are never kept again, nor
+// in a restore.
+assert.throws(() => store.putLeaf(ver1, other.binary, b1.round.tx, lo.owner, lo.owner_nonce, t1), /was removed from the store/);
+assert.throws(() => store.putRestoredLeaf(ver1, other.binary, b1.round.tx, lo.owner, lo.owner_nonce, t1), /was removed from the store/);
+assert.throws(() => store.putPending(lo.owner_nonce, 'again'), /already has owner nonce/);
+// A restore, into an empty store, keeps a leaf the wallet holds without its
+// nonce pending, checked against the exit deadline: ten days on it is kept
+// (as a new leaf it would be refused), past the deadline it is refused.
+const map2 = new Map();
+const fresh2 = new lwk.ArkStore({
+    get: (k) => map2.get(k) || null,
+    put: (k, val) => { map2.set(k, new Uint8Array(val)); },
+    remove: (k) => { map2.delete(k); },
+    isPersisted: () => false,
+});
+fresh2.putPending(l1.owner_nonce, 'receive');
+assert.throws(() => fresh2.putLeaf(ver1, r1.json, b1.round.tx, l1.owner, l1.owner_nonce, t1 + 10 * DAY), /leaf refused: wallet policy/);
+assert.strictEqual(fresh2.putRestoredLeaf(ver1, r1.json, b1.round.tx, l1.owner, l1.owner_nonce, t1 + 10 * DAY), r1.leaf_id);
+assert.throws(() => fresh2.putRestoredLeaf(ver1, other.binary, b1.round.tx, lo.owner, lo.owner_nonce, deadline + 1), /leaf refused: wallet policy/);
 assert.ok([...map.keys()].every((k) => k.startsWith('ark/')), [...map.keys()]);
 
 console.log(`ark_records: ${n} records verified (${longer} under a longer exit delay), ${refusals} refusal vectors refused by kind; byte order, keys, policy and store hold`);

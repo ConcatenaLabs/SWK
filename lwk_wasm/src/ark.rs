@@ -417,6 +417,30 @@ impl ArkVerifier {
         )
     }
 
+    /// The wallet's own leaf it already holds, verified at `now` with the
+    /// exit deadline in place of the horizon.
+    fn held(
+        &self,
+        record: &str,
+        round_hex: &str,
+        owner_key_hex: &str,
+        owner_nonce_hex: &str,
+        now: u32,
+    ) -> Result<Result<(LeafRecord, VerifiedLeaf), VerdictDto>, Error> {
+        let policy = self.at(now)?;
+        Ok(
+            match Self::parse_own(record, round_hex, owner_key_hex, owner_nonce_hex)? {
+                Err(refusal) => Err(refusal),
+                Ok((record, round, owner, owner_nonce)) => {
+                    match verify::verify_held_leaf(&record, &round, &policy, &owner, &owner_nonce) {
+                        Ok(v) => Ok((record, v)),
+                        Err(e) => Err(VerdictDto::refused(&e)),
+                    }
+                }
+            },
+        )
+    }
+
     /// The wallet's own leaf checked again at `now`, against the round it
     /// was last verified against, `previous`.
     fn own_again(
@@ -535,9 +559,10 @@ struct StoredDto {
 
 /// The wallet's Arca leaves over a JavaScript storage object (see
 /// `JsStorage`): each leaf's record and the round it was verified against,
-/// the entry's unlock preimage, unroll authorisations, and the owner nonces
-/// of leaves asked for whose records have not arrived. Every key it writes
-/// begins `ark/`; no key is ever stored.
+/// the entry's unlock preimage, unroll authorisations, the owner nonces of
+/// leaves asked for whose records have not arrived, and every owner nonce and
+/// key a leaf was ever kept under. Every key it writes begins `ark/`; no
+/// private key is ever stored.
 #[wasm_bindgen]
 pub struct ArkStore {
     inner: Store,
@@ -555,8 +580,10 @@ impl ArkStore {
 
     /// Verify the wallet's own leaf, taken from a round it joins, with
     /// `verifier` at median time `now`, and keep it. Refuses a leaf that
-    /// does not verify, naming what failed, and a second leaf under an owner
-    /// nonce or key the store already holds. Returns the leaf id.
+    /// does not verify, naming what failed; a leaf whose owner nonce the
+    /// wallet is not waiting on (`putPending`); a leaf under an owner nonce or
+    /// key the store has kept another leaf under, now or before; and a leaf
+    /// it has removed. Returns the leaf id.
     #[wasm_bindgen(js_name = putLeaf)]
     pub fn put_leaf(
         &self,
@@ -574,6 +601,35 @@ impl ArkStore {
             ))),
             Ok((record, verified)) => {
                 self.inner.put_leaf(&record, &verified).map_err(generic)?;
+                Ok(verified.leaf_id.to_string())
+            }
+        }
+    }
+
+    /// Keep a leaf found in a restore: verified with `verifier` at median
+    /// time `now` as a leaf the wallet holds (the exit deadline in place of
+    /// the horizon), and kept without its nonce being pending. A nonce or key
+    /// the store has kept another leaf under, and a leaf it has removed, are
+    /// still refused. Returns the leaf id.
+    #[wasm_bindgen(js_name = putRestoredLeaf)]
+    pub fn put_restored_leaf(
+        &self,
+        verifier: &ArkVerifier,
+        record: &str,
+        round_tx_hex: &str,
+        owner_key_hex: &str,
+        owner_nonce_hex: &str,
+        now: u32,
+    ) -> Result<String, Error> {
+        match verifier.held(record, round_tx_hex, owner_key_hex, owner_nonce_hex, now)? {
+            Err(refusal) => Err(generic(format!(
+                "leaf refused: {}",
+                refusal.reason.unwrap_or_default()
+            ))),
+            Ok((record, verified)) => {
+                self.inner
+                    .put_restored_leaf(&record, &verified)
+                    .map_err(generic)?;
                 Ok(verified.leaf_id.to_string())
             }
         }
@@ -679,7 +735,8 @@ impl ArkStore {
             .map_err(generic)
     }
 
-    /// Forget a leaf.
+    /// Remove a leaf once it is spent and settled. Its owner nonce and key
+    /// stay marked as used, so neither is kept again.
     #[wasm_bindgen(js_name = removeLeaf)]
     pub fn remove_leaf(&self, leaf_id: &str) -> Result<(), Error> {
         let id = leaf_id.parse().map_err(|e: RecordError| generic(e))?;
@@ -687,6 +744,7 @@ impl ArkStore {
     }
 
     /// Remember the owner nonce of a leaf asked for until its record arrives.
+    /// Refuses a nonce the store has kept a leaf under.
     #[wasm_bindgen(js_name = putPending)]
     pub fn put_pending(&self, owner_nonce_hex: &str, note: &str) -> Result<(), Error> {
         self.inner

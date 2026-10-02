@@ -275,12 +275,20 @@ Changes by file:
   - `store.rs`: `ArkStore`, the wallet's leaves over any of the kit's stores
     (`Arc<dyn DynStore>`), every key under `ark/`: each leaf's record by leaf
     id with the round txid and batch output index it was verified against,
-    the entry's unlock preimage, unroll authorisations by node level, and the
-    owner nonces of leaves asked for whose records have not arrived. Nothing
-    the mnemonic rebuilds is kept, and no key ever is. It refuses a second
-    leaf under an owner nonce or key it already holds, a preimage that does
-    not open the record's unlock hash, and an unroll authorisation that is
-    not the record owner's signature over that node's message.
+    the entry's unlock preimage, unroll authorisations by node level, the
+    owner nonces of leaves asked for whose records have not arrived, and
+    every owner nonce and key a leaf was ever kept under, marked rather than
+    forgotten when the leaf is removed. No private key is kept. `put_leaf`
+    keeps a leaf only for a nonce the wallet waits on (`put_pending`);
+    `put_restored_leaf` is for a restore, where nothing is pending (verify
+    such a leaf with `verify_held_leaf`). Both refuse a leaf under an owner
+    nonce or key the store has kept another leaf under, now or before, and a
+    leaf it has removed, since an old signature under the leaf's salt would
+    fit it; `put_pending` refuses a nonce already used. It also refuses a
+    preimage that does not open the record's unlock hash and an unroll
+    authorisation that is not the record owner's signature over that node's
+    message. The marks are state the mnemonic cannot rebuild: back the store
+    up.
 - `src/adaptor.rs` (feature `adaptor`): BIP340 Schnorr adaptor signatures
   (`adaptor_sign`, `adaptor_verify`, `adaptor_complete`, `adaptor_extract`),
   built in-house on `secp256k1` point arithmetic because the vendored
@@ -390,7 +398,8 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   refuses one), whose verdict is
   `{ accepted: true, leafId, roundTxid, asset, value, expiries, ... }` or
   `{ accepted: false, failed, check, kind, reason }`; and `ArkStore(storage)`
-  over a `JsStorage` object. A record is its JSON text or its binary form as
+  over a `JsStorage` object, with `putPending`, `putLeaf`, `putRestoredLeaf`
+  and `removeLeaf` keeping the same rules as the native store. A record is its JSON text or its binary form as
   hex. Asset ids, the token and the genesis hash are display hex at this
   edge; leaf ids, nonces, keys and transactions are hex of their bytes. The
   verifier takes the wallet's chain from its `Network` and makes no claim of
