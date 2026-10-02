@@ -145,7 +145,7 @@ node, among them attacks a wallet must refuse and replacements after a
 rollback, and runs `tests/node/ark_regtest.js`, which verifies them through
 the bindings against each round as the node returns it. Both need the node
 package above, linked or installed as `lwk_node` in `tests/node/node_modules`;
-the second also needs a `sequentiad` binary:
+the second also needs a `sequentiad` binary, and fails without one:
 
 ```shell
 cd lwk_wasm/tests/node && node ark_records.js
