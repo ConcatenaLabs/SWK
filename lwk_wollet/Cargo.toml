@@ -19,6 +19,7 @@ lwk_signer = { version = "0.18.1", features = [
 ], optional = true }
 
 rand = "0.8"
+arca-covenant = { workspace = true, optional = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 aes-gcm-siv = "0.11.0"
@@ -150,6 +151,9 @@ amp2 = ["reqwest"]
 # OpenAMP restricted-asset client + enclave signing helpers (SWK-2/SWK-6).
 # Reuses only amp2's async+blocking reqwest pattern; architecturally independent.
 openamp = ["reqwest"]
+# Arca: holding a leaf of an Arca covenant tree (src/ark/): leaf keys from the
+# owner nonce, and the Arca library's scripts, record and client checks.
+ark = ["sequentia", "dep:arca-covenant"]
 # BIP340 Schnorr adaptor-signature primitive (btc-atomic-swap-followup §8). Pure
 # in-house crypto on the vendored secp256k1 0.29 point/scalar ops; no extra deps.
 adaptor = []

@@ -178,6 +178,8 @@ New cargo features:
 - `openamp = ["reqwest"]`: the OpenAMP restricted-asset client and enclave
   signing helpers.
 - `adaptor = []`: BIP340 Schnorr adaptor signatures.
+- `ark = ["sequentia", "dep:arca-covenant"]`: holding a leaf of an Arca
+  covenant tree (`src/ark/`).
 
 Changes by file:
 
@@ -227,6 +229,22 @@ Changes by file:
   non-spending signatures, `enclave_sighash()` + `decode_enclave_spend()` so a
   wallet recomputes the enclave sighash itself and never blind-signs) and the
   typed `OpenampClient` for the user / address / balance / transfer endpoints.
+- `src/ark/` (feature `ark`): what a wallet needs to hold a leaf of an Arca
+  covenant tree. The scripts, the leaf record, its validation and the client's
+  checks on a round are the Arca library's (`arca-covenant`), re-exported as
+  `ark::covenant` and never written a second time; signing is `lwk_signer`'s.
+  Asset ids, the token and the genesis hash are in internal byte order in
+  scripts and hashes and in display hex in every text form.
+  - `keys.rs`: one key for every leaf instance. The wallet draws a random
+    32-byte owner nonce for every leaf it asks for or publishes in a receive
+    request (`new_owner_nonce`); the leaf key is at
+    `m/6'/<account>'/c1'/c2'/c3'/c4'`, where `c1` to `c4` are the first four
+    31-bit chunks, most significant bit first, of
+    `SHA256("Arca/key" ‖ owner_nonce)` (`leaf_key`, `leaf_key_path`). The
+    nonce is in the leaf's record, so a restore derives each record's key from
+    its nonce and checks it equals the record's owner key (`restore_key`): no
+    index scan and no gap limit. A key is never derived from a counter and
+    never reused, because one key on two leaves lets the operator take one.
 - `src/adaptor.rs` (feature `adaptor`): BIP340 Schnorr adaptor signatures
   (`adaptor_sign`, `adaptor_verify`, `adaptor_complete`, `adaptor_extract`),
   built in-house on `secp256k1` point arithmetic because the vendored
@@ -346,6 +364,22 @@ The browser-wallet demo that used to live in `lwk_wasm/www/` was extracted to
 its own repository,
 [sequentia-web-wallet](https://github.com/ConcatenaLabs/sequentia-web-wallet),
 live at https://sequentiatestnet.com/wallet/.
+
+## Key paths
+
+Every key the kit derives for a role of its own, beside the on-chain address
+purposes (BIP44 `44'`, BIP49 `49'`, BIP84 `84'`, BIP86 `86'`, AMP2 `87'`):
+
+| Path | Key |
+|---|---|
+| `m/2/0` | The staking key: stake bonding, staking-pool delegation, and messages signed as the staker |
+| `m/3/0` | The SeqDEX HTLC key (`htlcKeypair`), and the cross-chain swap's Sequentia claim key in its legacy relative mode; the cross-chain swap's own keys are at `m/84'/1'/0'/2/0` (BTC refund), `/3/0` (Sequentia claim) and `/4/0` (BTC claim) |
+| `m/5/0` | The OpenAMP enclave key, which signs raw 32-byte digests (`openampSignSighash`) |
+| `m/6'/<account>'/c1'/c2'/c3'/c4'` | Arca leaf keys, one per leaf, from the leaf's owner nonce (`ark::keys`) |
+
+The SeqLN device keys of the web wallet and Ambra are under `m/1017'`. A new
+role takes the next free number here; a key that signs raw digests never
+shares a path with one that signs anything else.
 
 ## Design invariants the fork keeps
 

@@ -79,7 +79,7 @@ through wasm.
   bytes drifting. Do not loosen that pin.
 - **`btc-blocking` cannot target wasm32** and says so with a `compile_error!`. Use `btc-async` for
   anything that must run in a browser.
-- Sequentia-specific modules exported from `lwk_wollet`: `btc`, `adaptor`, `openamp`,
+- Sequentia-specific modules exported from `lwk_wollet`: `btc`, `adaptor`, `openamp`, `ark`,
   `seqdex_htlc`, `seqdex_swap`, `seqob_covenant`, `sequentia_delegation`, `coinjoin`, plus
   `sequentia_stake_script` and the any-asset fee builder. `SEQUENTIA.md` documents each. `pos` is
   upstream's point-of-sale module (feature `prices`), not proof of stake.

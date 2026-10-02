@@ -214,9 +214,11 @@ checksum = "69f7f8c3906b62b754cd5326047894316021dcfe5a194c8ea52bdd94934a3457"
 [[package]]
 name = "arca-covenant"
 version = "0.1.0"
-source = "git+https://github.com/ConcatenaLabs/arca?rev=d81ccecbdc10b9929e8df5714a56b5777aae1aa7#d81ccecbdc10b9929e8df5714a56b5777aae1aa7"
+source = "git+https://github.com/ConcatenaLabs/arca?rev=86d177b40a2e0c212f1a4d63e479d9db6e7c4cf5#86d177b40a2e0c212f1a4d63e479d9db6e7c4cf5"
 dependencies = [
  "elements 0.25.3",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -2829,6 +2831,7 @@ dependencies = [
  "aes-gcm",
  "aes-gcm-siv",
  "age",
+ "arca-covenant",
  "base64 0.21.7",
  "bip39",
  "bitcoin",
