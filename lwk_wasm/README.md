@@ -137,6 +137,21 @@ npm install
 node network.js
 ```
 
+### Arca leaves
+
+`tests/node/ark_records.js` runs the Arca record vectors through the bindings.
+`lwk_wollet/tests/ark_regtest.rs` mines Arca rounds on an `elementsregtest`
+node and runs `tests/node/ark_regtest.js`, which verifies them through the
+bindings against each round as the node returns it. Both need the node
+package above, linked or installed as `lwk_node` in `tests/node/node_modules`;
+the second also needs a `sequentiad` binary:
+
+```shell
+cd lwk_wasm/tests/node && node ark_records.js
+SEQUENTIAD_EXEC=/path/to/sequentiad cargo test -p lwk_wollet \
+  --no-default-features --features ark --test ark_regtest -- --nocapture
+```
+
 ### Arca signers on regtest
 
 `tests/node/scripts/arca_regtest.py` spends the Arca reference scripts on a

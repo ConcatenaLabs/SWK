@@ -16,6 +16,7 @@ mod btc_wallet;
 mod xchain;
 mod coinjoin;
 mod contract;
+mod ark;
 mod csfs;
 #[cfg(feature = "simplicity")]
 mod control_block;

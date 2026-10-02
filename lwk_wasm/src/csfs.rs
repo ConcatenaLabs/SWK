@@ -14,9 +14,9 @@
 //! ```
 //!
 //! A rebind's `source` names the output it spends. For a leaf's
-//! collaborative path it is the leaf's record, `{ record }` (the record's
-//! binary form as hex), from which the leaf id, the salt and the chain are
-//! taken. Otherwise it is `{ path, leafId, genesisHash, salt }`, where `path`
+//! collaborative path it is the leaf's record, `{ record }` (its JSON text,
+//! or its binary form as hex), from which the leaf id, the salt and the chain
+//! are taken. Otherwise it is `{ path, leafId, genesisHash, salt }`, where `path`
 //! is `leaf`, `checkpoint`, `htlc-claim`, `htlc-claim-both` or
 //! `htlc-refund-both` and `leafId` is the id of the leaf the output is, or
 //! was made from.
@@ -130,7 +130,7 @@ fn bytes32(s: &str, what: &str) -> Result<[u8; 32], Error> {
 fn source(dto: SourceDto) -> Result<RebindSource, Error> {
     Ok(match dto {
         SourceDto::Record(RecordSourceDto { record }) => {
-            let record = arca_covenant::LeafRecord::from_bytes(&unhex(&record, "record")?)
+            let record = crate::ark::parse_record(&record)
                 .map_err(|e| Error::Generic(format!("the leaf's record: {e}")))?;
             RebindSource::leaf(&record)?
         }

@@ -261,7 +261,9 @@ Changes by file:
     order to unroll at once. `tests/data/arca_records.json` is the Arca
     repository's `regtest/vectors/records.json`, copied unchanged; every
     record in it verifies against its round, and every refusal vector is
-    refused by its kind.
+    refused by its kind. `tests/data/ark_byte_order.json` pins the byte
+    order: ids in display hex in the JSON form, internal bytes in the binary
+    form and in the rebindable message.
   - `store.rs`: `ArkStore`, the wallet's leaves over any of the kit's stores
     (`Arc<dyn DynStore>`), every key under `ark/`: each leaf's record by leaf
     id with the round txid and batch output index it was verified against,
@@ -322,9 +324,9 @@ Changes by file:
 
 ## `lwk_wasm`
 
-Built with `lwk_wollet` features `sequentia`, `openamp`, `adaptor` and
-`btc-async` (plus upstream defaults), so the npm-style `pkg/` output of this
-fork is Sequentia-enabled.
+Built with `lwk_wollet` features `sequentia`, `openamp`, `adaptor`,
+`btc-async` and `ark` (plus upstream defaults), so the npm-style `pkg/` output
+of this fork is Sequentia-enabled.
 The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
 
 - `src/network.rs`: `Network.sequentiaTestnet()`; `Network.isSequentia()`
@@ -367,13 +369,36 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   `{ kind: "release", genesisHash, children }`, each output or child
   `{ asset, value, scriptPubkey }`; asset ids and the genesis hash in display
   hex, amounts in atoms as a number or a decimal string. A rebind's `source`
-  is the leaf's record, `{ record }` (binary form, hex), or
+  is the leaf's record, `{ record }` (its JSON text or its binary form as hex), or
   `{ path, leafId, genesisHash, salt }`. `limits` is `{ feeFloorPerKvb }` for
   the specification's fee margin or `{ maxUncommitted }` for a ceiling in
   atoms; without it a rebind must commit the whole coin.
+- `src/ark.rs`: Arca leaves. `arkNewOwnerNonce()`, `arkLeafKeyPath(account,
+  ownerNonce)`, `Signer.arkLeafKey(account, ownerNonce)` and
+  `Signer.arkRestoreKey(account, record)` for the leaf keys;
+  `arkParseRecord(record)` for a record's fields; `ArkVerifier(network,
+  policy)` with `verifyLeaf`, `verifyRound` and `recheck`, whose verdict is
+  `{ accepted: true, leafId, roundTxid, asset, value, expiries, ... }` or
+  `{ accepted: false, failed, check, kind, reason }`; and `ArkStore(storage)`
+  over a `JsStorage` object. A record is its JSON text or its binary form as
+  hex. Asset ids, the token and the genesis hash are display hex at this
+  edge; leaf ids, nonces, keys and transactions are hex of their bytes. The
+  verifier takes the wallet's chain from its `Network` and makes no claim of
+  finality.
 - `tests/node/arca_signers.js`: the bindings against the Arca vectors.
   `tests/node/scripts/arca_regtest.py` spends the Arca reference scripts on a
   regtest node with signatures from these bindings (see `lwk_wasm/README.md`).
+- `tests/node/ark_records.js`: the Arca record vectors and the byte-order
+  vector (`lwk_wollet/tests/data/ark_byte_order.json`, written by
+  `ark_byte_order.py` with hashlib alone) through the bindings: every record
+  verifies, every refusal vector is refused by its kind, and the keys, the
+  policy and the store hold.
+- `lwk_wollet/tests/ark_regtest.rs` with `tests/node/ark_regtest.js`: leaves
+  built by the Arca tree builder in an honest round and in five rounds that
+  consensus accepts but a wallet must refuse, mined on an `elementsregtest`
+  node; the bindings restore the wallet from its mnemonic, find its leaf keys
+  from the records' nonces, fetch each round from the node, accept the honest
+  leaves and refuse each attack by the check that catches it.
 - `src/seqob_covenant.rs`: `buildCovenantFillTx`, `buildCovenantRefundTx`,
   `covenantMakerAddress`, `covenantMakerDescriptor`, `scriptToAddress`.
 - `src/sequentia_delegation.rs`: `sequentiaDelegationScript`,

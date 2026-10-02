@@ -62,3 +62,94 @@ pub enum ArkError {
         owner: String,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    // The byte-order vector (tests/data/ark_byte_order.json, written by
+    // ark_byte_order.py from the Arca record vectors with hashlib alone).
+
+    use std::str::FromStr;
+
+    use elements::encode::serialize;
+    use elements::hex::{FromHex, ToHex};
+    use elements::{AssetId, Script};
+    use serde_json::Value;
+
+    use super::*;
+
+    #[test]
+    fn byte_order_follows_the_vector() {
+        let v: Value =
+            serde_json::from_str(include_str!("../../tests/data/ark_byte_order.json")).unwrap();
+        let s = |k: &str| v[k].as_str().unwrap().to_string();
+        let binary = Vec::<u8>::from_hex(&s("record_hex")).unwrap();
+        let record = LeafRecord::from_bytes(&binary).unwrap();
+        assert_eq!(
+            record,
+            LeafRecord::from_json_str(&s("record_json")).unwrap()
+        );
+        assert_eq!(record.leaf_id().unwrap().to_string(), s("leaf_id"));
+
+        let at = |field: &str| {
+            let f = &v[field];
+            let off = f["binary_offset"].as_u64().unwrap() as usize;
+            let internal = f["internal"].as_str().unwrap();
+            assert_eq!(binary[off..off + 32].to_hex(), internal, "{field}");
+            (
+                f["display"].as_str().unwrap().to_string(),
+                internal.to_string(),
+            )
+        };
+        let (display, internal) = at("asset");
+        assert_eq!(record.asset.to_string(), display);
+        assert_eq!(serialize(&record.asset).to_hex(), internal);
+        let (display, internal) = at("token");
+        assert_eq!(record.schedule.token.to_string(), display);
+        assert_eq!(serialize(&record.schedule.token).to_hex(), internal);
+        let (display, internal) = at("genesis_hash");
+        assert_eq!(record.chain.genesis_hash().to_string(), display);
+        assert_eq!(record.chain.genesis_bytes().to_hex(), internal);
+
+        assert_eq!(record.salt().to_hex(), s("salt"));
+        assert_eq!(record.chain.tag().to_hex(), s("chain_tag"));
+        assert_eq!(record.leaf().leaf_constant().to_hex(), s("leaf_constant"));
+
+        // The rebindable message of the leaf's coin into one output.
+        let r = &v["rebind"];
+        let out = &r["output"];
+        let asset = AssetId::from_str(out["asset_display"].as_str().unwrap()).unwrap();
+        let output = ExplicitOutput::new(
+            asset,
+            out["value"].as_str().unwrap().parse().unwrap(),
+            Script::from(Vec::<u8>::from_hex(out["script_pubkey"].as_str().unwrap()).unwrap()),
+        );
+        assert_eq!(output.record().to_hex(), out["record"].as_str().unwrap());
+        let msg = record
+            .leaf()
+            .collab_message(
+                record.asset,
+                r["value_in"].as_str().unwrap().parse().unwrap(),
+                &[output.clone()],
+            )
+            .unwrap();
+        assert_eq!(msg.preimage.to_hex(), r["message"].as_str().unwrap());
+        assert_eq!(msg.digest.to_hex(), r["digest"].as_str().unwrap());
+
+        // The kit's own message signer, given the record, builds the same digest.
+        use lwk_signer::csfs::{ArcaMessage, CommittedOutput, RebindMessage, RebindSource};
+        let signer_msg = ArcaMessage::Rebind(RebindMessage {
+            source: RebindSource::leaf(&record).unwrap(),
+            asset_in: record.asset,
+            value_in: record.value,
+            outputs: vec![CommittedOutput {
+                asset: output.asset,
+                value: output.value,
+                script_pubkey: output.script_pubkey.clone(),
+            }],
+        });
+        assert_eq!(
+            signer_msg.digest().unwrap().to_hex(),
+            r["digest"].as_str().unwrap()
+        );
+    }
+}
