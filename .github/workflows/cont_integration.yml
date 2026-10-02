@@ -25,6 +25,20 @@ jobs:
       - run: cargo build --features serial
       - run: cargo test --lib  # integration tests requires binaries for the test env...
 
+  # The Arca module and its signers, natively. The workspace-wide run above
+  # stops at the first crate whose tests fail, before it reaches these.
+  # `ark_regtest` needs a sequentiad binary and the wasm package, so it is
+  # built here, not run.
+  ark:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - run: cargo test -p lwk_signer --lib --features ark
+      - run: "cargo test -p lwk_wollet --lib --no-default-features --features ark ark::"
+      - run: cargo test -p lwk_wollet --no-default-features --features ark --test ark_regtest --no-run
+
   nix:
     runs-on: ubuntu-22.04
     steps:

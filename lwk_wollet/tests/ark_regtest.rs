@@ -35,7 +35,8 @@
 //!   cargo test -p lwk_wollet --no-default-features --features ark --test ark_regtest -- --nocapture
 //! ```
 //!
-//! Without `SEQUENTIAD_EXEC` the test prints that it did not run and passes.
+//! Without `SEQUENTIAD_EXEC` the test fails and says what it needs: a test
+//! that cannot run must not pass.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -286,10 +287,8 @@ impl Attack {
 
 #[test]
 fn leaves_on_regtest_verify_in_wasm() {
-    let Some(exe) = std::env::var_os("SEQUENTIAD_EXEC") else {
-        println!("ark_regtest did not run: set SEQUENTIAD_EXEC to a sequentiad binary");
-        return;
-    };
+    let exe = std::env::var_os("SEQUENTIAD_EXEC")
+        .expect("ark_regtest needs SEQUENTIAD_EXEC set to a sequentiad binary");
     let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("ark-regtest-{}", std::process::id()));
     let node = Node::start(Path::new(&exe), work.join("node"));

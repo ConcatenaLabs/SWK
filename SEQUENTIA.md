@@ -402,7 +402,9 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   round is then rolled back with `invalidateblock` and replaced by a round
   paying the same batch output from the same issuing coin: `recheck` accepts
   an honest replacement as such and refuses one carrying a second token atom
-  at `R`, by check 1.
+  at `R`, by check 1. It needs `SEQUENTIAD_EXEC` and fails without it. CI
+  builds it and runs the native Arca tests (`lwk_signer` and `lwk_wollet`'s
+  `ark` module) in a job of their own.
 - `src/seqob_covenant.rs`: `buildCovenantFillTx`, `buildCovenantRefundTx`,
   `covenantMakerAddress`, `covenantMakerDescriptor`, `scriptToAddress`.
 - `src/sequentia_delegation.rs`: `sequentiaDelegationScript`,
