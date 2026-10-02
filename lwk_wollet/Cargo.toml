@@ -103,7 +103,7 @@ js-sys = { version = "0.3.68" }
 [dev-dependencies]
 lwk_jade = { version = "0.18.1", features = ["test_emulator"] }
 lwk_ledger = { version = "0.18.1", features = ["test_emulator"] }
-lwk_signer = { version = "0.18.1", features = ["jade", "ledger"] }
+lwk_signer = { version = "0.18.1", features = ["jade", "ledger", "ark"] }
 lwk_containers = { version = "0.18.1" }
 lwk_test_util = { version = "0.18.0" }
 lwk_common = { version = "0.18.1", features = ["sqlite"]}
@@ -177,6 +177,11 @@ registry = ["reqwest"]
 [[test]]
 name = "e2e"
 path = "tests/e2e.rs"
+
+[[test]]
+name = "ark_regtest"
+path = "tests/ark_regtest.rs"
+required-features = ["ark"]
 
 [[example]]
 name = "list_transactions"

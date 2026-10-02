@@ -41,6 +41,7 @@ lwk_wollet = { version = "0.18.0", default-features = false, features = [
     "openamp",
     "adaptor",
     "btc-async",
+    "ark",
 ] }
 lwk_boltz = { version = "0.18.0", default-features = false }
 lwk_common = "0.18.0"

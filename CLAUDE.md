@@ -52,7 +52,7 @@ whose `index.html` imports a **default-exported `init`** from `./pkg/lwk_wasm.js
 the `web` target produces. The wallet symlinks or copies `lwk_wasm/pkg` into its own `pkg/`.
 
 There is no `just` recipe and no npm script for the wasm build. The Sequentia features
-(`sequentia`, `openamp`, `adaptor`, `btc-async`) are compiled into `lwk_wasm` unconditionally, so
+(`sequentia`, `openamp`, `adaptor`, `btc-async`, `ark`) are compiled into `lwk_wasm` unconditionally, so
 no extra flags are needed.
 
 `ambra` also consumes this repo, but as a Rust path dependency on sibling crates rather than
