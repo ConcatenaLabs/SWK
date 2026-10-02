@@ -27,6 +27,7 @@
 //! bytes.
 
 pub mod keys;
+pub mod verify;
 
 /// The Arca library: every script, the leaf record, its validation and the
 /// client's checks on a round.
