@@ -145,8 +145,12 @@ regtest node, with every signature made by the wasm bindings
 `tests/node/scripts/arca_regtest_driver.js`: a node unrolled with an
 authorisation the kit signed, a leaf's collaborative path at one and two
 outputs, an exit claim, and a reclaim. Each negative case is forced into a
-block with `generateblock`. The signers' keys come from mnemonics generated
-inside the driver.
+block with `generateblock` on a node started with `-par=1`, and must fail in
+the mempool and in the block for its own named reason. The kit's own
+refusals are recorded too: a message or spend for another chain than the
+signer's network, a rebind above the fee margin, and an exit under
+`SIGHASH_NONE`. The signers' keys come from mnemonics generated inside the
+driver, each signer made for the regtest chain's genesis hash.
 
 It needs the node package above, linked or installed as `lwk_node` in
 `tests/node/node_modules`, a `sequentiad` binary, a Sequentia source tree (for

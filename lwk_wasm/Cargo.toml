@@ -25,7 +25,9 @@ lwk_jade = { version = "0.18.0", default-features = false, features = [
 ] }
 lwk_signer = { version = "0.18.0", default-features = false, features = [
     "amp0",
+    "ark",
 ] }
+arca-covenant = { workspace = true }
 lwk_ledger = { version = "0.18.0", default-features = false, features = [
     "asyncr",
 ] }

@@ -40,6 +40,11 @@ lwk_simplicity = { path = "lwk_simplicity" }
 # can (de)serialize Sequentia's anchored block headers + issuance.
 elements = { path = "rust-elements" }
 
+# arca-covenant names this repository's rust-elements by its git URL; this
+# makes it the vendored copy above, so the kit and Arca share one `elements`.
+[patch."https://github.com/ConcatenaLabs/SWK"]
+elements = { path = "rust-elements" }
+
 [profile.release-smaller]
 inherits = "release"
 opt-level = 'z'      # Optimize for size.
@@ -65,3 +70,7 @@ serde_json = { version = "1.0" }
 log = { version = "0.4.22" }
 tempfile = { version = "3" }
 thiserror = { version = "2.0.18" }
+# Arca's covenant scripts, leaf record and client checks (the `arca`
+# repository's `covenant/` crate). This line is the only place the revision
+# is named; moving the pin is a change to it alone.
+arca-covenant = { git = "https://github.com/ConcatenaLabs/arca", rev = "d81ccecbdc10b9929e8df5714a56b5777aae1aa7", default-features = false }

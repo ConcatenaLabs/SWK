@@ -2,20 +2,30 @@
 //!
 //! A message crosses this edge as a plain object naming its fields, never as a
 //! bare hash. Byte order: asset ids and the genesis hash are display hex (as
-//! the node and the explorer print them); the leaf salt and scriptPubKeys are
-//! raw bytes as hex. Amounts are atoms, as a number or a decimal string.
+//! the node and the explorer print them); the leaf id, the salt and
+//! scriptPubKeys are raw bytes as hex. Amounts are atoms, as a number or a
+//! decimal string.
 //!
 //! ```js
-//! { kind: "rebind", genesisHash, leafSalt, assetIn, valueIn,
+//! { kind: "rebind", source, assetIn, valueIn,
 //!   outputs: [{ asset, value, scriptPubkey }, ...] }   // 1 to 4 outputs
 //! { kind: "unroll", children: [{ asset, value, scriptPubkey }, ...], time }
 //! { kind: "release", genesisHash, children: [{ asset, value, scriptPubkey }, ...] }
 //! ```
+//!
+//! A rebind's `source` names the output it spends. For a leaf's
+//! collaborative path it is the leaf's record, `{ record }` (the record's
+//! binary form as hex), from which the leaf id, the salt and the chain are
+//! taken. Otherwise it is `{ path, leafId, genesisHash, salt }`, where `path`
+//! is `leaf`, `checkpoint`, `htlc-claim`, `htlc-claim-both` or
+//! `htlc-refund-both` and `leafId` is the id of the leaf the output is, or
+//! was made from.
 
 use std::str::FromStr;
 
 use lwk_signer::csfs::{
-    ArcaMessage, CommittedOutput, RebindMessage, ReleaseMessage, UnrollAuthorisation,
+    ArcaMessage, CommittedOutput, CsfsPolicy, RebindMessage, RebindPath, RebindSource,
+    ReleaseMessage, UnrollAuthorisation,
 };
 use lwk_wollet::elements::{hex::ToHex, AssetId, BlockHash, Script};
 use serde::{Deserialize, Serialize};
@@ -51,12 +61,33 @@ struct OutputDto {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordSourceDto {
+    record: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NamedSourceDto {
+    path: String,
+    leaf_id: String,
+    genesis_hash: String,
+    salt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SourceDto {
+    Record(RecordSourceDto),
+    Named(NamedSourceDto),
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum MessageDto {
     #[serde(rename_all = "camelCase")]
     Rebind {
-        genesis_hash: String,
-        leaf_salt: String,
+        source: SourceDto,
         asset_in: String,
         value_in: Atoms,
         outputs: Vec<OutputDto>,
@@ -90,21 +121,71 @@ fn outputs(list: &[OutputDto]) -> Result<Vec<CommittedOutput>, Error> {
         .collect()
 }
 
+fn bytes32(s: &str, what: &str) -> Result<[u8; 32], Error> {
+    unhex(s, what)?
+        .try_into()
+        .map_err(|_| Error::Generic(format!("{what} must be 32 bytes")))
+}
+
+fn source(dto: SourceDto) -> Result<RebindSource, Error> {
+    Ok(match dto {
+        SourceDto::Record(RecordSourceDto { record }) => {
+            let record = arca_covenant::LeafRecord::from_bytes(&unhex(&record, "record")?)
+                .map_err(|e| Error::Generic(format!("the leaf's record: {e}")))?;
+            RebindSource::leaf(&record)?
+        }
+        SourceDto::Named(NamedSourceDto {
+            path,
+            leaf_id,
+            genesis_hash,
+            salt,
+        }) => RebindSource::new(
+            RebindPath::from_name(&path)?,
+            bytes32(&leaf_id, "leafId")?,
+            genesis(&genesis_hash)?,
+            bytes32(&salt, "salt")?,
+        ),
+    })
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LimitsDto {
+    fee_floor_per_kvb: Option<Atoms>,
+    max_uncommitted: Option<Atoms>,
+}
+
+/// The signer's policy from the `limits` object of `signCsfs`, for the
+/// network whose genesis hash is `genesis_hash`.
+pub(crate) fn parse_limits(limits: JsValue, genesis_hash: BlockHash) -> Result<CsfsPolicy, Error> {
+    let dto: LimitsDto = if limits.is_undefined() || limits.is_null() {
+        LimitsDto::default()
+    } else {
+        serde_wasm_bindgen::from_value(limits)?
+    };
+    Ok(match (dto.fee_floor_per_kvb, dto.max_uncommitted) {
+        (Some(_), Some(_)) => {
+            return Err(Error::Generic(
+                "limits: give feeFloorPerKvb or maxUncommitted, not both".into(),
+            ))
+        }
+        (Some(floor), None) => CsfsPolicy::new(genesis_hash, floor.get()?),
+        (None, Some(max)) => CsfsPolicy::with_ceiling(genesis_hash, max.get()?),
+        (None, None) => CsfsPolicy::with_ceiling(genesis_hash, 0),
+    })
+}
+
 /// Parse a message object into the signer's typed message.
 pub(crate) fn parse_message(message: JsValue) -> Result<ArcaMessage, Error> {
     let dto: MessageDto = serde_wasm_bindgen::from_value(message)?;
     Ok(match dto {
         MessageDto::Rebind {
-            genesis_hash,
-            leaf_salt,
+            source: src,
             asset_in,
             value_in,
             outputs: outs,
         } => ArcaMessage::Rebind(RebindMessage {
-            genesis_hash: genesis(&genesis_hash)?,
-            leaf_salt: unhex(&leaf_salt, "leafSalt")?
-                .try_into()
-                .map_err(|_| Error::Generic("leafSalt must be 32 bytes".into()))?,
+            source: source(src)?,
             asset_in: asset(&asset_in)?,
             value_in: value_in.get()?,
             outputs: outputs(&outs)?,

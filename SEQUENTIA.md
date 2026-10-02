@@ -40,6 +40,13 @@ Crates touched only mechanically:
 - `bitcoin = "=0.32.7"` pinned exactly to the version `elements-miniscript`
   pulls transitively, so the parent-chain crate can never drift and silently
   change HTLC redeemScript bytes.
+- `arca-covenant`, Arca's covenant scripts, leaf record and client checks
+  (`covenant/` in the [`arca`](https://github.com/ConcatenaLabs/arca)
+  repository), is a git dependency pinned to one revision in this file's
+  `[workspace.dependencies]`; moving the pin is a change to that line alone.
+  `[patch."https://github.com/ConcatenaLabs/SWK"]` points the `elements` that
+  `arca-covenant` names by this repository's URL at the vendored
+  `rust-elements`, so the kit and Arca share one `elements` crate.
 
 ## Vendored `rust-elements` (`./rust-elements`, cargo feature `sequentia`)
 
@@ -93,27 +100,54 @@ script-path signing for covenant protocols whose leaves name the wallet's key.
   `ScriptPathSpend` names the transaction, the input, every prevout, the leaf
   script, its control block (which carries the leaf version), the sighash type
   and the genesis hash. Before signing, the signer checks that the control
-  block commits the leaf to the taproot output the input spends, and that the
-  key at `path` is pushed in the leaf; it refuses otherwise. Signatures use no
-  auxiliary randomness, so the same request always gives the same bytes.
-  `ScriptPathSpend::sighash` and `verify` serve a party that holds no key, and
+  block commits the leaf to the taproot output the input spends, that the key
+  at `path` is pushed in the leaf and checked there by `OP_CHECKSIG`,
+  `OP_CHECKSIGVERIFY` or `OP_CHECKSIGADD` (a key that only
+  `OP_CHECKSIGFROMSTACK` checks is refused), and that the sighash type is
+  `SIGHASH_DEFAULT` or `SIGHASH_ALL`, which cover every input and output. Any
+  other type leaves outputs or inputs free (under `SIGHASH_NONE` an exit
+  signature lets whoever holds it send the coin anywhere);
+  `sign_tapscript_allowing(path, spend, type)` signs one such type, which the
+  caller names. `ScriptPathSpend::describe` gives the plain lines a wallet
+  shows before approval: the coin, the leaf, what the sighash type covers,
+  the outputs, the fee and the locks. Signatures use no auxiliary randomness,
+  so the same request always gives the same bytes. `ScriptPathSpend::sighash`
+  and `verify` serve a party that holds no key, and
   `SwSigner::xonly_public_key(path)` gives the key as a leaf names it.
-- `src/csfs.rs`: `SwSigner::sign_csfs(path, &ArcaMessage, &digest)`, a BIP340
-  signature over a 32-byte digest for `OP_CHECKSIGFROMSTACK`, for the three
-  messages Arca's scripts verify: `RebindMessage` (a leaf's collaborative path:
-  genesis hash, leaf salt, the spent coin's asset and value, and the 1 to 4
-  committed outputs), `UnrollAuthorisation` (a node's children and the median
-  time `t`) and `ReleaseMessage` (genesis hash and a lowest node's children).
+- `src/csfs.rs`: `SwSigner::sign_csfs(path, &ArcaMessage, &digest, &CsfsPolicy)`,
+  a BIP340 signature over a 32-byte digest for `OP_CHECKSIGFROMSTACK`, for the
+  three messages Arca's scripts verify: `RebindMessage` (a rebindable path: the
+  output it spends, the spent coin's asset and value, and the 1 to 4 committed
+  outputs), `UnrollAuthorisation` (a node's children and the median time `t`)
+  and `ReleaseMessage` (genesis hash and a lowest node's children).
   The caller presents the digest together with the fields it was built from;
   the signer rebuilds the digest and refuses when the two differ, so it never
   signs a bare hash. It also refuses fields no script can produce: an output
   count outside 1 to 4, a time below 500,000,000 (a height), no children, or
   children whose records exceed the 520 bytes a script can concatenate.
-  `ArcaMessage::describe` gives the plain-language lines a wallet shows before
-  asking for approval. Records follow the node's introspection rule exactly: a
-  witness output contributes its program and version, any other script its
-  SHA256 and version −1. The genesis hash and asset ids enter the messages in
-  internal byte order; `BlockHash` and `AssetId` parse display hex into it.
+  - A rebind names the output it spends with a `RebindSource`: the path
+    (`leaf`, `checkpoint`, `htlc-claim`, `htlc-claim-both` or
+    `htlc-refund-both`), the id of the leaf, and the salt and chain that make
+    the script's constant `K`. With the feature `ark`,
+    `RebindSource::leaf(&LeafRecord)` takes all of these from the leaf's
+    record, and the signer then also refuses a key that is not the record's
+    owner key and a coin that is not the record's asset and value.
+  - `CsfsPolicy` names the wallet's chain: a rebind or a release for any
+    other genesis hash is refused. It also caps what a rebind leaves
+    uncommitted, which goes to whoever broadcasts. The default,
+    `CsfsPolicy::new(genesis, floor_per_kvb)`, is the specification's fee
+    margin: four times the relay floor (atoms of the coin's asset per 1,000
+    vbytes) for the spend's measured size; `with_ceiling` sets the ceiling in
+    atoms.
+  - `ArcaMessage::describe` gives the plain-language lines a wallet shows
+    before asking for approval: the path and the leaf id, the outputs, and the
+    amount in each asset the committed outputs leave to whoever broadcasts.
+  Records follow the node's introspection rule exactly: a witness output
+  contributes its program and version, any other script its SHA256 and
+  version −1. The genesis hash and asset ids enter the messages in internal
+  byte order; `BlockHash` and `AssetId` parse display hex into it.
+- Feature `ark` adds the dependency on `arca-covenant` for
+  `RebindSource::leaf`.
 - `test_data/arca_vectors.json`: the Arca golden vectors, copied unchanged from
   `regtest/vectors/arca.json` in the
   [`arca`](https://github.com/ConcatenaLabs/arca) repository (test keys only).
@@ -264,21 +298,35 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
 - `src/tx_builder.rs`: `feeAsset()` (any-asset fees), `addExplicitRecipient()`,
   `addStakeOutput()`, `sequentiaStakeScript()`, `addDelegationOutput()`.
 - `src/wollet.rs`: explicit-UTXO and rescue (bump/replace/CPFP) bindings.
+- `src/network.rs`: `Network.regtestWithGenesis(policyAsset, genesisHash)`, a
+  regtest network for a chain started with its own parameters, whose genesis
+  hash a signer must know.
 - `src/signer.rs`: `Signer.stakerPublicKey()` (staking key at `m/2/0`); the
   OpenAMP enclave key and its signing at `m/5/0`; `Signer.xonlyPublicKeyAt(path)`
   and `Signer.signTapscript(path, txHex, inputIndex, prevoutsHex, leafScriptHex,
-  controlBlockHex, sighashType, genesisHex)` over `SwSigner::sign_tapscript`.
+  controlBlockHex, sighashType, genesisHex, allowSighash?)` over
+  `SwSigner::sign_tapscript`. A `Signer` keeps the network it was made with
+  (`Signer.genesisHash()`) and refuses a script-path spend or an Arca message
+  for any other chain. `allowSighash` names the one sighash type other than
+  `SIGHASH_DEFAULT` and `SIGHASH_ALL` the caller accepts (`"none"`,
+  `"single"`, `"all|anyonecanpay"`, `"none|anyonecanpay"`,
+  `"single|anyonecanpay"`).
 - `src/tapscript.rs`: `tapscriptSighash(...)`, the same signature hash without a
-  key. Prevouts are consensus-serialised hex in input order; the genesis hash is
-  display hex.
+  key, and `tapscriptDescribe(...)`, the plain lines of what a signature over
+  the spend authorises. Prevouts are consensus-serialised hex in input order;
+  the genesis hash is display hex.
 - `src/csfs.rs` and `src/signer.rs`: `Signer.signCsfs(path, message,
-  digestHex)` over `SwSigner::sign_csfs`, and the free functions
+  digestHex, limits)` over `SwSigner::sign_csfs`, and the free functions
   `csfsDigest(message)` and `csfsDescribe(message)` (`{ kind, digest, lines }`).
-  A message is a plain object: `{ kind: "rebind", genesisHash, leafSalt,
-  assetIn, valueIn, outputs }`, `{ kind: "unroll", children, time }` or
+  A message is a plain object: `{ kind: "rebind", source, assetIn, valueIn,
+  outputs }`, `{ kind: "unroll", children, time }` or
   `{ kind: "release", genesisHash, children }`, each output or child
   `{ asset, value, scriptPubkey }`; asset ids and the genesis hash in display
-  hex, amounts in atoms as a number or a decimal string.
+  hex, amounts in atoms as a number or a decimal string. A rebind's `source`
+  is the leaf's record, `{ record }` (binary form, hex), or
+  `{ path, leafId, genesisHash, salt }`. `limits` is `{ feeFloorPerKvb }` for
+  the specification's fee margin or `{ maxUncommitted }` for a ceiling in
+  atoms; without it a rebind must commit the whole coin.
 - `tests/node/arca_signers.js`: the bindings against the Arca vectors.
   `tests/node/scripts/arca_regtest.py` spends the Arca reference scripts on a
   regtest node with signatures from these bindings (see `lwk_wasm/README.md`).
