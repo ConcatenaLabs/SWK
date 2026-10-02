@@ -11,7 +11,7 @@ Everything targets the public Sequentia testnet (parent chain: Bitcoin
 testnet4). Protocol background lives in the node repo,
 https://github.com/ConcatenaLabs/Sequentia, under `doc/sequentia/`.
 
-Crates NOT touched by the fork (still pure upstream): `lwk_signer`, `lwk_cli`,
+Crates NOT touched by the fork (still pure upstream): `lwk_cli`,
 `lwk_jade`, `lwk_ledger`, `lwk_hwi`, `lwk_boltz`, `lwk_payment_instructions`,
 `lwk_rpc_model`, `lwk_tiny_jrpc`, `lwk_containers`, `lwk_test_util`,
 `amp2_mock`. The CLI/UniFFI surfaces have no Sequentia network selector yet.
@@ -79,6 +79,39 @@ its `sequentia` cargo feature:
     preserved across the re-genesis. Inside LWK the network genesis hash is
     used for BIP341 (taproot) sighash computation (e.g. the SeqOB covenant
     flows), so it must track the live chain.
+
+## `lwk_signer`
+
+The PSET signing path (`Signer::sign`) is upstream and unchanged. The fork adds
+script-path signing for covenant protocols whose leaves name the wallet's key.
+
+- `src/tapscript.rs`: `SwSigner::sign_tapscript(path, &ScriptPathSpend)`, a
+  BIP341 script-path signature for one input, at any leaf version (`0xc4`, the
+  Elements tapscript version, included), over the Elements signature hash: the
+  `TapSighash/elements`, `TapLeaf/elements` and `TapBranch/elements` tagged
+  hashes with the chain's genesis hash committed in the message.
+  `ScriptPathSpend` names the transaction, the input, every prevout, the leaf
+  script, its control block (which carries the leaf version), the sighash type
+  and the genesis hash. Before signing, the signer checks that the control
+  block commits the leaf to the taproot output the input spends, and that the
+  key at `path` is pushed in the leaf; it refuses otherwise. Signatures use no
+  auxiliary randomness, so the same request always gives the same bytes.
+  `ScriptPathSpend::sighash` and `verify` serve a party that holds no key, and
+  `SwSigner::xonly_public_key(path)` gives the key as a leaf names it.
+- `test_data/arca_vectors.json`: the Arca golden vectors, copied unchanged from
+  `regtest/vectors/arca.json` in the
+  [`arca`](https://github.com/ConcatenaLabs/arca) repository (test keys only).
+  The unit tests recompute every ordinary script-path signature hash in it and
+  re-sign each with its test key; both match byte for byte.
+
+A hardware signer gives the same guarantee only if its firmware does the same
+work on the device: compute the Elements script-path signature hash itself from
+the transaction, all prevouts, the leaf script and the leaf version (with the
+genesis hash of a chain the device knows), check the control block against the
+spent output, check that the leaf names the device's key, and show the outputs
+before signing. The Jade and Ledger integrations refuse every taproot input
+(`UnsupportedScriptPubkeyType`, `UnsupportedTaprootInput`), so neither signs
+these spends.
 
 ## `lwk_wollet`
 
@@ -213,7 +246,12 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   `addStakeOutput()`, `sequentiaStakeScript()`, `addDelegationOutput()`.
 - `src/wollet.rs`: explicit-UTXO and rescue (bump/replace/CPFP) bindings.
 - `src/signer.rs`: `Signer.stakerPublicKey()` (staking key at `m/2/0`); the
-  OpenAMP enclave key and its signing at `m/5/0`.
+  OpenAMP enclave key and its signing at `m/5/0`; `Signer.xonlyPublicKeyAt(path)`
+  and `Signer.signTapscript(path, txHex, inputIndex, prevoutsHex, leafScriptHex,
+  controlBlockHex, sighashType, genesisHex)` over `SwSigner::sign_tapscript`.
+- `src/tapscript.rs`: `tapscriptSighash(...)`, the same signature hash without a
+  key. Prevouts are consensus-serialised hex in input order; the genesis hash is
+  display hex.
 - `src/seqob_covenant.rs`: `buildCovenantFillTx`, `buildCovenantRefundTx`,
   `covenantMakerAddress`, `covenantMakerDescriptor`, `scriptToAddress`.
 - `src/sequentia_delegation.rs`: `sequentiaDelegationScript`,

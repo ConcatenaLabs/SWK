@@ -18,6 +18,7 @@ base64 = "0.21.7"
 
 [dev-dependencies]
 lwk_test_util = { version = "0.18.0" }
+serde_json = { workspace = true }
 
 [features]
 default = ["jade", "amp0"]

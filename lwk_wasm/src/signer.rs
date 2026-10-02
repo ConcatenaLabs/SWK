@@ -130,6 +130,62 @@ impl Signer {
         Ok(self.inner.derive_bip85_mnemonic(index, word_count)?.into())
     }
 
+    // ---- Script-path signing ------------------------------------------------
+
+    /// The x-only public key (64 hex) at the BIP32 derivation `path`, such as
+    /// `"m/6/0"`: the form in which a tapscript leaf names a key.
+    #[wasm_bindgen(js_name = xonlyPublicKeyAt)]
+    pub fn xonly_public_key_at(&self, path: &str) -> Result<String, Error> {
+        use lwk_wollet::elements::hex::ToHex;
+        let path = parse_path(path)?;
+        Ok(self.inner.xonly_public_key(&path)?.serialize().to_hex())
+    }
+
+    /// Sign input `inputIndex` of `txHex` through one leaf of the taproot
+    /// output it spends, with the key at `path`: a BIP341 script-path
+    /// signature over the Elements signature hash (the Elements tagged hashes
+    /// and the genesis hash), at the leaf version the control block carries,
+    /// with no auxiliary randomness.
+    ///
+    /// - `prevoutsHex`: every input's spent output, consensus-serialised hex,
+    ///   in input order.
+    /// - `leafScriptHex`, `controlBlockHex`: the leaf and its control block,
+    ///   as they go in the witness.
+    /// - `sighashType`: the BIP341 type byte; 0 is `SIGHASH_DEFAULT`.
+    /// - `genesisHex`: the chain's genesis hash, display hex.
+    ///
+    /// Refuses when the control block does not commit the leaf to the output
+    /// the input spends, and when the key at `path` is not pushed in the leaf.
+    /// Returns the witness signature as hex: 64 bytes for `SIGHASH_DEFAULT`,
+    /// 65 otherwise.
+    #[wasm_bindgen(js_name = signTapscript)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_tapscript(
+        &self,
+        path: &str,
+        tx_hex: &str,
+        input_index: u32,
+        prevouts_hex: Vec<String>,
+        leaf_script_hex: &str,
+        control_block_hex: &str,
+        sighash_type: u8,
+        genesis_hex: &str,
+    ) -> Result<String, Error> {
+        use lwk_wollet::elements::hex::ToHex;
+        let path = parse_path(path)?;
+        let parts = crate::tapscript::SpendParts::parse(
+            tx_hex,
+            input_index,
+            &prevouts_hex,
+            leaf_script_hex,
+            control_block_hex,
+            sighash_type,
+            genesis_hex,
+        )?;
+        let sig = self.inner.sign_tapscript(&path, &parts.spend())?;
+        Ok(sig.to_vec().to_hex())
+    }
+
     // ---- OpenAMP identity + signing (SWK-1) --------------------------------
     // The canonical OpenAMP enclave key is BIP32 m/5/0 (spec 1.1), matching Ambra
     // (m/2/0 = staker, m/3/0 = SeqDEX HTLC, m/5/0 = OpenAMP). The secret NEVER
@@ -227,6 +283,11 @@ impl Signer {
         let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
         Ok(sig.serialize().to_hex())
     }
+}
+
+fn parse_path(path: &str) -> Result<bip32::DerivationPath, Error> {
+    use std::str::FromStr;
+    Ok(bip32::DerivationPath::from_str(path)?)
 }
 
 #[allow(dead_code)]
