@@ -245,6 +245,23 @@ Changes by file:
     its nonce and checks it equals the record's owner key (`restore_key`): no
     index scan and no gap limit. A key is never derived from a counter and
     never reused, because one key on two leaves lets the operator take one.
+  - `verify.rs`: `verify_leaf(record, round, policy, owner, owner_nonce)`
+    rebuilds every script on the leaf's path from its record, requires the
+    round transaction to pay the batch output exactly once, runs the five
+    client checks on the sweep token and its clock, applies the wallet's
+    `WalletPolicy` (its chain, the operator key it was told, the shortest
+    notice, how far ahead the first expiry lies, the bounds of the exit
+    delay), and checks the record is for the wallet's key and owner nonce.
+    A refusal names what failed (`VerifyError::check` gives 1 to 5 for the
+    client checks). `verify_round` runs the same checks on a leaf the wallet
+    does not own. A `VerifiedLeaf` names the round it was checked against
+    and makes no claim of finality, which the caller's chain source decides;
+    after any rollback that disconnects that round, `recheck` checks
+    whichever transaction now pays the batch output, and a failure is an
+    order to unroll at once. `tests/data/arca_records.json` is the Arca
+    repository's `regtest/vectors/records.json`, copied unchanged; every
+    record in it verifies against its round, and every refusal vector is
+    refused by its kind.
 - `src/adaptor.rs` (feature `adaptor`): BIP340 Schnorr adaptor signatures
   (`adaptor_sign`, `adaptor_verify`, `adaptor_complete`, `adaptor_extract`),
   built in-house on `secp256k1` point arithmetic because the vendored
