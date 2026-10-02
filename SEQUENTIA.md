@@ -250,15 +250,23 @@ Changes by file:
     round transaction to pay the batch output exactly once, runs the five
     client checks on the sweep token and its clock, applies the wallet's
     `WalletPolicy` (its chain, the operator key it was told, the shortest
-    notice, how far ahead the first expiry lies, the bounds of the exit
+    notice, how far after `now` the first expiry lies, the bounds of the exit
     delay), and checks the record is for the wallet's key and owner nonce.
     A refusal names what failed (`VerifyError::check` gives 1 to 5 for the
     client checks). `verify_round` runs the same checks on a leaf the wallet
-    does not own. A `VerifiedLeaf` names the round it was checked against
-    and makes no claim of finality, which the caller's chain source decides;
-    after any rollback that disconnects that round, `recheck` checks
-    whichever transaction now pays the batch output, and a failure is an
-    order to unroll at once. `tests/data/arca_records.json` is the Arca
+    does not own, and `verify_coin` runs the Arca library's
+    `CoinRecord::validate` on a coin received out of round, back to every
+    round its lineage came from. A `VerifiedLeaf` names the round it was
+    checked against and makes no claim of finality, which the caller's chain
+    source decides; after any rollback that disconnects that round,
+    `recheck(previous_round, …)` checks whichever transaction now pays the
+    batch output, and a failure is an order to unroll at once. A leaf taken
+    from a round (`verify_leaf`) must leave the policy's acceptance horizon,
+    27 days by default; a leaf or coin received (`verify_round`,
+    `verify_coin`) and a leaf held (`recheck`) need only leave the exit
+    deadline, `E_0 ≥ now + 3 days` (`exit_deadline_policy`), whatever horizon
+    the caller's policy names. `now` is the chain source's median time at the
+    call. `tests/data/arca_records.json` is the Arca
     repository's `regtest/vectors/records.json`, copied unchanged; every
     record in it verifies against its round, and every refusal vector is
     refused by its kind. `tests/data/ark_byte_order.json` pins the byte
@@ -377,7 +385,9 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   ownerNonce)`, `Signer.arkLeafKey(account, ownerNonce)` and
   `Signer.arkRestoreKey(account, record)` for the leaf keys;
   `arkParseRecord(record)` for a record's fields; `ArkVerifier(network,
-  policy)` with `verifyLeaf`, `verifyRound` and `recheck`, whose verdict is
+  policy)` with `verifyLeaf`, `verifyRound` and `recheck`, each taking the
+  chain's median time `now` as its last argument (the policy names none, and
+  refuses one), whose verdict is
   `{ accepted: true, leafId, roundTxid, asset, value, expiries, ... }` or
   `{ accepted: false, failed, check, kind, reason }`; and `ArkStore(storage)`
   over a `JsStorage` object. A record is its JSON text or its binary form as
@@ -400,9 +410,11 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   from the records' nonces, fetch each round from the node, accept the honest
   leaves and refuse each attack by the check that catches it. The honest
   round is then rolled back with `invalidateblock` and replaced by a round
-  paying the same batch output from the same issuing coin: `recheck` accepts
-  an honest replacement as such and refuses one carrying a second token atom
-  at `R`, by check 1. It needs `SEQUENTIAD_EXEC` and fails without it. CI
+  paying the same batch output from the same issuing coin: `recheck`, at the
+  node's median time, accepts an honest replacement as such, still accepts it
+  with the chain ten days on, refuses it one second past its exit deadline,
+  and refuses a replacement carrying a second token atom at `R`, by check 1.
+  It needs `SEQUENTIAD_EXEC` and fails without it. CI
   builds it and runs the native Arca tests (`lwk_signer` and `lwk_wollet`'s
   `ark` module) in a job of their own.
 - `src/seqob_covenant.rs`: `buildCovenantFillTx`, `buildCovenantRefundTx`,

@@ -23,8 +23,12 @@
 //!
 //! Then a rollback: the honest round's block is invalidated and a replacement
 //! paying the same batch output from the same issuing coin is mined, once
-//! honest and once with a second token atom at `R`. The wasm re-check must
-//! accept the first as a replacement and refuse the second by check 1.
+//! honest and once with a second token atom at `R`. The wasm re-check, at the
+//! median time of the node's tip, must accept the first as a replacement and
+//! refuse the second by check 1. Between the two, the chain's median time is
+//! moved ten days on, where the re-check of the held leaf must still accept
+//! it, and then one second past its exit deadline, three days before its
+//! first expiry, where it must refuse it.
 //!
 //! Needs `SEQUENTIAD_EXEC` (a `sequentiad` binary), `node`, and the wasm
 //! package built for node.js and linked as `lwk_node` in
@@ -306,7 +310,8 @@ fn leaves_on_regtest_verify_in_wasm() {
     )["time"]
         .as_u64()
         .unwrap();
-    node.rpc("setmocktime", json!([tip_time + 1]));
+    let mock = tip_time + 1;
+    node.rpc("setmocktime", json!([mock]));
     node.rpc("generatetodescriptor", json!([1, "raw(51)"]));
 
     // The free coins, at a bare OP_TRUE of the genesis block.
@@ -615,22 +620,53 @@ fn leaves_on_regtest_verify_in_wasm() {
             "rolled back {previous}; mined {} as {name}",
             replacement.txid()
         );
-        run_js(
-            &work,
-            &json!({
-                "mode": "recheck",
-                "name": name,
-                "rpc": fixture["rpc"],
-                "genesis_hash": fixture["genesis_hash"],
-                "policy_asset": fixture["policy_asset"],
-                "operator": fixture["operator"],
-                "now": fixture["now"],
-                "previous_round_txid": previous.to_string(),
-                "round_txid": replacement.txid().to_string(),
-                "leaf": leaf,
-                "check": if second_atom { json!(1) } else { Json::Null },
-            }),
-        );
+        let recheck = |name: &str, expect: Json| {
+            run_js(
+                &work,
+                &json!({
+                    "mode": "recheck",
+                    "name": name,
+                    "rpc": fixture["rpc"],
+                    "genesis_hash": fixture["genesis_hash"],
+                    "policy_asset": fixture["policy_asset"],
+                    "operator": fixture["operator"],
+                    "now": fixture["now"],
+                    "previous_round_txid": previous.to_string(),
+                    "round_txid": replacement.txid().to_string(),
+                    "leaf": leaf,
+                    "expect": expect,
+                }),
+            )
+        };
+        if second_atom {
+            recheck(
+                name,
+                json!({"accepted": false, "failed": "check 1", "check": 1}),
+            );
+        } else {
+            recheck(name, json!({"accepted": true}));
+            // Review R4, F4: the leaf is held, so a later re-check needs only
+            // its exit deadline, not the 27-day horizon a new leaf must leave.
+            // The chain's median time is moved by mining eleven blocks at the
+            // new time.
+            let deadline = now + 28 * DAY - 3 * DAY;
+            let later = [
+                ("ten days on", now + 10 * DAY, true),
+                ("one second past the exit deadline", deadline + 1, false),
+            ];
+            for (when, t, accepted) in later {
+                node.rpc("setmocktime", json!([t]));
+                node.rpc("generatetodescriptor", json!([11, "raw(51)"]));
+                assert_eq!(node.mtp(), t, "the median time moved to {t}");
+                let expect = if accepted {
+                    json!({"accepted": true})
+                } else {
+                    json!({"accepted": false, "failed": "wallet policy", "check": null})
+                };
+                recheck(&format!("{name}, {when}"), expect);
+            }
+            node.rpc("setmocktime", json!([mock]));
+        }
         previous = replacement.txid();
     }
     drop(node);

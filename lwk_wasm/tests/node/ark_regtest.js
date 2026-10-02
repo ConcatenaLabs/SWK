@@ -14,7 +14,8 @@
 //
 // With a fixture of mode "recheck", written after the test rolls the honest
 // round back and mines a replacement, it checks the wallet's leaf again
-// against the replacement as the node returns it.
+// against the replacement as the node returns it, at the median time of the
+// node's tip, and requires the verdict the fixture names.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -45,24 +46,28 @@ function rpc(method, params) {
 }
 
 // After a rollback: the wallet's leaf, checked again against the
-// transaction that now pays its batch output.
+// transaction that now pays its batch output, at the tip's median time.
 async function recheck() {
     const network = lwk.Network.regtestWithGenesis(new lwk.AssetId(fx.policy_asset), fx.genesis_hash);
-    const verifier = new lwk.ArkVerifier(network, { operator: fx.operator, now: fx.now });
+    const verifier = new lwk.ArkVerifier(network, { operator: fx.operator });
+    const tip = await rpc('getblockheader', [await rpc('getbestblockhash', [])]);
+    const now = tip.mediantime;
     const roundHex = await rpc('getrawtransaction', [fx.round_txid]);
     const l = fx.leaf;
-    const v = verifier.recheck(fx.previous_round_txid, l.record, roundHex, l.owner, l.owner_nonce);
-    if (fx.check === null) {
+    const v = verifier.recheck(fx.previous_round_txid, l.record, roundHex, l.owner, l.owner_nonce, now);
+    const when = `median time ${now}, ${((now - fx.now) / 86400).toFixed(2)} days after the round`;
+    if (fx.expect.accepted) {
         assert.ok(v.accepted, `${fx.name}: ${v.reason}`);
         assert.strictEqual(v.replaced, true);
         assert.strictEqual(v.previousRoundTxid, fx.previous_round_txid);
         assert.strictEqual(v.roundTxid, fx.round_txid);
         assert.strictEqual(v.leafId, l.leaf_id);
-        console.log(`recheck, ${fx.name}: accepted as a replacement of ${v.previousRoundTxid} by ${v.roundTxid}`);
+        console.log(`recheck, ${fx.name}, at ${when}: accepted as a replacement of ${v.previousRoundTxid} by ${v.roundTxid}`);
     } else {
         assert.strictEqual(v.accepted, false, `${fx.name}: accepted`);
-        assert.strictEqual(v.check, fx.check, v.reason);
-        console.log(`recheck, ${fx.name}: refused, ${v.reason}`);
+        assert.strictEqual(v.failed, fx.expect.failed, v.reason);
+        assert.strictEqual(v.check, fx.expect.check === null ? undefined : fx.expect.check, v.reason);
+        console.log(`recheck, ${fx.name}, at ${when}: refused, ${v.reason}`);
     }
 }
 
@@ -70,7 +75,8 @@ async function main() {
     const network = lwk.Network.regtestWithGenesis(new lwk.AssetId(fx.policy_asset), fx.genesis_hash);
     // The wallet restored from its mnemonic: no state but the words.
     const signer = new lwk.Signer(new lwk.Mnemonic(fx.mnemonic), network);
-    const verifier = new lwk.ArkVerifier(network, { operator: fx.operator, now: fx.now });
+    const verifier = new lwk.ArkVerifier(network, { operator: fx.operator });
+    const now = fx.now;
     const map = new Map();
     const store = new lwk.ArkStore({
         get: (k) => map.get(k) || null,
@@ -95,10 +101,10 @@ async function main() {
                 assert.strictEqual(key.ownerNonce, l.owner_nonce, b.name);
                 assert.strictEqual(key.path, lwk.arkLeafKeyPath(0, l.owner_nonce));
                 restored++;
-                verdict = verifier.verifyLeaf(l.record, roundHex, key.key, key.ownerNonce);
+                verdict = verifier.verifyLeaf(l.record, roundHex, key.key, key.ownerNonce, now);
             } else {
                 assert.throws(() => signer.arkRestoreKey(0, l.record), /the leaf is not this wallet's/);
-                verdict = verifier.verifyRound(l.record_hex, roundHex);
+                verdict = verifier.verifyRound(l.record_hex, roundHex, now);
             }
             if (b.check === null) {
                 assert.ok(verdict.accepted, `${b.name}: ${verdict.reason}`);
@@ -107,9 +113,10 @@ async function main() {
                 assert.strictEqual(verdict.owned, l.ours);
                 accepted++;
                 if (l.ours) {
-                    store.putLeaf(verifier, l.record, roundHex, l.owner, l.owner_nonce);
+                    store.putPending(l.owner_nonce, 'receive');
+                    store.putLeaf(verifier, l.record, roundHex, l.owner, l.owner_nonce, now);
                     store.putPreimage(l.leaf_id, l.preimage);
-                    const again = verifier.recheck(b.round_txid, l.record, roundHex, l.owner, l.owner_nonce);
+                    const again = verifier.recheck(b.round_txid, l.record, roundHex, l.owner, l.owner_nonce, now);
                     assert.strictEqual(again.replaced, false);
                 }
             } else {
@@ -117,7 +124,7 @@ async function main() {
                 assert.strictEqual(verdict.check, b.check, `${b.name}: ${verdict.reason}`);
                 assert.strictEqual(verdict.failed, `check ${b.check}`);
                 if (l.ours) {
-                    assert.throws(() => store.putLeaf(verifier, l.record, roundHex, l.owner, l.owner_nonce),
+                    assert.throws(() => store.putLeaf(verifier, l.record, roundHex, l.owner, l.owner_nonce, now),
                         new RegExp(`leaf refused: check ${b.check}: `));
                 }
                 refused++;
@@ -125,8 +132,8 @@ async function main() {
         }
         const first = b.leaves[0];
         const v0 = first.ours
-            ? verifier.verifyLeaf(first.record, roundHex, first.owner, first.owner_nonce)
-            : verifier.verifyRound(first.record, roundHex);
+            ? verifier.verifyLeaf(first.record, roundHex, first.owner, first.owner_nonce, now)
+            : verifier.verifyRound(first.record, roundHex, now);
         console.log(`${b.round_txid} ${b.name}: ${v0.accepted ? `accepted; leaf 0 holds ${v0.value} atoms of ${v0.asset}, first expiry ${v0.expiries[0]}` : v0.reason}`);
     }
     const kept = store.leafIds();

@@ -10,8 +10,9 @@
 //! its JSON text (which begins `{`) or its binary form as hex.
 //!
 //! ```js
-//! const verifier = new ArkVerifier(network, { operator, now });
-//! const leaf = verifier.verifyLeaf(record, roundTxHex, ownerKeyHex, ownerNonceHex);
+//! const verifier = new ArkVerifier(network, { operator });
+//! const now = tip.mediantime;   // the chain source's median time, at each call
+//! const leaf = verifier.verifyLeaf(record, roundTxHex, ownerKeyHex, ownerNonceHex, now);
 //! if (!leaf.accepted) console.log(leaf.failed, leaf.reason);   // "check 3", "check 3: ..."
 //! ```
 
@@ -20,7 +21,7 @@ use std::sync::Arc;
 
 use lwk_wollet::ark::keys::{self, OwnerNonce};
 use lwk_wollet::ark::store::ArkStore as Store;
-use lwk_wollet::ark::verify::{self, VerifiedLeaf, VerifyError};
+use lwk_wollet::ark::verify::{self, Recheck, VerifiedLeaf, VerifyError};
 use lwk_wollet::ark::{Chain, LeafRecord, MedianTime, RecordError, RelativeTime, WalletPolicy};
 use lwk_wollet::elements::hex::{FromHex, ToHex};
 use lwk_wollet::elements::secp256k1_zkp::XOnlyPublicKey;
@@ -191,7 +192,9 @@ pub fn ark_parse_record(record: &str) -> Result<JsValue, Error> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PolicyDto {
     operator: String,
-    now: u32,
+    /// Refused when present: `now` is given to each call. Named here because
+    /// an object read from JavaScript ignores fields the struct does not name.
+    now: Option<serde::de::IgnoredAny>,
     min_notice_seconds: Option<u64>,
     horizon_seconds: Option<u32>,
     min_exit_delay_seconds: Option<u64>,
@@ -302,12 +305,19 @@ impl VerdictDto {
 /// Verifies Arca leaves for a wallet: its network (whose genesis hash binds
 /// every leaf to its chain) and its policy.
 ///
-/// The policy object is `{ operator, now, minNoticeSeconds?, horizonSeconds?,
+/// The policy object is `{ operator, minNoticeSeconds?, horizonSeconds?,
 /// minExitDelaySeconds?, maxExitDelaySeconds? }`: the operator key the wallet
-/// was told (x-only hex), the median time the wallet's chain source gives as
-/// now, and the bounds, which default to the specification's (a notice of at
-/// least 36 hours, a first expiry at least 27 days after now, an exit delay of
-/// 36 to 48 hours).
+/// was told (x-only hex) and the bounds, which default to the specification's
+/// (a notice of at least 36 hours, a first expiry at least 27 days after now
+/// for a leaf taken from a round, an exit delay of 36 to 48 hours). Every
+/// method takes `now`, the median time the wallet's chain source gives at
+/// the time of the call, so a verifier kept for a long time never applies a
+/// stale time.
+///
+/// `verifyLeaf` is for a leaf the wallet takes from a round it joins, and
+/// applies the horizon. `verifyRound` (a leaf the wallet is given) and
+/// `recheck` (a leaf it holds) need only the exit deadline: a first expiry
+/// at least three days after now.
 ///
 /// A verdict is `{ accepted: true, owned, leafId, roundTxid, batchVout,
 /// asset, value, expiries, noticeSeconds, exitDelaySeconds, exitDeadline }`
@@ -319,8 +329,13 @@ impl VerdictDto {
 /// `recheck`.
 #[wasm_bindgen]
 pub struct ArkVerifier {
+    /// The wallet's policy. Its `now` is replaced on every call ([`Self::at`]).
     policy: WalletPolicy,
 }
+
+/// The parsed inputs for the wallet's own leaf, or the verdict refusing a
+/// record that does not decode.
+type Own = Result<(LeafRecord, Transaction, XOnlyPublicKey, OwnerNonce), VerdictDto>;
 
 #[wasm_bindgen]
 impl ArkVerifier {
@@ -328,12 +343,18 @@ impl ArkVerifier {
     #[wasm_bindgen(constructor)]
     pub fn new(network: &Network, policy: JsValue) -> Result<ArkVerifier, Error> {
         let dto: PolicyDto = serde_wasm_bindgen::from_value(policy)?;
+        if dto.now.is_some() {
+            return Err(generic(
+                "the policy takes no `now`: give the chain's median time to each call",
+            ));
+        }
         let net: lwk_common::Network = network.into();
-        let now = MedianTime::from_consensus(dto.now).map_err(|e| generic(format!("now: {e}")))?;
+        // A placeholder: every use goes through `at`, which sets the caller's.
+        let unset = MedianTime::from_consensus(500_000_000).map_err(generic)?;
         let mut policy = WalletPolicy::new(
             Chain::new(net.genesis_hash()),
             xonly(&dto.operator, "operator key")?,
-            now,
+            unset,
         );
         if let Some(s) = dto.min_notice_seconds {
             policy.min_notice = relative(s, "minNoticeSeconds")?;
@@ -350,31 +371,79 @@ impl ArkVerifier {
         Ok(ArkVerifier { policy })
     }
 
+    /// The policy at median time `now`.
+    fn at(&self, now: u32) -> Result<WalletPolicy, Error> {
+        Ok(WalletPolicy {
+            now: MedianTime::from_consensus(now).map_err(|e| generic(format!("now: {e}")))?,
+            ..self.policy
+        })
+    }
+
+    fn parse_own(
+        record: &str,
+        round_hex: &str,
+        owner_key_hex: &str,
+        owner_nonce_hex: &str,
+    ) -> Result<Own, Error> {
+        let round = transaction(round_hex)?;
+        let owner = xonly(owner_key_hex, "owner key")?;
+        let owner_nonce = nonce(owner_nonce_hex)?;
+        Ok(match parse_record(record) {
+            Ok(r) => Ok((r, round, owner, owner_nonce)),
+            Err(e) => Err(VerdictDto::unreadable(&e)),
+        })
+    }
+
+    /// The wallet's own leaf taken from a round, verified at `now`.
     fn own(
         &self,
         record: &str,
         round_hex: &str,
         owner_key_hex: &str,
         owner_nonce_hex: &str,
+        now: u32,
     ) -> Result<Result<(LeafRecord, VerifiedLeaf), VerdictDto>, Error> {
-        let round = transaction(round_hex)?;
-        let owner = xonly(owner_key_hex, "owner key")?;
-        let owner_nonce = nonce(owner_nonce_hex)?;
-        let record = match parse_record(record) {
-            Ok(r) => r,
-            Err(e) => return Ok(Err(VerdictDto::unreadable(&e))),
-        };
+        let policy = self.at(now)?;
         Ok(
-            match verify::verify_leaf(&record, &round, &self.policy, &owner, &owner_nonce) {
-                Ok(v) => Ok((record, v)),
-                Err(e) => Err(VerdictDto::refused(&e)),
+            match Self::parse_own(record, round_hex, owner_key_hex, owner_nonce_hex)? {
+                Err(refusal) => Err(refusal),
+                Ok((record, round, owner, owner_nonce)) => {
+                    match verify::verify_leaf(&record, &round, &policy, &owner, &owner_nonce) {
+                        Ok(v) => Ok((record, v)),
+                        Err(e) => Err(VerdictDto::refused(&e)),
+                    }
+                }
             },
         )
     }
 
-    /// Verify the wallet's own leaf: `record` against the round transaction
-    /// `roundTxHex`, for the wallet's key `ownerKeyHex` and the owner nonce
-    /// `ownerNonceHex` it picked for the leaf.
+    /// The wallet's own leaf checked again at `now`, against the round it
+    /// was last verified against, `previous`.
+    fn own_again(
+        &self,
+        previous: &lwk_wollet::elements::Txid,
+        record: &str,
+        round_hex: &str,
+        owner_key_hex: &str,
+        owner_nonce_hex: &str,
+        now: u32,
+    ) -> Result<Result<Recheck, VerdictDto>, Error> {
+        let policy = self.at(now)?;
+        Ok(
+            match Self::parse_own(record, round_hex, owner_key_hex, owner_nonce_hex)? {
+                Err(refusal) => Err(refusal),
+                Ok((record, round, owner, owner_nonce)) => {
+                    verify::recheck(previous, &record, &round, &policy, &owner, &owner_nonce)
+                        .map_err(|e| VerdictDto::refused(&e))
+                }
+            },
+        )
+    }
+
+    /// Verify the wallet's own leaf, taken from a round it joins: `record`
+    /// against the round transaction `roundTxHex`, for the wallet's key
+    /// `ownerKeyHex` and the owner nonce `ownerNonceHex` it picked for the
+    /// leaf, at median time `now`.
     #[wasm_bindgen(js_name = verifyLeaf)]
     pub fn verify_leaf(
         &self,
@@ -382,8 +451,9 @@ impl ArkVerifier {
         round_tx_hex: &str,
         owner_key_hex: &str,
         owner_nonce_hex: &str,
+        now: u32,
     ) -> Result<JsValue, Error> {
-        let verdict = match self.own(record, round_tx_hex, owner_key_hex, owner_nonce_hex)? {
+        let verdict = match self.own(record, round_tx_hex, owner_key_hex, owner_nonce_hex, now)? {
             Ok((_, v)) => VerdictDto::accepted(&v),
             Err(refusal) => refusal,
         };
@@ -391,13 +461,20 @@ impl ArkVerifier {
     }
 
     /// Verify a leaf the wallet does not own, such as the coin a sender is
-    /// about to give it: the same checks without the owner's key and nonce.
+    /// about to give it, at median time `now`: the same checks without the
+    /// owner's key and nonce, and the exit deadline in place of the horizon.
     #[wasm_bindgen(js_name = verifyRound)]
-    pub fn verify_round(&self, record: &str, round_tx_hex: &str) -> Result<JsValue, Error> {
+    pub fn verify_round(
+        &self,
+        record: &str,
+        round_tx_hex: &str,
+        now: u32,
+    ) -> Result<JsValue, Error> {
+        let policy = self.at(now)?;
         let round = transaction(round_tx_hex)?;
         let verdict = match parse_record(record) {
             Err(e) => VerdictDto::unreadable(&e),
-            Ok(r) => match verify::verify_round(&r, &round, &self.policy) {
+            Ok(r) => match verify::verify_round(&r, &round, &policy) {
                 Ok(v) => VerdictDto::accepted(&v),
                 Err(e) => VerdictDto::refused(&e),
             },
@@ -405,8 +482,9 @@ impl ArkVerifier {
         Ok(serde_wasm_bindgen::to_value(&verdict)?)
     }
 
-    /// Check the wallet's own leaf again after a rollback, against whichever
-    /// transaction now pays its batch output. The verdict adds `replaced`
+    /// Check the wallet's own leaf again after a rollback, at median time
+    /// `now`, against whichever transaction now pays its batch output, with
+    /// the exit deadline in place of the horizon. The verdict adds `replaced`
     /// (and `previousRoundTxid`) when that is another transaction than
     /// `previousRoundTxid`. A refusal is an order to unroll at once.
     pub fn recheck(
@@ -416,22 +494,28 @@ impl ArkVerifier {
         round_tx_hex: &str,
         owner_key_hex: &str,
         owner_nonce_hex: &str,
+        now: u32,
     ) -> Result<JsValue, Error> {
         let previous: lwk_wollet::elements::Txid = previous_round_txid
             .parse()
             .map_err(|e| generic(format!("previousRoundTxid: {e}")))?;
-        let verdict = match self.own(record, round_tx_hex, owner_key_hex, owner_nonce_hex)? {
+        let verdict = match self.own_again(
+            &previous,
+            record,
+            round_tx_hex,
+            owner_key_hex,
+            owner_nonce_hex,
+            now,
+        )? {
             Err(refusal) => refusal,
-            // The leaf verifies against this round; it is a replacement when
-            // its txid is not the one the wallet kept (`verify::recheck`).
-            Ok((_, now)) if now.round_txid == previous => VerdictDto {
+            Ok(Recheck::Same(v)) => VerdictDto {
                 replaced: Some(false),
-                ..VerdictDto::accepted(&now)
+                ..VerdictDto::accepted(&v)
             },
-            Ok((_, now)) => VerdictDto {
+            Ok(Recheck::Replaced { previous, now: v }) => VerdictDto {
                 replaced: Some(true),
                 previous_round_txid: Some(previous.to_string()),
-                ..VerdictDto::accepted(&now)
+                ..VerdictDto::accepted(&v)
             },
         };
         Ok(serde_wasm_bindgen::to_value(&verdict)?)
@@ -469,9 +553,10 @@ impl ArkStore {
         }
     }
 
-    /// Verify the wallet's own leaf with `verifier` and keep it. Refuses a
-    /// leaf that does not verify, naming what failed, and a second leaf under
-    /// an owner nonce or key the store already holds. Returns the leaf id.
+    /// Verify the wallet's own leaf, taken from a round it joins, with
+    /// `verifier` at median time `now`, and keep it. Refuses a leaf that
+    /// does not verify, naming what failed, and a second leaf under an owner
+    /// nonce or key the store already holds. Returns the leaf id.
     #[wasm_bindgen(js_name = putLeaf)]
     pub fn put_leaf(
         &self,
@@ -480,8 +565,9 @@ impl ArkStore {
         round_tx_hex: &str,
         owner_key_hex: &str,
         owner_nonce_hex: &str,
+        now: u32,
     ) -> Result<String, Error> {
-        match verifier.own(record, round_tx_hex, owner_key_hex, owner_nonce_hex)? {
+        match verifier.own(record, round_tx_hex, owner_key_hex, owner_nonce_hex, now)? {
             Err(refusal) => Err(generic(format!(
                 "leaf refused: {}",
                 refusal.reason.unwrap_or_default()
@@ -494,7 +580,8 @@ impl ArkStore {
     }
 
     /// Take a new round for a stored leaf after `recheck` accepted the
-    /// transaction that replaced it: verifies again, then keeps the new
+    /// transaction that replaced it: checks the leaf again at median time
+    /// `now` against that transaction, as `recheck` does, then keeps the new
     /// round's txid.
     #[wasm_bindgen(js_name = setRound)]
     pub fn set_round(
@@ -504,13 +591,30 @@ impl ArkStore {
         round_tx_hex: &str,
         owner_key_hex: &str,
         owner_nonce_hex: &str,
+        now: u32,
     ) -> Result<(), Error> {
-        match verifier.own(record, round_tx_hex, owner_key_hex, owner_nonce_hex)? {
+        let parsed = parse_record(record).map_err(|e| refused(&e))?;
+        let id = parsed.leaf_id().map_err(|e| refused(&e))?;
+        let stored = self
+            .inner
+            .leaf(&id)
+            .map_err(generic)?
+            .ok_or_else(|| generic(format!("no leaf {id} in the store")))?;
+        match verifier.own_again(
+            &stored.round_txid,
+            record,
+            round_tx_hex,
+            owner_key_hex,
+            owner_nonce_hex,
+            now,
+        )? {
             Err(refusal) => Err(generic(format!(
                 "leaf refused: {}",
                 refusal.reason.unwrap_or_default()
             ))),
-            Ok((_, verified)) => self.inner.set_round(&verified).map_err(generic),
+            Ok(Recheck::Same(v) | Recheck::Replaced { now: v, .. }) => {
+                self.inner.set_round(&v).map_err(generic)
+            }
         }
     }
 
