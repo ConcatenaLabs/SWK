@@ -186,6 +186,31 @@ impl Signer {
         Ok(sig.to_vec().to_hex())
     }
 
+    /// Sign an Arca message for `OP_CHECKSIGFROMSTACK` with the key at `path`.
+    ///
+    /// `message` is the message as its fields (see `csfsDescribe` for the
+    /// shape) and `digestHex` the 32-byte hash the caller expects to be
+    /// signed. The signer rebuilds the digest from the fields and refuses when
+    /// the two differ, so it never signs a hash whose meaning it has not
+    /// checked. Returns a 64-byte BIP340 signature as hex, made with no
+    /// auxiliary randomness.
+    #[wasm_bindgen(js_name = signCsfs)]
+    pub fn sign_csfs(
+        &self,
+        path: &str,
+        message: JsValue,
+        digest_hex: &str,
+    ) -> Result<String, Error> {
+        use lwk_wollet::elements::hex::ToHex;
+        let path = parse_path(path)?;
+        let message = crate::csfs::parse_message(message)?;
+        let digest: [u8; 32] = crate::tapscript::unhex(digest_hex, "digest")?
+            .try_into()
+            .map_err(|_| Error::Generic("digest must be 32 bytes".into()))?;
+        let sig = self.inner.sign_csfs(&path, &message, &digest)?;
+        Ok(sig.serialize().to_hex())
+    }
+
     // ---- OpenAMP identity + signing (SWK-1) --------------------------------
     // The canonical OpenAMP enclave key is BIP32 m/5/0 (spec 1.1), matching Ambra
     // (m/2/0 = staker, m/3/0 = SeqDEX HTLC, m/5/0 = OpenAMP). The secret NEVER

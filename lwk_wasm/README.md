@@ -137,6 +137,30 @@ npm install
 node network.js
 ```
 
+### Arca signers on regtest
+
+`tests/node/scripts/arca_regtest.py` spends the Arca reference scripts on a
+regtest node, with every signature made by the wasm bindings
+(`Signer.signTapscript` and `Signer.signCsfs`) through
+`tests/node/scripts/arca_regtest_driver.js`: a node unrolled with an
+authorisation the kit signed, a leaf's collaborative path at one and two
+outputs, an exit claim, and a reclaim. Each negative case is forced into a
+block with `generateblock`. The signers' keys come from mnemonics generated
+inside the driver.
+
+It needs the node package above, linked or installed as `lwk_node` in
+`tests/node/node_modules`, a `sequentiad` binary, a Sequentia source tree (for
+the node's functional test framework), and the `regtest/` directory of the
+[`arca`](https://github.com/ConcatenaLabs/arca) repository (for the reference
+scripts). Write a framework `config.ini` as `arca/regtest/run` does, then:
+
+```shell
+cd lwk_wasm/tests/node/scripts
+ARCA_REGTEST=/path/to/arca/regtest SEQUENTIA_DIR=/path/to/Sequentia \
+BITCOIND=/path/to/sequentiad ARCA_RESULTS=/tmp/arca-results \
+python3 arca_regtest.py --configfile=/path/to/config.ini --tmpdir=/tmp/arca-signers
+```
+
 ## Javascript code conventions
 
 For new additions and improvements, follow our [guidelines](GUIDE.md).

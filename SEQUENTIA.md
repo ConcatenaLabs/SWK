@@ -98,18 +98,37 @@ script-path signing for covenant protocols whose leaves name the wallet's key.
   auxiliary randomness, so the same request always gives the same bytes.
   `ScriptPathSpend::sighash` and `verify` serve a party that holds no key, and
   `SwSigner::xonly_public_key(path)` gives the key as a leaf names it.
+- `src/csfs.rs`: `SwSigner::sign_csfs(path, &ArcaMessage, &digest)`, a BIP340
+  signature over a 32-byte digest for `OP_CHECKSIGFROMSTACK`, for the three
+  messages Arca's scripts verify: `RebindMessage` (a leaf's collaborative path:
+  genesis hash, leaf salt, the spent coin's asset and value, and the 1 to 4
+  committed outputs), `UnrollAuthorisation` (a node's children and the median
+  time `t`) and `ReleaseMessage` (genesis hash and a lowest node's children).
+  The caller presents the digest together with the fields it was built from;
+  the signer rebuilds the digest and refuses when the two differ, so it never
+  signs a bare hash. It also refuses fields no script can produce: an output
+  count outside 1 to 4, a time below 500,000,000 (a height), no children, or
+  children whose records exceed the 520 bytes a script can concatenate.
+  `ArcaMessage::describe` gives the plain-language lines a wallet shows before
+  asking for approval. Records follow the node's introspection rule exactly: a
+  witness output contributes its program and version, any other script its
+  SHA256 and version −1. The genesis hash and asset ids enter the messages in
+  internal byte order; `BlockHash` and `AssetId` parse display hex into it.
 - `test_data/arca_vectors.json`: the Arca golden vectors, copied unchanged from
   `regtest/vectors/arca.json` in the
   [`arca`](https://github.com/ConcatenaLabs/arca) repository (test keys only).
-  The unit tests recompute every ordinary script-path signature hash in it and
-  re-sign each with its test key; both match byte for byte.
+  The unit tests recompute every ordinary script-path signature hash, every
+  record and every collaborative, unroll and release message in it, and
+  re-sign each with its test key; all match byte for byte.
 
 A hardware signer gives the same guarantee only if its firmware does the same
 work on the device: compute the Elements script-path signature hash itself from
 the transaction, all prevouts, the leaf script and the leaf version (with the
 genesis hash of a chain the device knows), check the control block against the
 spent output, check that the leaf names the device's key, and show the outputs
-before signing. The Jade and Ledger integrations refuse every taproot input
+before signing. For a message signature the device must likewise take the
+fields, rebuild the digest and show what it authorises; a device API that signs
+a presented hash cannot give that guarantee. The Jade and Ledger integrations refuse every taproot input
 (`UnsupportedScriptPubkeyType`, `UnsupportedTaprootInput`), so neither signs
 these spends.
 
@@ -252,6 +271,17 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
 - `src/tapscript.rs`: `tapscriptSighash(...)`, the same signature hash without a
   key. Prevouts are consensus-serialised hex in input order; the genesis hash is
   display hex.
+- `src/csfs.rs` and `src/signer.rs`: `Signer.signCsfs(path, message,
+  digestHex)` over `SwSigner::sign_csfs`, and the free functions
+  `csfsDigest(message)` and `csfsDescribe(message)` (`{ kind, digest, lines }`).
+  A message is a plain object: `{ kind: "rebind", genesisHash, leafSalt,
+  assetIn, valueIn, outputs }`, `{ kind: "unroll", children, time }` or
+  `{ kind: "release", genesisHash, children }`, each output or child
+  `{ asset, value, scriptPubkey }`; asset ids and the genesis hash in display
+  hex, amounts in atoms as a number or a decimal string.
+- `tests/node/arca_signers.js`: the bindings against the Arca vectors.
+  `tests/node/scripts/arca_regtest.py` spends the Arca reference scripts on a
+  regtest node with signatures from these bindings (see `lwk_wasm/README.md`).
 - `src/seqob_covenant.rs`: `buildCovenantFillTx`, `buildCovenantRefundTx`,
   `covenantMakerAddress`, `covenantMakerDescriptor`, `scriptToAddress`.
 - `src/sequentia_delegation.rs`: `sequentiaDelegationScript`,

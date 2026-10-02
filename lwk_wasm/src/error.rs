@@ -58,6 +58,9 @@ pub enum Error {
     Tapscript(#[from] lwk_signer::TapscriptError),
 
     #[error(transparent)]
+    Csfs(#[from] lwk_signer::CsfsError),
+
+    #[error(transparent)]
     Jade(#[from] lwk_jade::Error),
 
     #[error(transparent)]
@@ -202,6 +205,7 @@ impl Error {
             Error::Sign(_) => "Sign",
             Error::SignerNew(_) => "SignerNew",
             Error::Tapscript(_) => "Tapscript",
+            Error::Csfs(_) => "Csfs",
             Error::Jade(_) => "Jade",
             Error::Qr(_) => "Qr",
             Error::Keyorigin(_) => "Keyorigin",

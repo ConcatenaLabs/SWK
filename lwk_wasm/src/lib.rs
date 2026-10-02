@@ -16,6 +16,7 @@ mod btc_wallet;
 mod xchain;
 mod coinjoin;
 mod contract;
+mod csfs;
 #[cfg(feature = "simplicity")]
 mod control_block;
 mod descriptor;
@@ -115,6 +116,7 @@ pub use blockdata::wallet_tx_out::{OptionWalletTxOut, WalletTxOut};
 pub use boltz::LightningPayment;
 pub use boltz::{BoltzSession, BoltzSessionBuilder, Invoice};
 pub use contract::Contract;
+pub use csfs::{csfs_describe, csfs_digest};
 #[cfg(feature = "simplicity")]
 pub use control_block::ControlBlock;
 pub use descriptor::WolletDescriptor;

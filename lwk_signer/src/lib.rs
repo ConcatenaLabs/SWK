@@ -6,8 +6,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 
+pub mod csfs;
 mod software;
 pub mod tapscript;
+pub use crate::csfs::{ArcaMessage, CsfsError};
 pub use crate::software::{sign_with_seckey, NewError, SignError, SwSigner};
 pub use crate::tapscript::{ScriptPathSpend, TapscriptError};
 pub use bip39;
