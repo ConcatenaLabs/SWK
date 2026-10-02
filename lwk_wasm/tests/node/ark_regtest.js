@@ -11,6 +11,10 @@
 //   accepted, the wallet's as its own, while every leaf of each attack is
 //   refused with the check that catches it named;
 // - the honest leaves go into the store with their unlock preimages.
+//
+// With a fixture of mode "recheck", written after the test rolls the honest
+// round back and mines a replacement, it checks the wallet's leaf again
+// against the replacement as the node returns it.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -38,6 +42,28 @@ function rpc(method, params) {
         req.on('error', reject);
         req.end(body);
     });
+}
+
+// After a rollback: the wallet's leaf, checked again against the
+// transaction that now pays its batch output.
+async function recheck() {
+    const network = lwk.Network.regtestWithGenesis(new lwk.AssetId(fx.policy_asset), fx.genesis_hash);
+    const verifier = new lwk.ArkVerifier(network, { operator: fx.operator, now: fx.now });
+    const roundHex = await rpc('getrawtransaction', [fx.round_txid]);
+    const l = fx.leaf;
+    const v = verifier.recheck(fx.previous_round_txid, l.record, roundHex, l.owner, l.owner_nonce);
+    if (fx.check === null) {
+        assert.ok(v.accepted, `${fx.name}: ${v.reason}`);
+        assert.strictEqual(v.replaced, true);
+        assert.strictEqual(v.previousRoundTxid, fx.previous_round_txid);
+        assert.strictEqual(v.roundTxid, fx.round_txid);
+        assert.strictEqual(v.leafId, l.leaf_id);
+        console.log(`recheck, ${fx.name}: accepted as a replacement of ${v.previousRoundTxid} by ${v.roundTxid}`);
+    } else {
+        assert.strictEqual(v.accepted, false, `${fx.name}: accepted`);
+        assert.strictEqual(v.check, fx.check, v.reason);
+        console.log(`recheck, ${fx.name}: refused, ${v.reason}`);
+    }
 }
 
 async function main() {
@@ -110,4 +136,4 @@ async function main() {
     console.log(`ark_regtest: ${restored} wallet leaf keys restored from the mnemonic; ${accepted} leaves accepted, ${refused} refused by the check named; ${kept.length} kept in the store with their preimages`);
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+(fx.mode === 'recheck' ? recheck() : main()).catch((e) => { console.error(e); process.exit(1); });

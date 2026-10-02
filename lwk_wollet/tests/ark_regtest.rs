@@ -21,6 +21,11 @@
 //! the honest round and refuse every leaf of each attack with its check
 //! named. The same verdicts are reached natively.
 //!
+//! Then a rollback: the honest round's block is invalidated and a replacement
+//! paying the same batch output from the same issuing coin is mined, once
+//! honest and once with a second token atom at `R`. The wasm re-check must
+//! accept the first as a replacement and refuse the second by check 1.
+//!
 //! Needs `SEQUENTIAD_EXEC` (a `sequentiad` binary), `node`, and the wasm
 //! package built for node.js and linked as `lwk_node` in
 //! `lwk_wasm/tests/node/node_modules` (`lwk_wasm/README.md`):
@@ -174,6 +179,25 @@ impl Drop for Node {
         let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Runs `lwk_wasm/tests/node/ark_regtest.js` on `fixture` and requires it to
+/// pass.
+fn run_js(work: &Path, fixture: &Json) {
+    let path = work.join("fixture.json");
+    std::fs::write(&path, serde_json::to_string_pretty(fixture).unwrap()).unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../lwk_wasm/tests/node/ark_regtest.js");
+    let out = Command::new("node")
+        .arg(&script)
+        .arg(&path)
+        .current_dir(script.parent().unwrap())
+        .output()
+        .expect("node runs");
+    let _ = std::fs::remove_file(&path);
+    println!("{}", String::from_utf8_lossy(&out.stdout));
+    eprintln!("{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "ark_regtest.js failed");
 }
 
 fn op_true() -> Script {
@@ -376,6 +400,7 @@ fn leaves_on_regtest_verify_in_wasm() {
         MedianTime::from_consensus(now).unwrap(),
     );
     let mut batches = vec![];
+    let mut honest: Option<(Transaction, Json)> = None;
     for (i, attack) in attacks.iter().enumerate() {
         let issuer = OutPoint::new(issuers.txid(), i as u32);
         let token = AssetId::new_issuance(issuer, ContractHash::from_byte_array([0; 32]));
@@ -511,6 +536,9 @@ fn leaves_on_regtest_verify_in_wasm() {
                 "preimage": preimages[j].to_hex(),
             }));
         }
+        if *attack == Attack::None {
+            honest = Some((round.clone(), leaves_json[0].clone()));
+        }
         println!("mined round {} for {}", round.txid(), attack.name());
         batches.push(json!({
             "name": attack.name(),
@@ -531,20 +559,81 @@ fn leaves_on_regtest_verify_in_wasm() {
         "batches": batches,
     });
     std::fs::create_dir_all(&work).unwrap();
-    let path = work.join("fixture.json");
-    std::fs::write(&path, serde_json::to_string_pretty(&fixture).unwrap()).unwrap();
-    let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../lwk_wasm/tests/node/ark_regtest.js");
-    let out = Command::new("node")
-        .arg(&script)
-        .arg(&path)
-        .current_dir(script.parent().unwrap())
-        .output()
-        .expect("node runs");
-    let _ = std::fs::remove_file(&path);
-    println!("{}", String::from_utf8_lossy(&out.stdout));
-    eprintln!("{}", String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "ark_regtest.js failed");
+    run_js(&work, &fixture);
+
+    // A rollback (review R1, F2). The honest round's block is disconnected
+    // and a replacement spending the same issuing coin, paying the same batch
+    // output, is mined in its place: first an honest one with another txid,
+    // which the wallet's re-check accepts as a replacement, then one that
+    // also issues a second atom of the token straight to R, which the
+    // re-check refuses by check 1. Nothing in the tree commits to the round's
+    // txid, so only the re-check tells the two apart.
+    let (round, leaf) = honest.unwrap();
+    let mut previous = round.txid();
+    let replacements = [
+        ("an honest replacement", false),
+        ("a replacement with a second atom at R", true),
+    ];
+    for (name, second_atom) in replacements {
+        let block =
+            node.rpc("getrawtransaction", json!([previous.to_string(), true]))["blockhash"].clone();
+        node.rpc("invalidateblock", json!([block]));
+        let mut replacement = round.clone();
+        replacement.input[0].sequence = Sequence(0xffff_fffe);
+        if second_atom {
+            let token = round.output[1].asset.explicit().unwrap();
+            replacement.input[0].sequence = Sequence(0xffff_fffd);
+            replacement.input[0].asset_issuance.amount = Value::Explicit(2);
+            let record =
+                lwk_wollet::ark::LeafRecord::from_json_str(leaf["record"].as_str().unwrap())
+                    .unwrap();
+            replacement
+                .output
+                .insert(2, explicit(token, 1, record.schedule.r().script_pubkey()));
+        }
+        node.mine(&[&replacement]);
+        // The txindex still names the disconnected block; that block is no
+        // longer in the active chain.
+        let in_chain = match node.try_rpc("getrawtransaction", json!([previous.to_string(), true]))
+        {
+            Ok(v) => match v["blockhash"].as_str() {
+                Some(b) => {
+                    node.rpc("getblockheader", json!([b]))["confirmations"]
+                        .as_i64()
+                        .unwrap()
+                        > 0
+                }
+                None => false,
+            },
+            Err(_) => false,
+        };
+        assert!(
+            !in_chain,
+            "{name}: the replaced round is still in the active chain"
+        );
+        assert_ne!(replacement.txid(), previous);
+        println!(
+            "rolled back {previous}; mined {} as {name}",
+            replacement.txid()
+        );
+        run_js(
+            &work,
+            &json!({
+                "mode": "recheck",
+                "name": name,
+                "rpc": fixture["rpc"],
+                "genesis_hash": fixture["genesis_hash"],
+                "policy_asset": fixture["policy_asset"],
+                "operator": fixture["operator"],
+                "now": fixture["now"],
+                "previous_round_txid": previous.to_string(),
+                "round_txid": replacement.txid().to_string(),
+                "leaf": leaf,
+                "check": if second_atom { json!(1) } else { Json::Null },
+            }),
+        );
+        previous = replacement.txid();
+    }
     drop(node);
     let _ = std::fs::remove_dir_all(&work);
 }
