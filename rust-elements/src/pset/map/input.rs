@@ -168,6 +168,36 @@ const PSBT_ELEMENTS_IN_ASSET_PROOF: u8 = 0x14;
 /// Note that this does not indicate actual blinding status,
 /// but rather the expected blinding status prior to signing.
 const PSBT_ELEMENTS_IN_BLINDED_ISSUANCE: u8 = 0x15;
+
+/// Bit of [`Input::previous_output_index`] marking a pegin input.
+const OUTPOINT_PEGIN_FLAG: u32 = 1 << 30;
+/// Bit of [`Input::previous_output_index`] some writers set to mark an
+/// issuance; never set here, and masked off when read.
+const OUTPOINT_ISSUANCE_FLAG: u32 = 1 << 31;
+/// The output index of a coinbase input: all 1's, and no flags.
+const OUTPOINT_COINBASE_INDEX: u32 = 0xffff_ffff;
+
+/// SEQUENTIA: the prefix of the proprietary keys this crate adds to a PSET
+/// input for what Sequentia's transactions carry and the PSET format does not.
+#[cfg(feature = "sequentia")]
+pub const SEQUENTIA_PROPRIETARY_PREFIX: &[u8] = b"sequentia";
+/// SEQUENTIA: the proprietary subtype holding an issuance's denomination, one
+/// byte ([`Input::issuance_denomination`]).
+#[cfg(feature = "sequentia")]
+pub const SEQUENTIA_IN_ISSUANCE_DENOMINATION: u8 = 0x00;
+/// SEQUENTIA: the denomination of an issuance that names none, as the node's
+/// `CAssetIssuance` sets it.
+#[cfg(feature = "sequentia")]
+const DEFAULT_DENOMINATION: u8 = 8;
+
+#[cfg(feature = "sequentia")]
+fn denomination_key() -> raw::ProprietaryKey {
+    raw::ProprietaryKey {
+        prefix: SEQUENTIA_PROPRIETARY_PREFIX.to_vec(),
+        subtype: SEQUENTIA_IN_ISSUANCE_DENOMINATION.into(),
+        key: vec![],
+    }
+}
 /// A key-value map for an input of the corresponding index in the unsigned
 /// transaction.
 #[derive(Clone, Debug, PartialEq)]
@@ -465,11 +495,17 @@ impl Input {
         ret.final_script_witness = Some(txin.witness.script_witness);
 
         if txin.is_pegin {
-            ret.previous_output_index |= 1 << 30;
+            ret.previous_output_index |= OUTPOINT_PEGIN_FLAG;
             ret.pegin_witness = Some(txin.witness.pegin_witness);
         }
         if has_issuance {
-            ret.previous_output_index |= 1 << 31;
+            // SEQUENTIA: the issuance is not flagged in the output index, as
+            // Elements Core's PSET does not flag it: the index is the
+            // outpoint's, and the issuance fields say there is one. A flag
+            // here named another outpoint in the transaction extracted to
+            // sign, and in the issued asset's id.
+            #[cfg(feature = "sequentia")]
+            ret.set_issuance_denomination(txin.asset_issuance.denomination);
             ret.issuance_blinding_nonce = Some(txin.asset_issuance.asset_blinding_nonce);
             ret.issuance_asset_entropy = Some(txin.asset_issuance.asset_entropy);
             match txin.asset_issuance.amount {
@@ -492,16 +528,33 @@ impl Input {
         ret
     }
 
+    /// The outpoint spent by this input.
+    ///
+    /// Flags a PSET may carry in the high bits of
+    /// [`Input::previous_output_index`] (the pegin flag, and the issuance
+    /// flag some writers set) are masked off; use [`Input::is_pegin`] and
+    /// [`Input::has_issuance`] to query them. An all-1's index (a coinbase
+    /// input) has no flags and is returned as it is.
+    pub fn previous_outpoint(&self) -> OutPoint {
+        let vout = if self.previous_output_index == OUTPOINT_COINBASE_INDEX {
+            self.previous_output_index
+        } else {
+            self.previous_output_index & !(OUTPOINT_PEGIN_FLAG | OUTPOINT_ISSUANCE_FLAG)
+        };
+        OutPoint {
+            txid: self.previous_txid,
+            vout,
+        }
+    }
+
     /// Compute the issuance asset ids from pset. This function does not check
     /// whether there is an issuance in this input. Returns (asset_id, token_id)
     pub fn issuance_ids(&self) -> (AssetId, AssetId) {
         let issue_nonce = self.issuance_blinding_nonce.unwrap_or(ZERO_TWEAK);
         let entropy = if issue_nonce == ZERO_TWEAK {
-            // new issuance
-            let prevout = OutPoint {
-                txid: self.previous_txid,
-                vout: self.previous_output_index,
-            };
+            // new issuance; the entropy commits to the outpoint spent, without
+            // flags
+            let prevout = self.previous_outpoint();
             let contract_hash =
                 ContractHash::from_byte_array(self.issuance_asset_entropy.unwrap_or_default());
             AssetId::generate_asset_entropy(prevout, contract_hash)
@@ -523,7 +576,33 @@ impl Input {
 
     /// If the Pset Input is pegin
     pub fn is_pegin(&self) -> bool {
-        self.previous_output_index & (1 << 30) != 0
+        self.previous_output_index & OUTPOINT_PEGIN_FLAG != 0
+    }
+
+    /// SEQUENTIA: the denomination (decimal places) of this input's
+    /// issuance. Sequentia serializes it after the inflation keys, so it is
+    /// part of what a signature covers. The PSET format has no field for it;
+    /// it is kept in a proprietary key ([`SEQUENTIA_PROPRIETARY_PREFIX`],
+    /// subtype [`SEQUENTIA_IN_ISSUANCE_DENOMINATION`]), and an input without
+    /// that key has the node's default, 8.
+    #[cfg(feature = "sequentia")]
+    pub fn issuance_denomination(&self) -> u8 {
+        match self.proprietary.get(&denomination_key()) {
+            Some(v) if v.len() == 1 => v[0],
+            _ => DEFAULT_DENOMINATION,
+        }
+    }
+
+    /// SEQUENTIA: set the denomination of this input's issuance
+    /// ([`Input::issuance_denomination`]). The default, 8, is kept as no key,
+    /// so a PSET whose issuances all have it is serialized as before.
+    #[cfg(feature = "sequentia")]
+    pub fn set_issuance_denomination(&mut self, denomination: u8) {
+        if denomination == DEFAULT_DENOMINATION {
+            self.proprietary.remove(&denomination_key());
+        } else {
+            self.proprietary.insert(denomination_key(), vec![denomination]);
+        }
     }
 
     /// Get the issuance for this tx input
@@ -544,10 +623,8 @@ impl Input {
                 (_, Some(comm)) => confidential::Value::Confidential(comm),
                 (Some(x), None) => confidential::Value::Explicit(x),
             },
-            // SEQUENTIA: PSET does not (yet) carry the issuance denomination;
-            // default to 8 to match AssetIssuance::null().
             #[cfg(feature = "sequentia")]
-            denomination: 8,
+            denomination: self.issuance_denomination(),
         }
     }
 }

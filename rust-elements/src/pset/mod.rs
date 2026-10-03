@@ -46,7 +46,7 @@ use crate::{
     confidential::{AssetBlindingFactor, ValueBlindingFactor},
     TxOutSecrets,
 };
-use crate::{OutPoint, LockTime, Sequence, SurjectionInput, Transaction, TxIn, TxInWitness, TxOut, TxOutWitness, Txid};
+use crate::{LockTime, Sequence, SurjectionInput, Transaction, TxIn, TxInWitness, TxOut, TxOutWitness, Txid};
 use secp256k1_zkp::rand::{CryptoRng, RngCore};
 use secp256k1_zkp::{self, RangeProof, SecretKey, SurjectionProof};
 
@@ -285,7 +285,7 @@ impl PartiallySignedTransaction {
 
         for psetin in self.inputs.iter() {
             let txin = TxIn {
-                previous_output: OutPoint::new(psetin.previous_txid, psetin.previous_output_index),
+                previous_output: psetin.previous_outpoint(),
                 is_pegin: psetin.is_pegin(),
                 script_sig: psetin.final_script_sig.clone().unwrap_or_default(),
                 sequence: psetin.sequence.unwrap_or(Sequence::MAX),
@@ -773,6 +773,63 @@ impl Decodable for PartiallySignedTransaction {
 mod tests {
     use super::*;
     use crate::hex::{FromHex, ToHex};
+    use crate::OutPoint;
+
+    /// A transaction with one input, at output `vout` of a made-up
+    /// transaction, that issues one explicit atom of a new asset with
+    /// `denomination` decimal places.
+    #[cfg(feature = "sequentia")]
+    fn issuing_tx(vout: u32, denomination: u8) -> Transaction {
+        use crate::hashes::Hash;
+        use crate::{AssetId, AssetIssuance};
+        let issuance = AssetIssuance {
+            amount: confidential::Value::Explicit(1),
+            denomination,
+            ..AssetIssuance::null()
+        };
+        let input = TxIn {
+            previous_output: OutPoint::new(Txid::from_byte_array([7; 32]), vout),
+            sequence: Sequence::MAX,
+            asset_issuance: issuance,
+            ..Default::default()
+        };
+        let fee = TxOut::new_fee(1_000, AssetId::from_slice(&[9; 32]).unwrap());
+        Transaction { version: 2, lock_time: LockTime::ZERO, input: vec![input], output: vec![fee] }
+    }
+
+    // SEQUENTIA: a PSET made from a transaction with an issuance input
+    // extracts that same transaction: the outpoint it spends (the issuance is
+    // no flag of the output index) and the issuance's denomination, which
+    // Sequentia serializes after the inflation keys and so signs over.
+    #[test]
+    #[cfg(feature = "sequentia")]
+    fn an_issuance_input_keeps_its_outpoint() {
+        for vout in [0, 1, 5] {
+            let tx = issuing_tx(vout, 8);
+            let pset = PartiallySignedTransaction::from_tx(tx.clone());
+            let back = pset.extract_tx().unwrap();
+            assert_eq!(back.input[0].previous_output, tx.input[0].previous_output, "vout {vout}");
+            assert_eq!(back.txid(), tx.txid());
+            // The issued asset's id commits to the outpoint spent.
+            assert_eq!(pset.inputs()[0].issuance_ids(), tx.input[0].issuance_ids());
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "sequentia")]
+    fn an_issuance_input_keeps_its_denomination() {
+        for denomination in [0, 2, 8] {
+            let tx = issuing_tx(1, denomination);
+            let pset = PartiallySignedTransaction::from_tx(tx.clone());
+            let back = pset.extract_tx().unwrap();
+            assert_eq!(back.input[0].asset_issuance.denomination, denomination);
+            assert_eq!(back.input[0].asset_issuance, tx.input[0].asset_issuance);
+            // Through the PSET's serialized form too.
+            let bytes = encode::serialize(&pset);
+            let read: PartiallySignedTransaction = encode::deserialize(&bytes).unwrap();
+            assert_eq!(read.extract_tx().unwrap().input[0].asset_issuance.denomination, denomination);
+        }
+    }
 
     fn tx_pset_rtt(tx_hex: &str) {
         let tx: Transaction =

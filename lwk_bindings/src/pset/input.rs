@@ -45,7 +45,7 @@ impl PsetInput {
 
     /// Prevout vout of the input.
     pub fn previous_vout(&self) -> u32 {
-        self.inner.previous_output_index
+        self.inner.previous_outpoint().vout
     }
 
     /// Prevout scriptpubkey of the input.

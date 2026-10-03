@@ -568,6 +568,73 @@ mod tests {
         assert!(sig_low_r.len() < sig_no_grind.len());
     }
 
+    /// A caller holding a whole transaction signs it through a PSET made
+    /// from it. For an input that issues an asset, the signature must cover
+    /// that transaction: the outpoint it spends and its issuance, whose
+    /// denomination Sequentia serializes and so signs over.
+    #[test]
+    fn an_issuing_input_is_signed_over_its_own_transaction() {
+        use elements_miniscript::elements::{
+            confidential, hashes::hash160, secp256k1_zkp::ecdsa, AssetId, AssetIssuance, LockTime,
+            OutPoint, PubkeyHash, Script, Sequence, Transaction, TxIn, TxOut, Txid, WPubkeyHash,
+        };
+        let signer = SwSigner::new(lwk_test_util::TEST_MNEMONIC, false).unwrap();
+        let path: DerivationPath = "m/84'/1'/0'/0/0".parse().unwrap();
+        let pk = bitcoin::PublicKey::new(signer.derive_xpub(&path).unwrap().public_key);
+        let h = hash160::Hash::hash(&pk.to_bytes()).to_byte_array();
+        let spk = Script::new_v0_wpkh(&WPubkeyHash::from_byte_array(h));
+        let script_code = Script::new_p2pkh(&PubkeyHash::from_byte_array(h));
+        let asset = AssetId::from_slice(&[9; 32]).unwrap();
+        let value = 10_000;
+        for (vout, denomination) in [(0, 8), (1, 8), (1, 0), (3, 2)] {
+            let input = TxIn {
+                previous_output: OutPoint::new(Txid::from_byte_array([7; 32]), vout),
+                sequence: Sequence::MAX,
+                asset_issuance: AssetIssuance {
+                    amount: confidential::Value::Explicit(1),
+                    denomination,
+                    ..AssetIssuance::null()
+                },
+                ..Default::default()
+            };
+            let tx = Transaction {
+                version: 2,
+                lock_time: LockTime::ZERO,
+                input: vec![input],
+                output: vec![TxOut::new_fee(value, asset)],
+            };
+            let mut pset = PartiallySignedTransaction::from_tx(tx.clone());
+            let utxo = TxOut {
+                asset: confidential::Asset::Explicit(asset),
+                value: confidential::Value::Explicit(value),
+                nonce: confidential::Nonce::Null,
+                script_pubkey: spk.clone(),
+                witness: Default::default(),
+            };
+            pset.inputs_mut()[0].witness_utxo = Some(utxo);
+            pset.inputs_mut()[0]
+                .bip32_derivation
+                .insert(pk, (signer.fingerprint(), path.clone()));
+            assert_eq!(signer.sign(&mut pset).unwrap(), 1);
+            let raw = pset.inputs()[0].partial_sigs[&pk].clone();
+            let sig = ecdsa::Signature::from_der(&raw[..raw.len() - 1]).unwrap();
+            // The signature hash of the transaction itself.
+            let digest = SighashCache::new(&tx).segwitv0_sighash(
+                0,
+                &script_code,
+                confidential::Value::Explicit(value),
+                EcdsaSighashType::All,
+            );
+            let msg = Message::from_digest(digest.to_byte_array());
+            signer
+                .secp
+                .verify_ecdsa(&msg, &sig, &pk.inner)
+                .unwrap_or_else(|e| {
+                    panic!("vout {vout}, denomination {denomination}: the signature does not cover the transaction: {e}")
+                });
+        }
+    }
+
     #[test]
     fn test_sign_verify() {
         let signer = SwSigner::new(lwk_test_util::TEST_MNEMONIC, true).unwrap();
