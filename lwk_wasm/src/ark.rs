@@ -33,7 +33,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::{Error, JsStorage, JsStoreLink, Network, Signer};
 
-fn generic(e: impl std::fmt::Display) -> Error {
+pub(crate) fn generic(e: impl std::fmt::Display) -> Error {
     Error::Generic(e.to_string())
 }
 
@@ -50,7 +50,7 @@ pub(crate) fn from_js<T: serde::de::DeserializeOwned>(value: JsValue) -> Result<
     Ok(serde_json::from_value(whole)?)
 }
 
-fn refused(e: &RecordError) -> Error {
+pub(crate) fn refused(e: &RecordError) -> Error {
     Error::Generic(format!("record refused (kind {}): {e}", e.kind()))
 }
 
@@ -65,18 +65,18 @@ pub(crate) fn parse_record(text: &str) -> Result<LeafRecord, RecordError> {
     }
 }
 
-fn nonce(hex: &str) -> Result<OwnerNonce, Error> {
+pub(crate) fn nonce(hex: &str) -> Result<OwnerNonce, Error> {
     Vec::<u8>::from_hex(hex)
         .ok()
         .and_then(|v| v.try_into().ok())
         .ok_or_else(|| generic("an owner nonce is 32 bytes of hex"))
 }
 
-fn xonly(hex: &str, what: &str) -> Result<XOnlyPublicKey, Error> {
+pub(crate) fn xonly(hex: &str, what: &str) -> Result<XOnlyPublicKey, Error> {
     XOnlyPublicKey::from_str(hex).map_err(|e| generic(format!("invalid {what}: {e}")))
 }
 
-fn transaction(hex: &str) -> Result<Transaction, Error> {
+pub(crate) fn transaction(hex: &str) -> Result<Transaction, Error> {
     let bytes = Vec::<u8>::from_hex(hex).map_err(|e| generic(format!("invalid round hex: {e}")))?;
     Ok(encode::deserialize(&bytes)?)
 }
@@ -418,7 +418,7 @@ impl ArkVerifier {
     }
 
     /// The policy at median time `now`.
-    fn at(&self, now: u32) -> Result<WalletPolicy, Error> {
+    pub(crate) fn at(&self, now: u32) -> Result<WalletPolicy, Error> {
         Ok(WalletPolicy {
             now: MedianTime::from_consensus(now).map_err(|e| generic(format!("now: {e}")))?,
             ..self.policy

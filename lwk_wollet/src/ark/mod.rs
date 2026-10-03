@@ -168,5 +168,82 @@ mod tests {
             signer_msg.digest().unwrap().to_hex(),
             r["digest"].as_str().unwrap()
         );
+
+        // A release: M read from display hex enters the message in internal
+        // order, after the node's children hash.
+        let rel = &v["release"];
+        let genesis =
+            elements::BlockHash::from_str(rel["genesis_display"].as_str().unwrap()).unwrap();
+        let m = AssetId::from_str(rel["connector"]["display"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            serialize(&m).to_hex(),
+            rel["connector"]["internal"].as_str().unwrap()
+        );
+        let h: [u8; 32] = Vec::<u8>::from_hex(rel["node_hash"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let lib = Chain::new(genesis).release_message(&h, m);
+        assert_eq!(lib.preimage.to_hex(), rel["message"].as_str().unwrap());
+        assert_eq!(lib.digest.to_hex(), rel["digest"].as_str().unwrap());
+        use lwk_signer::csfs::ReleaseMessage;
+        let children = rel["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| CommittedOutput {
+                asset: AssetId::from_str(c["asset_display"].as_str().unwrap()).unwrap(),
+                value: c["value"].as_str().unwrap().parse().unwrap(),
+                script_pubkey: Script::from(
+                    Vec::<u8>::from_hex(c["script_pubkey"].as_str().unwrap()).unwrap(),
+                ),
+            })
+            .collect();
+        let signer_rel = ArcaMessage::Release(ReleaseMessage {
+            genesis_hash: genesis,
+            children,
+            connector: m,
+        });
+        assert_eq!(
+            signer_rel.digest().unwrap().to_hex(),
+            rel["digest"].as_str().unwrap()
+        );
+
+        // A coin received out of round: its asset in internal order in the
+        // record, in display hex as the kit gives it.
+        let c = &v["coin"];
+        let binary = Vec::<u8>::from_hex(c["binary"].as_str().unwrap()).unwrap();
+        let off = c["asset"]["binary_offset"].as_u64().unwrap() as usize;
+        let internal = c["asset"]["internal"].as_str().unwrap();
+        assert_eq!(binary[off..off + 32].to_hex(), internal);
+        let t: Value =
+            serde_json::from_str(include_str!("../../tests/data/arca_transactions.json")).unwrap();
+        let rounds: Vec<elements::Transaction> = ["rounds", "boards"]
+            .iter()
+            .flat_map(|k| t["transfer"]["inputs"][*k].as_array().unwrap().iter())
+            .map(|r| {
+                elements::encode::deserialize(&Vec::<u8>::from_hex(r.as_str().unwrap()).unwrap())
+                    .unwrap()
+            })
+            .collect();
+        let now =
+            MedianTime::from_consensus(t["transfer"]["inputs"]["now"].as_u64().unwrap() as u32)
+                .unwrap();
+        let operator = elements::secp256k1_zkp::XOnlyPublicKey::from_str(
+            t["inputs"]["operator"].as_str().unwrap(),
+        )
+        .unwrap();
+        let tgen =
+            elements::BlockHash::from_str(t["inputs"]["genesis_hash"].as_str().unwrap()).unwrap();
+        let coin = CoinRecord::from_bytes(&binary)
+            .unwrap()
+            .resolve(&rounds, &WalletPolicy::new(Chain::new(tgen), operator, now))
+            .unwrap();
+        assert_eq!(coin.id.to_string(), c["id"].as_str().unwrap());
+        assert_eq!(
+            coin.asset.to_string(),
+            c["asset"]["display"].as_str().unwrap()
+        );
+        assert_eq!(serialize(&coin.asset).to_hex(), internal);
     }
 }

@@ -17,6 +17,7 @@ mod xchain;
 mod coinjoin;
 mod contract;
 mod ark;
+mod ark_spend;
 mod csfs;
 #[cfg(feature = "simplicity")]
 mod control_block;
