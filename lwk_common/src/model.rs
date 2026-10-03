@@ -75,7 +75,7 @@ impl Issuance {
 
         // These are meaningless if inner is null
         let (asset, token) = input.issuance_ids();
-        let prev_output = OutPoint::new(input.previous_txid, input.previous_output_index);
+        let prev_output = input.previous_outpoint();
         Self {
             asset,
             token,

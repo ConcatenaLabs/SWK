@@ -63,6 +63,17 @@ its `sequentia` cargo feature:
   `src/sighash.rs`, `src/blind.rs` touch points): Sequentia issuance
   transactions carry an extra `nDenomination` byte; the feature adds it to
   issuance (de)serialization, PSET input mapping, and sighash computation.
+  The PSET format has no field for it, so a PSET input keeps it in a
+  proprietary key (prefix `sequentia`, subtype `0x00`, one byte;
+  `Input::issuance_denomination`, `set_issuance_denomination`), written only
+  when it is not the node's default, 8. `Input::from_txin` carries it from the
+  transaction, and the transaction a PSET extracts has it, so a PSET made from
+  a transaction is signed over that transaction.
+- `src/pset/map/input.rs`, `src/pset/mod.rs`: an input's issuance is not
+  flagged in its output index (`Input::from_txin`), as Elements Core's PSET
+  does not flag it, and `Input::previous_outpoint()` masks off any flag a PSET
+  carries there. The extracted transaction and the issued asset's id use that
+  outpoint, so an issuance input is signed over the outpoint it spends.
 - `src/address.rs`: `AddressParams::SEQUENTIA_TESTNET` (base58 p2pkh 111 /
   p2sh 196 / blinded 70; bech32 HRP `tb`; blech32 HRP `tsqb`) and address-string
   parsing for those prefixes. Sequentia is transparent by default: the default

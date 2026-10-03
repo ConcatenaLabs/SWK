@@ -85,7 +85,7 @@ use elements_miniscript::elements::{
     pset::PartiallySignedTransaction,
     script::Builder,
     secp256k1_zkp::{All, Generator, PedersenCommitment, Secp256k1},
-    AssetId, BlindAssetProofs, BlindValueProofs, OutPoint, Script, TxOutSecrets,
+    AssetId, BlindAssetProofs, BlindValueProofs, Script, TxOutSecrets,
 };
 use elements_miniscript::{ConfidentialDescriptor, DescriptorPublicKey};
 use std::collections::btree_map::BTreeMap;
@@ -194,10 +194,7 @@ pub fn pset_balance(
     for (idx, input) in pset.inputs().iter().enumerate() {
         match input.witness_utxo.as_ref() {
             None => {
-                let previous_outpoint = OutPoint {
-                    txid: input.previous_txid,
-                    vout: input.previous_output_index,
-                };
+                let previous_outpoint = input.previous_outpoint();
                 return Err(Error::MissingPreviousOutput {
                     idx,
                     previous_outpoint,
