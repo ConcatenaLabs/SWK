@@ -11,7 +11,11 @@
 // round against the acceptance horizon and a leaf held or given against the
 // exit deadline, at the time each call names; the store keeps what verifies
 // for a nonce the wallet waits on, refuses a second leaf under one nonce, and
-// never keeps a removed leaf or its nonce again.
+// never keeps a removed leaf or its nonce again. Every coin received out of
+// round in the transfer vectors (arca_transactions.json) verifies, one of
+// them resting on a board; its lineage names what to look up on-chain; a coin
+// whose lineage is paid on-chain, or whose board is spent, and a record
+// promising one leaf twice are refused with their kind.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -129,6 +133,15 @@ assert.strictEqual(lwk.csfsDigest(fromRecord), bo.rebind.digest);
 assert.strictEqual(lwk.csfsDigest({ ...fromRecord, source: { record: bo.record_json } }), bo.rebind.digest);
 assert.strictEqual(lwk.csfsDigest(named), bo.rebind.digest);
 assert.ok(lwk.csfsDescribe(fromRecord).lines[0].includes(bo.leaf_id));
+// A release: M in display hex here, in internal order in the message.
+const rel = bo.release;
+assert.strictEqual(Buffer.from(rel.connector.display, 'hex').reverse().toString('hex'), rel.connector.internal);
+const relMsg = {
+    kind: 'release', genesisHash: rel.genesis_display, connector: rel.connector.display,
+    children: rel.children.map((c) => ({ asset: c.asset_display, value: c.value, scriptPubkey: c.script_pubkey })),
+};
+assert.strictEqual(lwk.csfsDigest(relMsg), rel.digest);
+assert.notStrictEqual(lwk.csfsDigest({ ...relMsg, connector: rel.connector.internal }), rel.digest);
 
 // 4. Keys follow the owner nonce.
 const nonce0 = Buffer.from([...Array(32).keys()]).toString('hex');
@@ -261,5 +274,61 @@ assert.strictEqual(fresh2.putRestoredLeaf(ver1, r1.json, b1.round.tx, l1.owner, 
 assert.throws(() => fresh2.putRestoredLeaf(ver1, other.binary, b1.round.tx, lo.owner, lo.owner_nonce, deadline + 1), /leaf refused: wallet policy/);
 assert.ok([...map.keys()].every((k) => k.startsWith('ark/')), [...map.keys()]);
 
+// 7. Coins received out of round (the transfer vectors).
+const t = JSON.parse(fs.readFileSync(`${data}/arca_transactions.json`, 'utf8'));
+const tnet = lwk.Network.regtestWithGenesis(new lwk.AssetId(t.inputs.asset), t.inputs.genesis_hash);
+const tver = new lwk.ArkVerifier(tnet, { operator: t.inputs.operator });
+const trounds = [...t.transfer.inputs.rounds, ...t.transfer.inputs.boards];
+const tnow = Number(t.transfer.inputs.now);
+let coins = 0;
+let onBoards = 0;
+for (const [name, c] of Object.entries(t.transfer.records)) {
+    const ok = tver.verifyCoin(c.binary, trounds, c.owner, c.owner_nonce, tnow);
+    assert.ok(ok.accepted, `${name}: ${ok.reason}`);
+    assert.strictEqual(ok.coinId, c.id, name);
+    assert.strictEqual(ok.lineageCheck, 'operator-rule');
+    // What to look up: the lineage's scripts and the boards it rests on.
+    const lin = tver.coinLineage(c.binary, trounds, tnow);
+    assert.deepStrictEqual(lin.lineage, ok.lineage);
+    assert.ok(lin.lineage.length > 0 && lin.lineage.every((l) => ['leaf', 'checkpoint'].includes(l.kind)), name);
+    const none = tver.verifyCoin(c.binary, trounds, c.owner, c.owner_nonce, tnow, { paid: [], spent: [] });
+    assert.strictEqual(none.lineageCheck, 'indexed', name);
+    for (const l of lin.lineage) {
+        const paid = tver.verifyCoin(c.binary, trounds, c.owner, c.owner_nonce, tnow, { paid: [l.scriptPubkey] });
+        assert.strictEqual(paid.accepted, false, name);
+        assert.strictEqual(paid.kind, 'on_chain', paid.reason);
+        assert.ok(paid.reason.includes(l.kind), paid.reason);
+    }
+    for (const b of lin.boards) {
+        const spent = tver.verifyCoin(c.binary, trounds, c.owner, c.owner_nonce, tnow, { spent: [b] });
+        assert.strictEqual(spent.kind, 'on_chain', spent.reason);
+        assert.ok(spent.reason.includes('board'), spent.reason);
+        onBoards++;
+    }
+    // Another key, another nonce.
+    assert.strictEqual(tver.verifyCoin(c.binary, trounds, t.inputs.operator, c.owner_nonce, tnow).kind, 'owner');
+    assert.strictEqual(tver.verifyCoin(c.binary, trounds, c.owner, 'ab'.repeat(32), tnow).kind, 'owner');
+    coins++;
+}
+assert.strictEqual(coins, 7);
+assert.strictEqual(onBoards, 2);
+for (const x of t.transfer.refused_records) {
+    const r = tver.verifyCoin(x.binary, trounds, x.owner, x.owner_nonce, tnow);
+    assert.strictEqual(r.accepted, false, x.name);
+    assert.strictEqual(r.kind, x.kind, r.reason);
+    reasons.push(`${x.name}: ${r.reason} (kind ${r.kind})`);
+}
+// Without the board's transaction there is nothing to rest on.
+const e = t.transfer.records.E;
+assert.strictEqual(tver.verifyCoin(e.binary, t.transfer.inputs.rounds, e.owner, e.owner_nonce, tnow).kind, 'round');
+assert.throws(() => tver.verifyCoin(e.binary, trounds, e.owner, e.owner_nonce, tnow, { payd: [] }), /unknown field `payd`/);
+// Byte order: the coin's asset is display hex here, internal in its record.
+const bc = bo.coin;
+const vc = tver.verifyCoin(bc.binary, trounds, bc.owner, bc.owner_nonce, tnow);
+assert.strictEqual(vc.coinId, bc.id);
+assert.strictEqual(vc.asset, bc.asset.display);
+assert.strictEqual(Buffer.from(bc.binary, 'hex').subarray(bc.asset.binary_offset, bc.asset.binary_offset + 32).toString('hex'), bc.asset.internal);
+
+console.log(`ark_records: ${coins} received coins verified (${onBoards} resting on a board), lineage checks and refusals by kind hold`);
 console.log(`ark_records: ${n} records verified (${longer} under a longer exit delay, ${unreserved} with no reserve floor), ${refusals} refusal vectors refused by kind; byte order, keys, policy and store hold`);
 for (const r of reasons) console.log(`  refused: ${r}`);

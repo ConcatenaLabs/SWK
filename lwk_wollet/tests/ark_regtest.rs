@@ -21,6 +21,13 @@
 //! the honest round and refuse every leaf of each attack with its check
 //! named. The same verdicts are reached natively.
 //!
+//! Then a refresh and an offboard: a round paying the wallet a new leaf, an
+//! offboard output and the operator's connector is mined, and the bindings
+//! build the forfeit and the release for two of the wallet's honest leaves,
+//! one given up for the new leaf and one for the offboard. Each must equal the
+//! one built natively and name that round's connector asset `M`, and the
+//! signatures the bindings make with the old leaves' keys must verify here.
+//!
 //! Then a rollback: the honest round's block is invalidated and a replacement
 //! paying the same batch output from the same issuing coin is mined, once
 //! honest and once with a second token atom at `R`. The wasm re-check, at the
@@ -53,15 +60,19 @@ use elements::confidential::{Asset, Nonce, Value};
 use elements::encode::{deserialize, serialize};
 use elements::hashes::{sha256, Hash};
 use elements::hex::{FromHex, ToHex};
+use elements::secp256k1_zkp::schnorr::Signature;
+use elements::secp256k1_zkp::Message;
 use elements::secp256k1_zkp::ZERO_TWEAK;
 use elements::{
     AssetId, AssetIssuance, BlockHash, ContractHash, LockTime, OutPoint, Script, Sequence,
     Transaction, TxIn, TxOut, TxOutWitness,
 };
 use lwk_signer::SwSigner;
-use lwk_wollet::ark::covenant::{LeafSpec, ReserveRule, Tree, TreeParams};
+use lwk_wollet::ark::covenant::{LeafSpec, Release, ReserveRule, Tree, TreeParams};
+use lwk_wollet::ark::forfeit::{self, connector_asset, ConnectorPolicy, GivenUp, OffboardPolicy};
 use lwk_wollet::ark::keys::{fresh_leaf_key, LeafKey};
 use lwk_wollet::ark::verify::{verify_leaf, verify_round};
+use lwk_wollet::ark::ExplicitOutput;
 use lwk_wollet::ark::{Chain, ClockSchedule, MedianTime, RelativeTime, Template, WalletPolicy};
 use serde_json::{json, Value as Json};
 
@@ -188,7 +199,7 @@ impl Drop for Node {
 
 /// Runs `lwk_wasm/tests/node/ark_regtest.js` on `fixture` and requires it to
 /// pass.
-fn run_js(work: &Path, fixture: &Json) {
+fn run_js(work: &Path, fixture: &Json) -> String {
     let path = work.join("fixture.json");
     std::fs::write(&path, serde_json::to_string_pretty(fixture).unwrap()).unwrap();
     let script =
@@ -200,9 +211,11 @@ fn run_js(work: &Path, fixture: &Json) {
         .output()
         .expect("node runs");
     let _ = std::fs::remove_file(&path);
-    println!("{}", String::from_utf8_lossy(&out.stdout));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    println!("{stdout}");
     eprintln!("{}", String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "ark_regtest.js failed");
+    stdout
 }
 
 fn op_true() -> Script {
@@ -404,7 +417,7 @@ fn leaves_on_regtest_verify_in_wasm() {
         MedianTime::from_consensus(now).unwrap(),
     );
     let mut batches = vec![];
-    let mut honest: Option<(Transaction, Json)> = None;
+    let mut honest: Option<(Transaction, Vec<Json>)> = None;
     for (i, attack) in attacks.iter().enumerate() {
         let issuer = OutPoint::new(issuers.txid(), i as u32);
         let token = AssetId::new_issuance(issuer, ContractHash::from_byte_array([0; 32]));
@@ -541,7 +554,7 @@ fn leaves_on_regtest_verify_in_wasm() {
             }));
         }
         if *attack == Attack::None {
-            honest = Some((round.clone(), leaves_json[0].clone()));
+            honest = Some((round.clone(), leaves_json.clone()));
         }
         println!("mined round {} for {}", round.txid(), attack.name());
         batches.push(json!({
@@ -565,6 +578,219 @@ fn leaves_on_regtest_verify_in_wasm() {
     std::fs::create_dir_all(&work).unwrap();
     run_js(&work, &fixture);
 
+    // A refresh and an offboard (D30, D34), built and signed through the
+    // bindings against a round the node mined: the wallet gives its honest
+    // leaf 0 up for a new leaf, and its leaf 1 up for an offboard output, in
+    // one round that pays the operator's connector at output 2. The forfeits
+    // and releases the bindings build must be the ones built natively, name
+    // that round's connector asset M, and carry signatures by the old leaves'
+    // keys that verify here.
+    let (old_round, old_leaves) = honest.clone().unwrap();
+    let now2 = node.mtp();
+    let policy2 = WalletPolicy::new(
+        Chain::new(genesis),
+        s_key,
+        MedianTime::from_consensus(now2).unwrap(),
+    );
+    let refresh_issuer = OutPoint::new(issuers.txid(), attacks.len() as u32);
+    let refresh_coin = 100_000_000_000 - coin * attacks.len() as u64 - 2_000;
+    let token = AssetId::new_issuance(refresh_issuer, ContractHash::from_byte_array([0; 32]));
+    let e2 = |d: u32| MedianTime::from_consensus(now2 + d * DAY).unwrap();
+    let schedule = ClockSchedule::new(token, s_key, delay, vec![e2(28), e2(56)]).unwrap();
+    let new_key = fresh_leaf_key(&wallet, 0).unwrap();
+    let new_preimage = random32();
+    let leaves: Vec<LeafSpec> = (0..5u64)
+        .map(|j| {
+            let k = if j == 0 {
+                new_key.clone()
+            } else {
+                fresh_leaf_key(&stranger, 0).unwrap()
+            };
+            LeafSpec {
+                template: Template::Vtxo1,
+                owner: k.key,
+                value: LEAF + j,
+                owner_nonce: k.owner_nonce,
+                operator_nonce: random32(),
+                exit_delay: delay,
+                unlock_hash: sha256::Hash::hash(&new_preimage).to_byte_array(),
+            }
+        })
+        .collect();
+    let tree = Tree::build(
+        TreeParams {
+            asset: x,
+            chain: Chain::new(genesis),
+            schedule: schedule.clone(),
+            burn: false,
+            radix: 4,
+            reserve: ReserveRule::FeeRate {
+                floor_per_kvb,
+                multiple: 4,
+            },
+            min_leaf: 1_000,
+        },
+        &leaves,
+    )
+    .unwrap();
+    let new_record = tree.records()[0].clone();
+    let batch = tree.batch_output();
+    const C: u32 = 2;
+    let offboard = OffboardPolicy {
+        unlock_hash: sha256::Hash::hash(&random32()).to_byte_array(),
+        destination: ExplicitOutput::new(x, 500_000, op_true()),
+        operator: s_key,
+        reclaim_delay: RelativeTime::from_seconds_ceil(10 * DAY as u64).unwrap(),
+    };
+    let connector = ConnectorPolicy { operator: s_key }.output(x, 5_000).txout();
+    let offboard_out = offboard.output(1_000).txout();
+    let spent: u64 = [&batch.txout(), &connector, &offboard_out]
+        .iter()
+        .map(|o| o.value.explicit().unwrap())
+        .sum();
+    let mut round2 = tx(
+        vec![refresh_issuer],
+        vec![
+            batch.txout(),
+            explicit(token, 1, schedule.clock0_script_pubkey()),
+            connector,
+            offboard_out,
+            explicit(x, refresh_coin - spent - 2_000, op_true()),
+            TxOut::new_fee(2_000, x),
+        ],
+    );
+    round2.input[0].asset_issuance = issuance([0; 32], 1, 0, 0);
+    node.mine(&[&round2]);
+    println!(
+        "mined refresh round {} (connector at output {C})",
+        round2.txid()
+    );
+    let old = |i: usize| {
+        lwk_wollet::ark::LeafRecord::from_json_str(old_leaves[i]["record"].as_str().unwrap())
+            .unwrap()
+    };
+    let refund_delay = RelativeTime::from_seconds_ceil(DAY as u64).unwrap();
+    const MARGIN: u64 = 2_000;
+    let native_forfeit = forfeit::refresh(
+        &GivenUp::leaf(&old(0)).unwrap(),
+        &new_record,
+        &round2,
+        C,
+        &policy2,
+        &new_key.key,
+        &new_key.owner_nonce,
+        refund_delay,
+        MARGIN,
+    )
+    .unwrap();
+    let native_release = forfeit::release(
+        &old(0),
+        &old_round,
+        &new_record,
+        &round2,
+        C,
+        &policy2,
+        &new_key.key,
+        &new_key.owner_nonce,
+    )
+    .unwrap();
+    let native_off_forfeit = forfeit::offboard(
+        &GivenUp::leaf(&old(1)).unwrap(),
+        &offboard,
+        &round2,
+        C,
+        refund_delay,
+        MARGIN,
+    )
+    .unwrap();
+    let native_off_release =
+        forfeit::release_for_offboard(&old(1), &old_round, &offboard, &round2, C, &policy2)
+            .unwrap();
+    let m = connector_asset(round2.txid(), C);
+    assert_eq!(native_release.release.connector, m);
+    let out = run_js(
+        &work,
+        &json!({
+            "mode": "refresh",
+            "rpc": fixture["rpc"],
+            "genesis_hash": fixture["genesis_hash"],
+            "policy_asset": fixture["policy_asset"],
+            "operator": fixture["operator"],
+            "now": now2,
+            "mnemonic": wallet_words,
+            "old_round_txid": old_round.txid().to_string(),
+            "old_leaves": [old_leaves[0], old_leaves[1]],
+            "round_txid": round2.txid().to_string(),
+            "c": C,
+            "new_leaf": {
+                "record": new_record.to_json_string().unwrap(),
+                "owner": new_key.key.serialize().to_hex(),
+                "owner_nonce": new_key.owner_nonce.to_hex(),
+            },
+            "refund_delay_seconds": refund_delay.seconds(),
+            "margin": MARGIN,
+            "offboard": {
+                "unlockHash": offboard.unlock_hash.to_hex(),
+                "destination": {
+                    "asset": x.to_string(),
+                    "value": "500000",
+                    "scriptPubkey": op_true().as_bytes().to_hex(),
+                },
+                "operator": s_key.serialize().to_hex(),
+                "reclaimDelaySeconds": offboard.reclaim_delay.seconds(),
+            },
+            "expect": {
+                "connector": m.to_string(),
+                "connector_internal": serialize(&m).to_hex(),
+                "forfeit_digest": native_forfeit.message().digest.to_hex(),
+                "release_digest": native_release.release.message().digest.to_hex(),
+                "offboard_forfeit_digest": native_off_forfeit.message().digest.to_hex(),
+                "offboard_release_digest": native_off_release.release.message().digest.to_hex(),
+            },
+        }),
+    );
+    // The signatures the bindings made, by the old leaves' keys.
+    let line = out
+        .lines()
+        .find_map(|l| l.strip_prefix("SIGNATURES "))
+        .expect("ark_regtest.js prints the signatures it made");
+    let sigs: Json = serde_json::from_str(line).unwrap();
+    let sig = |k: &str| {
+        Signature::from_slice(&Vec::<u8>::from_hex(sigs[k].as_str().unwrap()).unwrap()).unwrap()
+    };
+    let secp = elements::secp256k1_zkp::Secp256k1::verification_only();
+    let verify =
+        |s: &Signature, digest: [u8; 32], key: &elements::secp256k1_zkp::XOnlyPublicKey| {
+            secp.verify_schnorr(s, &Message::from_digest(digest), key)
+        };
+    verify(
+        &sig("forfeit"),
+        native_forfeit.message().digest,
+        &old(0).owner,
+    )
+    .unwrap();
+    verify(
+        &sig("offboard_forfeit"),
+        native_off_forfeit.message().digest,
+        &old(1).owner,
+    )
+    .unwrap();
+    native_release.release.verify(&sig("release")).unwrap();
+    native_off_release
+        .release
+        .verify(&sig("offboard_release"))
+        .unwrap();
+    // Signed for this round, a release is no release of the node for another.
+    let elsewhere = Release {
+        connector: connector_asset(old_round.txid(), C),
+        ..native_release.release
+    };
+    assert!(elsewhere.verify(&sig("release")).is_err());
+    println!(
+        "refresh round {}: forfeit, release, offboard forfeit and offboard release built in wasm, naming M {m}; the four signatures verify natively",
+        round2.txid()
+    );
+
     // A rollback (review R1, F2). The honest round's block is disconnected
     // and a replacement spending the same issuing coin, paying the same batch
     // output, is mined in its place: first an honest one with another txid,
@@ -572,7 +798,8 @@ fn leaves_on_regtest_verify_in_wasm() {
     // also issues a second atom of the token straight to R, which the
     // re-check refuses by check 1. Nothing in the tree commits to the round's
     // txid, so only the re-check tells the two apart.
-    let (round, leaf) = honest.unwrap();
+    let (round, leaves) = honest.unwrap();
+    let leaf = leaves[0].clone();
     let mut previous = round.txid();
     let replacements = [
         ("an honest replacement", false),

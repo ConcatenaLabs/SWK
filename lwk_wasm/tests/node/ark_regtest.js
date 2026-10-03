@@ -12,6 +12,14 @@
 //   refused with the check that catches it named;
 // - the honest leaves go into the store with their unlock preimages.
 //
+// With a fixture of mode "refresh", written after the test mines a round that
+// pays the wallet a new leaf, an offboard output and the operator's connector,
+// it builds the forfeit and the release for each of two old leaves with the
+// bindings (forfeitRefresh, releaseRefresh, forfeitOffboard, releaseOffboard),
+// requires the digests the test computed natively and the round's connector
+// asset in display order, signs each with the old leaf's key through
+// signCsfs, and prints the signatures for the test to verify.
+//
 // With a fixture of mode "recheck", written after the test rolls the honest
 // round back and mines a replacement, it checks the wallet's leaf again
 // against the replacement as the node returns it, at the median time of the
@@ -69,6 +77,74 @@ async function recheck() {
         assert.strictEqual(v.check, fx.expect.check === null ? undefined : fx.expect.check, v.reason);
         console.log(`recheck, ${fx.name}, at ${when}: refused, ${v.reason}`);
     }
+}
+
+// A refresh and an offboard, built and signed in the bindings.
+async function refresh() {
+    const network = lwk.Network.regtestWithGenesis(new lwk.AssetId(fx.policy_asset), fx.genesis_hash);
+    const signer = new lwk.Signer(new lwk.Mnemonic(fx.mnemonic), network);
+    const verifier = new lwk.ArkVerifier(network, { operator: fx.operator });
+    const now = fx.now;
+    const oldRound = await rpc('getrawtransaction', [fx.old_round_txid]);
+    const round = await rpc('getrawtransaction', [fx.round_txid]);
+    const [o0, o1] = fx.old_leaves;
+    const n = fx.new_leaf;
+    const x = fx.expect;
+    // M in display order is its internal bytes reversed.
+    assert.strictEqual(Buffer.from(x.connector_internal, 'hex').reverse().toString('hex'), x.connector);
+    const keyPath = (l) => signer.arkLeafKey(0, l.owner_nonce).path;
+    const sign = (l, built, limits) => {
+        assert.strictEqual(lwk.csfsDigest(built.message), built.digest);
+        return signer.signCsfs(keyPath(l), built.message, built.digest, limits);
+    };
+    const margin = { maxUncommitted: fx.margin };
+
+    const f = verifier.forfeitRefresh({ record: o0.record }, n.record, round, fx.c, n.owner, n.owner_nonce,
+        fx.refund_delay_seconds, fx.margin, now);
+    assert.strictEqual(f.digest, x.forfeit_digest);
+    assert.strictEqual(f.connector, x.connector);
+    assert.strictEqual(f.leafId, o0.leaf_id);
+    assert.strictEqual(f.margin, String(fx.margin));
+    assert.strictEqual(f.message.outputs[0].asset, f.output.asset);
+    const r = verifier.releaseRefresh(o0.record, oldRound, n.record, round, fx.c, n.owner, n.owner_nonce, now);
+    assert.strictEqual(r.digest, x.release_digest);
+    assert.strictEqual(r.connector, x.connector);
+    assert.strictEqual(r.message.connector, x.connector);
+    assert.strictEqual(r.owner, o0.owner);
+    const fo = verifier.forfeitOffboard({ record: o1.record }, fx.offboard, round, fx.c, fx.refund_delay_seconds,
+        String(fx.margin), now);
+    assert.strictEqual(fo.digest, x.offboard_forfeit_digest);
+    assert.strictEqual(fo.unlockHash, fx.offboard.unlockHash);
+    const ro = verifier.releaseOffboard(o1.record, oldRound, fx.offboard, round, fx.c, now);
+    assert.strictEqual(ro.digest, x.offboard_release_digest);
+
+    // Refused: output c not the connector; the new leaf against another round;
+    // the old leaf against another round; another wallet's nonce; an unknown
+    // field in the old leaf or the offboard.
+    assert.throws(() => verifier.forfeitRefresh({ record: o0.record }, n.record, round, 0, n.owner, n.owner_nonce,
+        fx.refund_delay_seconds, fx.margin, now), /forfeit refused: .*connector/);
+    assert.throws(() => verifier.releaseRefresh(o0.record, oldRound, n.record, oldRound, fx.c, n.owner, n.owner_nonce, now),
+        /release refused: the new leaf/);
+    assert.throws(() => verifier.releaseRefresh(o0.record, round, n.record, round, fx.c, n.owner, n.owner_nonce, now),
+        /release refused: the new leaf/);
+    assert.throws(() => verifier.forfeitRefresh({ record: o0.record }, n.record, round, fx.c, n.owner, 'ab'.repeat(32),
+        fx.refund_delay_seconds, fx.margin, now), /forfeit refused: the new leaf: owner/);
+    assert.throws(() => verifier.forfeitRefresh({ record: o0.record, rounds: [] }, n.record, round, fx.c, n.owner,
+        n.owner_nonce, fx.refund_delay_seconds, fx.margin, now), /\{ record \} or \{ coin, rounds \}/);
+    assert.throws(() => verifier.forfeitOffboard({ record: o1.record }, { ...fx.offboard, reclaimDelay: 1 }, round, fx.c,
+        fx.refund_delay_seconds, fx.margin, now), /unknown field `reclaimDelay`/);
+    // The forfeit leaves the margin to whoever broadcasts: under a lower
+    // ceiling the signer refuses it.
+    assert.throws(() => sign(o0, f, { maxUncommitted: fx.margin - 1 }), /the ceiling is/);
+
+    const sigs = {
+        forfeit: sign(o0, f, margin),
+        release: sign(o0, r),
+        offboard_forfeit: sign(o1, fo, margin),
+        offboard_release: sign(o1, ro),
+    };
+    console.log(`refresh: forfeit ${f.digest}, release ${r.digest}, offboard forfeit ${fo.digest}, offboard release ${ro.digest}, M ${r.connector}`);
+    console.log(`SIGNATURES ${JSON.stringify(sigs)}`);
 }
 
 async function main() {
@@ -143,4 +219,5 @@ async function main() {
     console.log(`ark_regtest: ${restored} wallet leaf keys restored from the mnemonic; ${accepted} leaves accepted, ${refused} refused by the check named; ${kept.length} kept in the store with their preimages`);
 }
 
-(fx.mode === 'recheck' ? recheck() : main()).catch((e) => { console.error(e); process.exit(1); });
+const modes = { recheck, refresh };
+(modes[fx.mode] || main)().catch((e) => { console.error(e); process.exit(1); });

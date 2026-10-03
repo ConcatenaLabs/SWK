@@ -51,13 +51,13 @@ use crate::Error;
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum Atoms {
+pub(crate) enum Atoms {
     Number(u64),
     Decimal(String),
 }
 
 impl Atoms {
-    fn get(&self) -> Result<u64, Error> {
+    pub(crate) fn get(&self) -> Result<u64, Error> {
         match self {
             Atoms::Number(n) => Ok(*n),
             Atoms::Decimal(s) => s
@@ -138,7 +138,7 @@ enum MessageDto {
     },
 }
 
-fn asset(s: &str) -> Result<AssetId, Error> {
+pub(crate) fn asset(s: &str) -> Result<AssetId, Error> {
     AssetId::from_str(s).map_err(|e| Error::Generic(format!("invalid asset id {s:?}: {e}")))
 }
 

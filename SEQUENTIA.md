@@ -310,7 +310,9 @@ Changes by file:
     coin in it verifies, one of them resting on a board, and its refused
     record is refused by its kind. `tests/data/ark_byte_order.json` pins the byte
     order: ids in display hex in the JSON form, internal bytes in the binary
-    form and in the rebindable message.
+    form and in the rebindable message; a release's `M` in display hex at the
+    edge and internal in its message; a received coin's asset in display hex
+    as the kit gives it and internal in its record.
   - `forfeit.rs`: the forfeit a wallet signs to give a leaf up in a round,
     from the Arca library's `Forfeit::for_refresh` and `for_offboard`.
     `forfeit::refresh` verifies the new leaf against the round itself as the
@@ -481,6 +483,24 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   edge; leaf ids, nonces, keys and transactions are hex of their bytes. The
   verifier takes the wallet's chain from its `Network` and makes no claim of
   finality.
+- `src/ark_spend.rs`: coins, forfeits and releases, on `ArkVerifier`, each
+  taking `now`. `verifyCoin(coin, rounds, ownerKey, ownerNonce, now, chain?)`
+  verifies a coin received out of round (its record as hex, every round and
+  board transaction its lineage came from); `chain` is what the wallet's chain
+  source found, `{ paid: [scriptPubkey], spent: [{ txid, vout }] }`, and a coin
+  with a lineage script paid or a board spent is refused (kind `on_chain`);
+  without it the verdict's `lineageCheck` is `operator-rule`. The verdict is
+  `{ accepted: true, coinId, asset, value, hops, expiry, exitDeadline,
+  lineageCheck, lineage, boards }` or `{ accepted: false, kind, reason }`.
+  `coinLineage(coin, rounds, now)` gives the lineage scripts and boards to look
+  up first. `forfeitRefresh(old, newRecord, round, c, ownerKey, ownerNonce,
+  refundDelaySeconds, margin, now)` and `forfeitOffboard(old, offboard, round,
+  c, refundDelaySeconds, margin, now)`, `old` being `{ record }` or
+  `{ coin, rounds }`, and `releaseRefresh(oldRecord, oldRound, newRecord,
+  round, c, ownerKey, ownerNonce, now)` and `releaseOffboard(oldRecord,
+  oldRound, offboard, round, c, now)` wrap the native builders and return
+  `{ message, digest, ... }`, `message` being the object `signCsfs` takes;
+  `connector` is `M` in display hex.
 - `tests/node/arca_signers.js`: the bindings against the Arca vectors.
   `tests/node/scripts/arca_regtest.py` spends the Arca reference scripts on a
   regtest node with signatures from these bindings (see `lwk_wasm/README.md`).
@@ -488,7 +508,10 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   vector (`lwk_wollet/tests/data/ark_byte_order.json`, written by
   `ark_byte_order.py` with hashlib alone) through the bindings: every record
   verifies, every refusal vector is refused by its kind, and the keys, the
-  policy and the store hold.
+  policy and the store hold. Every received coin in the transfer vectors
+  verifies through `verifyCoin`, one of them resting on a board; a coin
+  whose lineage script is paid, or whose board is spent, is refused, and so
+  is the record promising one leaf twice (kind `salt`).
 - `lwk_wollet/tests/ark_regtest.rs` with `tests/node/ark_regtest.js`: leaves
   built by the Arca tree builder in an honest round and in five rounds that
   consensus accepts but a wallet must refuse, mined on an `elementsregtest`
@@ -500,7 +523,13 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   node's median time, accepts an honest replacement as such, still accepts it
   with the chain ten days on, refuses it one second past its exit deadline,
   and refuses a replacement carrying a second token atom at `R`, by check 1.
-  It needs `SEQUENTIAD_EXEC` and fails without it. CI
+  Before the rollback a round paying the wallet a new leaf, an offboard
+  output and the operator's connector is mined, and the bindings build the
+  forfeit and the release for two of the wallet's old leaves
+  (`forfeitRefresh`, `releaseRefresh`, `forfeitOffboard`, `releaseOffboard`):
+  each digest equals the native one, `M` is that round's connector asset in
+  display hex, and the signatures `signCsfs` makes with the old leaves' keys
+  verify natively. It needs `SEQUENTIAD_EXEC` and fails without it. CI
   builds it and runs the native Arca tests (`lwk_signer` and `lwk_wollet`'s
   `ark` module) in a job of their own.
 - `src/seqob_covenant.rs`: `buildCovenantFillTx`, `buildCovenantRefundTx`,

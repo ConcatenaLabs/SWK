@@ -143,7 +143,9 @@ node network.js
 `lwk_wollet/tests/ark_regtest.rs` mines Arca rounds on an `elementsregtest`
 node, among them attacks a wallet must refuse and replacements after a
 rollback, and runs `tests/node/ark_regtest.js`, which verifies them through
-the bindings against each round as the node returns it. Both need the node
+the bindings against each round as the node returns it, then builds and signs
+a refresh's and an offboard's forfeit and release against a round that pays
+the operator's connector. Both need the node
 package above, linked or installed as `lwk_node` in `tests/node/node_modules`;
 the second also needs a `sequentiad` binary, and fails without one:
 

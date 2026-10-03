@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Writes ark_byte_order.json, the byte-order vector for Arca records in the
-kit, from arca_records.json (the Arca repository's record vectors).
+kit, from arca_records.json and arca_transactions.json (the Arca repository's
+record and transfer vectors) and lwk_signer's arca_vectors.json (its script
+vectors).
 
 Asset ids, the sweep token and the genesis hash are in internal byte order in
 scripts, hashes and the record's binary form, and in display hex (the reverse,
@@ -62,6 +64,35 @@ out_spk = bytes.fromhex("5120" + "11" * 32)
 out_record = asset_internal + b"\x01\x01" + out_value.to_bytes(8, "little") + bytes.fromhex("11" * 32) + bytes([1 + 2])
 message = k + asset_internal + b"\x01\x01" + value.to_bytes(8, "little") + bytes([1]) + sha(out_record)
 
+# A release of the vectors' lowest node, by its first owner: SHA256("Arca/release"
+# || genesis || H || M), H the hash of the node's children's records and M the
+# connector asset of the owner's round, both in internal order.
+sv = json.load(open(os.path.join(HERE, "..", "..", "..", "lwk_signer", "test_data", "arca_vectors.json")))
+sv_genesis = bytes.fromhex(sv["inputs"]["genesis_hash"]["internal"])
+assert sv_genesis[::-1].hex() == sv["inputs"]["genesis_hash"]["display"]
+kids = sv["outputs"]["lowest_node"]["params"]["children"]
+records = b"".join(bytes.fromhex(c["asset"]) + b"\x01\x01" + int(c["value"]).to_bytes(8, "little")
+                   + bytes.fromhex(c["program"]) + bytes([1 + 2]) for c in kids)
+node_hash = sha(records)
+reclaim = next(x for x in sv["spends"] if x["name"] == "lowest_node/reclaim")
+first = reclaim["releases"][0]
+m_internal = bytes.fromhex(first["connector_asset"])
+release_message = b"Arca/release" + sv_genesis + node_hash + m_internal
+assert release_message.hex() == first["message"], "the release message is the vectors'"
+assert sha(release_message).hex() == first["digest"]
+
+# A coin received out of round: a reassignment's output, whose record carries
+# the batch asset in internal order; the transfer vectors name it in display.
+tv = json.load(open(os.path.join(HERE, "arca_transactions.json")))
+coin = tv["transfer"]["records"]["B1"]   # one asset, X, in its whole lineage
+coin_binary = bytes.fromhex(coin["binary"])
+coin_asset_display = tv["inputs"]["asset"]
+coin_asset_internal = rev(coin_asset_display)
+coin_offset = coin_binary.find(bytes.fromhex(coin_asset_internal))
+assert coin_offset > 0, "the coin record carries the asset in internal order"
+assert bytes.fromhex(tv["transfer"]["inputs"]["y_asset"])[::-1] not in coin_binary, "and no other asset"
+assert coin_binary.find(bytes.fromhex(coin_asset_display)) < 0, "and not in display order"
+
 out = {
     "about": "Byte-order vector for Arca records in the kit. Written by ark_byte_order.py from arca_records.json; "
              "the display form of an id is its internal bytes reversed.",
@@ -82,6 +113,22 @@ out = {
                    "script_pubkey": out_spk.hex(), "record": out_record.hex()},
         "message": message.hex(),
         "digest": sha(message).hex(),
+    },
+    "release": {
+        "genesis_display": sv["inputs"]["genesis_hash"]["display"],
+        "children": [{"asset_display": rev(c["asset"]), "value": str(c["value"]),
+                      "script_pubkey": "5120" + c["program"]} for c in kids],
+        "node_hash": node_hash.hex(),
+        "connector": {"display": m_internal[::-1].hex(), "internal": m_internal.hex()},
+        "message": release_message.hex(),
+        "digest": sha(release_message).hex(),
+    },
+    "coin": {
+        "binary": coin["binary"],
+        "id": coin["id"],
+        "owner": coin["owner"],
+        "owner_nonce": coin["owner_nonce"],
+        "asset": {"display": coin_asset_display, "internal": coin_asset_internal, "binary_offset": coin_offset},
     },
 }
 with open(os.path.join(HERE, "ark_byte_order.json"), "w") as f:
