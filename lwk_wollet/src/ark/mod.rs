@@ -14,7 +14,10 @@
 //!   round checked back to its rounds, and a leaf checked again after a
 //!   rollback;
 //! - [`forfeit`]: the forfeit the wallet signs to give a leaf up in a round,
-//!   bound to the new leaf it validated and to that round's connector;
+//!   bound to the new leaf it validated and to that round's connector, and
+//!   the release of the lowest node above it, bound to the same round;
+//! - [`transfer`]: the reassignment the wallet builds to pay out of round,
+//!   with a fresh creator nonce for every leaf it creates;
 //! - [`store`]: the wallet's leaves over the kit's store;
 //! - the scripts, the leaf and coin records and the client's checks,
 //!   re-exported from the Arca library (`arca-covenant`, [`covenant`]), never
@@ -38,6 +41,7 @@ mod fixture;
 pub mod forfeit;
 pub mod keys;
 pub mod store;
+pub mod transfer;
 pub mod verify;
 
 /// The Arca library: every script, the leaf record, its validation and the

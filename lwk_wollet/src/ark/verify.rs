@@ -43,9 +43,12 @@
 //! policy: chain, operator, exit delay, depth and reserves. The record cannot
 //! show what is on-chain, and an Arca leaf that is on-chain is never spent
 //! off-chain, since past its exit delay its owner can exit it at once:
-//! [`verify_coin`] refuses a coin when an index of the chain reports any leaf
-//! or checkpoint of its lineage on-chain, and says when no index was asked
-//! ([`LineageCheck`]).
+//! [`verify_coin`] refuses a coin when an index of the chain ([`ChainIndex`])
+//! reports any leaf or checkpoint of its lineage on-chain, or any board it
+//! rests on spent, and says when no index was asked ([`LineageCheck`]). A
+//! coin can rest on a board (`board-1`) rather than a round: the board's
+//! output is the base, and it must still be unspent, since its owner can
+//! convert it into its leaf on-chain.
 //!
 //! Finality is not this module's claim. A verified leaf names the round it was
 //! checked against ([`VerifiedLeaf::round_txid`]); whether that round is
@@ -57,7 +60,7 @@
 //! batch output ([`recheck`]) and, if that fails, unrolls at once.
 
 use elements::secp256k1_zkp::XOnlyPublicKey;
-use elements::{AssetId, Script, Transaction, Txid};
+use elements::{AssetId, OutPoint, Script, Transaction, Txid};
 
 use super::keys::OwnerNonce;
 use super::{
@@ -214,11 +217,19 @@ pub fn verify_round(
     Ok(VerifiedLeaf::new(record, valid, false))
 }
 
+/// An index of the chain, which [`verify_coin`] asks about a coin's lineage.
+pub struct ChainIndex<'a> {
+    /// Whether any transaction has paid this scriptPubKey.
+    pub paid: &'a mut dyn FnMut(&Script) -> bool,
+    /// Whether this outpoint exists and is unspent.
+    pub unspent: &'a mut dyn FnMut(&OutPoint) -> bool,
+}
+
 /// How a received coin's lineage was checked against the chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineageCheck {
     /// An index of the chain reported no leaf or checkpoint of the lineage
-    /// on-chain.
+    /// on-chain, and every board the coin rests on unspent.
     Indexed,
     /// No index was asked. The wallet relies on the operator's rule that no
     /// Arca leaf on-chain is spent off-chain, and says so to its user.
@@ -242,12 +253,18 @@ pub struct ReceivedCoin {
 /// past the exit deadline, so the coin's earliest expiry
 /// ([`ValidCoin::expiry`]) does too.
 ///
-/// `on_chain` is an index of the chain: whether any transaction has paid a
-/// scriptPubKey. With it, the coin is refused ([`TransferError::OnChain`])
-/// when any leaf or checkpoint of its lineage ([`ValidCoin::lineage`]) is
-/// on-chain, since its owner could exit it under the receiver. A wallet that
-/// cannot reach its index passes `None` rather than guessing, and the result
-/// says the coin rests on the operator's rule ([`LineageCheck::OperatorRule`]).
+/// `index` is an index of the chain ([`ChainIndex`]). With it, the coin is
+/// refused ([`TransferError::OnChain`]) when any leaf or checkpoint of its
+/// lineage ([`ValidCoin::lineage`]) is on-chain, since its owner could exit it
+/// under the receiver, and ([`TransferError::BoardSpent`]) when a board it
+/// rests on ([`ValidCoin::boards`]) is spent, since its owner may have
+/// converted it into its leaf. A wallet that cannot reach its index passes
+/// `None` rather than guessing, and the result says the coin rests on the
+/// operator's rule ([`LineageCheck::OperatorRule`]).
+///
+/// A record that promises one leaf twice, which a sender who rebuilt a leaf
+/// the receiver had already paid on would send, is refused with kind `salt`
+/// ([`TransferError::SaltTwice`]).
 /// Either way the sender and the operator together could still sign another
 /// spend of an input: a coin received out of round is refreshed into a round
 /// before it is trusted further.
@@ -257,12 +274,13 @@ pub fn verify_coin(
     policy: &WalletPolicy,
     owner: &XOnlyPublicKey,
     owner_nonce: &OwnerNonce,
-    on_chain: Option<&mut dyn FnMut(&Script) -> bool>,
+    index: Option<ChainIndex<'_>>,
 ) -> Result<ReceivedCoin, TransferError> {
     let coin = coin.validate(rounds, &policy.receipt(), owner, owner_nonce)?;
-    let lineage = match on_chain {
+    let lineage = match index {
         Some(index) => {
-            coin.check_lineage(index)?;
+            coin.check_boards(&mut *index.unspent)?;
+            coin.check_lineage(&mut *index.paid)?;
             LineageCheck::Indexed
         }
         None => LineageCheck::OperatorRule,
@@ -906,7 +924,7 @@ mod tests {
             let leaf = NewLeaf {
                 owner: xonly(to),
                 owner_nonce: nonce,
-                operator_nonce: [nonce[0] ^ 0xff; 32],
+                creator_nonce: [nonce[0] ^ 0xff; 32],
                 exit_delay: delay,
             };
             let out = ExplicitOutput::new(
@@ -1025,26 +1043,34 @@ mod tests {
         // A's leaf, then its checkpoint; B's own leaf is not among them.
         assert_eq!(lineage.len(), 2);
         let mut nothing = |_: &Script| false;
+        let mut all_unspent = |_: &OutPoint| true;
         let indexed = verify_coin(
             &coin,
             &f.rounds,
             &f.policy,
             &owner,
             &nonce,
-            Some(&mut nothing),
+            Some(ChainIndex {
+                paid: &mut nothing,
+                unspent: &mut all_unspent,
+            }),
         )
         .unwrap();
         assert_eq!(indexed.lineage, LineageCheck::Indexed);
         for on in &lineage {
             let spk = on.output.script_pubkey.clone();
             let mut index = |s: &Script| *s == spk;
+            let mut all_unspent = |_: &OutPoint| true;
             let err = verify_coin(
                 &coin,
                 &f.rounds,
                 &f.policy,
                 &owner,
                 &nonce,
-                Some(&mut index),
+                Some(ChainIndex {
+                    paid: &mut index,
+                    unspent: &mut all_unspent,
+                }),
             )
             .unwrap_err();
             assert_eq!(err.kind(), "on_chain", "{err}");
@@ -1074,5 +1100,118 @@ mod tests {
             err,
             TransferError::LineageExitDelay { delay: 1, .. }
         ));
+    }
+
+    /// The Arca transfer vectors (tests/data/arca_transactions.json, the arca
+    /// repository's `regtest/vectors/transactions.json`, copied unchanged).
+    fn transfer_vectors() -> (Json, Vec<Transaction>, WalletPolicy) {
+        let v: Json =
+            serde_json::from_str(include_str!("../../tests/data/arca_transactions.json")).unwrap();
+        let t = &v["transfer"]["inputs"];
+        // Two rounds and a board: the transactions the records' bases came from.
+        let rounds = ["rounds", "boards"]
+            .iter()
+            .flat_map(|k| t[*k].as_array().unwrap().iter())
+            .map(|r| deserialize(&hex(r)).unwrap())
+            .collect();
+        let genesis = BlockHash::from_str(v["inputs"]["genesis_hash"].as_str().unwrap()).unwrap();
+        let now = MedianTime::from_consensus(t["now"].as_u64().unwrap() as u32).unwrap();
+        let policy = WalletPolicy::new(Chain::new(genesis), key(&v["inputs"]["operator"]), now);
+        (v, rounds, policy)
+    }
+
+    #[test]
+    fn the_transfer_vectors_verify_and_refuse_by_kind() {
+        let (v, rounds, policy) = transfer_vectors();
+        let t = &v["transfer"];
+        let mut board_based = 0;
+        for (name, r) in t["records"].as_object().unwrap() {
+            let coin = CoinRecord::from_bytes(&hex(&r["binary"])).unwrap();
+            let (owner, nonce) = (key(&r["owner"]), self::nonce(&r["owner_nonce"]));
+            let ok = verify_coin(&coin, &rounds, &policy, &owner, &nonce, None)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(ok.coin.id.to_string(), r["id"].as_str().unwrap(), "{name}");
+            assert_eq!(ok.lineage, LineageCheck::OperatorRule);
+            // The second nonce of a reassignment leaf's salt is its sender's.
+            match &coin {
+                CoinRecord::Transfer(t) => assert_eq!(
+                    t.leaf.creator_nonce.to_vec(),
+                    hex(&r["creator_nonce"]),
+                    "{name}"
+                ),
+                _ => panic!("{name}: a reassignment's output"),
+            }
+            let boards = ok.coin.boards();
+            if boards.is_empty() {
+                continue;
+            }
+            // A coin resting on a board (board-1) is good while the board is
+            // unspent, and refused once it is: its owner may have converted
+            // it into its leaf on-chain.
+            board_based += 1;
+            let mut nothing = |_: &Script| false;
+            let mut all_unspent = |_: &OutPoint| true;
+            let indexed = verify_coin(
+                &coin,
+                &rounds,
+                &policy,
+                &owner,
+                &nonce,
+                Some(ChainIndex {
+                    paid: &mut nothing,
+                    unspent: &mut all_unspent,
+                }),
+            )
+            .unwrap();
+            assert_eq!(indexed.lineage, LineageCheck::Indexed);
+            let spent_board = boards[0];
+            let mut nothing = |_: &Script| false;
+            let mut board_spent = |o: &OutPoint| *o != spent_board;
+            let err = verify_coin(
+                &coin,
+                &rounds,
+                &policy,
+                &owner,
+                &nonce,
+                Some(ChainIndex {
+                    paid: &mut nothing,
+                    unspent: &mut board_spent,
+                }),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, TransferError::BoardSpent(o) if o == spent_board),
+                "{err}"
+            );
+            println!("{name}: refused once its board is spent: {err}");
+        }
+        // E, and the control record F that rests on the same leaf as the
+        // refused one.
+        assert_eq!(board_based, 2);
+
+        // A coin resting on one leaf that two reassignments promised: kind
+        // `salt`.
+        let mut refused = 0;
+        for x in t["refused_records"].as_array().unwrap() {
+            let coin = CoinRecord::from_bytes(&hex(&x["binary"])).unwrap();
+            let err = verify_coin(
+                &coin,
+                &rounds,
+                &policy,
+                &key(&x["owner"]),
+                &self::nonce(&x["owner_nonce"]),
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err.kind(),
+                x["kind"].as_str().unwrap(),
+                "{}: {err}",
+                x["name"]
+            );
+            println!("refused: {}: {err} (kind {})", x["name"], err.kind());
+            refused += 1;
+        }
+        assert_eq!(refused, 1);
     }
 }

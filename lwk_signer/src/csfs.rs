@@ -14,9 +14,13 @@
 //! |---|---|
 //! | [`RebindMessage`], the leaf's collaborative path | `SHA256(K ‖ asset_in ‖ 0x01 ‖ 0x01 ‖ value_in(8, LE) ‖ m ‖ SHA256(record 0) ‖ … ‖ SHA256(record m-1))` with `K = SHA256(SHA256("ArcaRbd1" ‖ genesis) ‖ salt)` |
 //! | [`UnrollAuthorisation`], a member's consent to unroll a node | `SHA256("Arca/unroll" ‖ H ‖ t)`, `t` minimally encoded as a script number |
-//! | [`ReleaseMessage`], an owner's release of a lowest node | `SHA256("Arca/release" ‖ genesis ‖ H)` |
+//! | [`ReleaseMessage`], an owner's release of a lowest node | `SHA256("Arca/release" ‖ genesis ‖ H ‖ M)` |
 //!
-//! `H` is the SHA256 of the node's children's records in order. A record is the
+//! `H` is the SHA256 of the node's children's records in order. `M` is the
+//! connector asset of the round that made the owner's new leaf (or paid its
+//! offboard): the node's RECLAIM confirms only with an atom of `M` among its
+//! inputs, which exists only while that round is in the chain, so a release
+//! is void with the round it names. A record is the
 //! form introspection gives an explicit output: `asset(32) ‖ 0x01 ‖ 0x01 ‖
 //! value(8, LE) ‖ program ‖ (witness version + 2)`, where a script that is not
 //! a witness program contributes its SHA256 and version −1. The genesis hash and
@@ -173,6 +177,10 @@ pub enum CsfsError {
     /// The leaf's record cannot be read or rebuilt.
     #[error("the leaf's record: {0}")]
     Record(String),
+
+    /// The children given with a release are not the released node's.
+    #[error("the children given are not those of the node the release names")]
+    OtherNode,
 
     /// The path is not one a rebindable message can be for.
     #[error("unknown rebindable path {0:?} (leaf, checkpoint, htlc-claim, htlc-claim-both, htlc-refund-both)")]
@@ -585,13 +593,40 @@ pub struct UnrollAuthorisation {
     pub time: u32,
 }
 
-/// An owner's release of a lowest node, which lets the operator reclaim it.
+/// An owner's release of a lowest node, which lets the operator reclaim it,
+/// bound to the round that made the owner's new leaf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseMessage {
     /// The genesis hash of the chain the node lives on.
     pub genesis_hash: BlockHash,
     /// The node's children, in output order.
     pub children: Vec<CommittedOutput>,
+    /// `M`, the connector asset of the round that made the owner's new leaf
+    /// or paid its offboard. Take it from the Arca library's `Release`
+    /// ([`ReleaseMessage::release`]), which reads it from the round the
+    /// wallet validated, never from what the operator says.
+    pub connector: AssetId,
+}
+
+#[cfg(feature = "ark")]
+impl ReleaseMessage {
+    /// The message for `release`, built by the Arca library from the old leaf
+    /// and the round of the new one (`Release::for_refresh`,
+    /// `Release::for_offboard`), with the lowest node's `children` so a
+    /// wallet can show them. Refuses children whose hash is not the node's.
+    pub fn release(
+        release: &arca_covenant::Release,
+        children: Vec<CommittedOutput>,
+    ) -> Result<ReleaseMessage, CsfsError> {
+        if children_hash(&children)? != release.node_hash {
+            return Err(CsfsError::OtherNode);
+        }
+        Ok(ReleaseMessage {
+            genesis_hash: release.chain.genesis_hash(),
+            children,
+            connector: release.connector,
+        })
+    }
 }
 
 /// One of the three messages an Arca script verifies with
@@ -694,6 +729,7 @@ impl ArcaMessage {
                 let mut p = RELEASE_TAG.to_vec();
                 p.extend_from_slice(m.genesis_hash.as_byte_array());
                 p.extend_from_slice(&children_hash(&m.children)?);
+                p.extend_from_slice(&serialize(&m.connector));
                 Ok(p)
             }
         }
@@ -841,6 +877,10 @@ impl ArcaMessage {
                     m.genesis_hash
                 )];
                 v.extend(m.children.iter().enumerate().map(|(i, o)| out_line(i, o)));
+                v.push(format!(
+                    "Only while the round whose connector asset is {} stays in the chain: if that round is lost, the release is void and the old coin stays yours.",
+                    m.connector
+                ));
                 v
             }
         }
@@ -1158,31 +1198,35 @@ mod tests {
                 );
                 sigs += check(&v, &msg, &spend["message"], &spend["digest"], &labelled);
                 unroll += 1;
-            } else if spend.get("release_digest").is_some() {
-                let owners: Vec<(&str, &Value)> =
-                    labelled.into_iter().filter(|(k, _)| *k != "S").collect();
-                let msg = ArcaMessage::Release(ReleaseMessage {
-                    genesis_hash: g,
-                    children: children(params),
-                });
-                sigs += check(
-                    &v,
-                    &msg,
-                    &spend["release_message"],
-                    &spend["release_digest"],
-                    &owners,
-                );
-                release += 1;
+            } else if let Some(releases) = spend.get("releases") {
+                // Each owner releases the node for the round that made its
+                // own new leaf, so each signs its own message: the shared
+                // prefix and that round's connector asset.
+                for r in releases.as_array().unwrap() {
+                    let label = r["owner"].as_str().unwrap();
+                    let connector = AssetId::from_slice(&bytes(&r["connector_asset"])).unwrap();
+                    let msg = ArcaMessage::Release(ReleaseMessage {
+                        genesis_hash: g,
+                        children: children(params),
+                        connector,
+                    });
+                    let prefix = spend["release_prefix"].as_str().unwrap();
+                    assert!(msg.preimage().unwrap().to_hex().starts_with(prefix));
+                    let sig = labelled.iter().find(|(k, _)| *k == label).unwrap();
+                    sigs += check(&v, &msg, &r["message"], &r["digest"], &[*sig]);
+                    release += 1;
+                }
             }
         }
         // The leaf at m = 1 (three times: into the checkpoint, the forfeit
-        // and a 43-byte script) and m = 4, the checkpoint at m = 2, and
-        // htlc-1's three collaborative paths, all signed by owner and operator
-        // except the claim, which the operator signs alone; the root, an inner
-        // node and a watch service's timed authorisation; one release by four
-        // owners.
-        assert_eq!((rebind, unroll, release), (8, 3, 1));
-        assert_eq!(sigs, 7 * 2 + 1 + 3 + 4);
+        // and a 43-byte script) and m = 4, the checkpoint at m = 2, a board's
+        // collaborative path (the leaf's own) at m = 1, and htlc-1's three
+        // collaborative paths, all signed by owner and operator except the
+        // claim, which the operator signs alone; the root, an inner node and
+        // a watch service's timed authorisation; four owners' releases of one
+        // node, under the connector assets of two rounds.
+        assert_eq!((rebind, unroll, release), (9, 3, 4));
+        assert_eq!(sigs, 8 * 2 + 1 + 3 + 4);
     }
 
     /// The rebindable path a vector spend takes.
@@ -1191,7 +1235,8 @@ mod tests {
             spend["output"].as_str().unwrap(),
             spend["leaf"].as_str().unwrap(),
         ) {
-            ("leaf", "collab") => RebindPath::Leaf,
+            // A board's collaborative path is its leaf's own script.
+            ("leaf", "collab") | ("board", "collab") => RebindPath::Leaf,
             ("checkpoint", "collab") => RebindPath::Checkpoint,
             ("htlc", "claim") => RebindPath::HtlcClaim,
             ("htlc", "claim_both") => RebindPath::HtlcClaimBoth,
@@ -1217,6 +1262,7 @@ mod tests {
         let release = ArcaMessage::Release(ReleaseMessage {
             genesis_hash: g,
             children: kids,
+            connector: AssetId::from_slice(&[0x4d; 32]).unwrap(),
         });
         (rebind, unroll, release)
     }
@@ -1276,6 +1322,10 @@ mod tests {
         let mut elsewhere = rl.clone();
         elsewhere.genesis_hash = reversed;
         changed.push((release.clone(), ArcaMessage::Release(elsewhere)));
+        // A release for another round: another connector asset.
+        let mut other_round = rl.clone();
+        other_round.connector = AssetId::from_slice(&[0x4e; 32]).unwrap();
+        changed.push((release.clone(), ArcaMessage::Release(other_round)));
         for (original, altered) in changed {
             let err = signer
                 .sign_csfs(&master, &altered, &original.digest().unwrap(), &policy)

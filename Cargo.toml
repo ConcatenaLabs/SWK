@@ -73,4 +73,4 @@ thiserror = { version = "2.0.18" }
 # Arca's covenant scripts, leaf record and client checks (the `arca`
 # repository's `covenant/` crate). This line is the only place the revision
 # is named; moving the pin is a change to it alone.
-arca-covenant = { git = "https://github.com/ConcatenaLabs/arca", rev = "aaf985459a32f2b0636dea7f3bb143cd080fd7c6", default-features = false }
+arca-covenant = { git = "https://github.com/ConcatenaLabs/arca", rev = "b21815b3e1b14b58116a5b71b8cb60405f346642", default-features = false }

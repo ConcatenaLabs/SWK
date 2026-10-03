@@ -17,6 +17,12 @@ the reference's own.
   leaf 2  collaborative, m = 1              signCsfs by owner and operator
   node B  [gated timed UNROLL, RECLAIM]   reclaimed: four SWK releases + signTapscript
 
+Each release names M, the connector asset of the round that made its owner's
+new leaf, and RECLAIM reads M from the input the witness names. M is issued
+here as the operator issues it: a stand-in round pays the connector output,
+and the operator's SWK key spends it by its one leaf (signTapscript over an
+issuance input), issuing one atom of M.
+
 Negative cases are forced into a block with generateblock, on a node started
 with -par=1 so that the block's error names the script failure, and each is
 asserted to fail for its own reason in the mempool and in the block. SWK's
@@ -131,10 +137,27 @@ class ArcaSigners(Ark3, ArkBase, BitcoinTestFramework):
         keys = [self.s_x] + self.ox
         levels, padded = hmerkle(keys, self.s_x)
         unroll = hgate_unroll(levels[-1][0], len(levels) - 1, kids, timed=True)
-        reclaim = reclaim_leaf(release_msg(self.gen, kids), self.ox, self.s_x)
+        reclaim = reclaim_leaf(release_prefix(self.gen, kids), self.ox, self.s_x)
         tap = taproot_construct(NUMS, [("unroll", unroll), ("reclaim", reclaim)])
         return {"tap": tap, "kids": kids, "leaves": leaves, "levels": levels, "keys": padded, "salts": salts,
                 "value": 4 * LEAF + RESERVE}
+
+    def connector_m(self, op, label, value=5_000, fee=1_000):
+        """A round's connector asset M, issued as the operator issues it: a
+        stand-in round pays the connector output, and the operator's SWK key
+        spends it by its one leaf, issuing one explicit atom of M (a zero
+        contract hash, no reissuance token) to an OP_1 tapscript."""
+        ctap, clv = connector_taptree(self.s_x)
+        round_u = self.fund(ctap.scriptPubKey, value, self.X)
+        tx = self.mktx([round_u], [self.out(1, OP_TRUE_SPK, b"\x01" + bytes(32)),
+                                   self.out(value - fee, OP_TRUE_SPK, self.X_OUT), self.fee(fee, self.X_OUT)])
+        tx.vin[0].assetIssuance = self.issuing_input(round_u)
+        m_id = bytes.fromhex(self.issued_ids(tx)[0])[::-1]
+        tx.vout[0].nAsset = CTxOutAsset(b"\x01" + m_id)
+        sig = self.tapscript(op, "m/6/0", tx, 0, ctap, "issue")
+        self.setwit(tx, 0, [sig, bytes(clv["issue"]), control_block(ctap, "issue")])
+        txid = self.send(tx, label)
+        return m_id, self.utxo_at(txid, 0)
 
     # -- the flow ------------------------------------------------------------
     def flow(self):
@@ -271,24 +294,42 @@ class ArcaSigners(Ark3, ArkBase, BitcoinTestFramework):
         self.setwit(tx, 0, [sig, bytes(lv0["exit"]), control_block(tap0, "exit")])
         self.send(tx, "pos/exit_claim_signed_by_sign_tapscript")
 
-        # ---- node B: reclaim with four SWK releases and the operator's tapscript signature
-        rel = {"kind": "release", "genesisHash": self.genesis_display, "children": self.children_json(B["kids"])}
+        # ---- node B: reclaim with four SWK releases, each naming the round of
+        # its owner's new leaf by its connector asset M, and the operator's
+        # tapscript signature
+        m1, m1_u = self.connector_m(op, "setup/issue M of round 1, signed by sign_tapscript")
+        m2, m2_u = self.connector_m(op, "setup/issue M of round 2, signed by sign_tapscript")
+        m_display = m1[::-1].hex()
+        rel = {"kind": "release", "genesisHash": self.genesis_display, "children": self.children_json(B["kids"]),
+               "connector": m_display}
         self.rec("describe/release", self.swk.ok(op="describe", message=rel))
-        rref = release_msg(self.gen, B["kids"])
+        rref = release_msg(self.gen, B["kids"], m1)
         rsigs = [self.csfs(own, "m/6/%d" % i, rel, rref) for i in range(4)]
+        rel2 = dict(rel, connector=m2[::-1].hex())
+        r2sigs = [self.csfs(own, "m/6/%d" % i, rel2, release_msg(self.gen, B["kids"], m2)) for i in range(4)]
         relw = dict(rel, genesisHash=self.genesis_reversed)
         self.refusal("swk/refuses_release_for_display_order_genesis", op="csfs", signer=own, path="m/6/0",
                      message=relw, digest=self.swk.ok(op="digest", message=relw))
+        relm = dict(rel, connector=m1.hex())
+        self.refusal("swk/refuses_release_whose_digest_names_M_in_internal_order", op="csfs", signer=own,
+                     path="m/6/0", message=relm, digest=rref.hex())
 
-        def reclaim_tx(owner_sigs):
-            tx = self.mktx([uB], [self.out(uB.amount - FEE, self.wallet_spk(), self.X_OUT), self.fee(FEE, self.X_OUT)])
+        def reclaim_tx(owner_sigs, ms=(m1_u,), ks=(1, 1, 1, 1)):
+            outs = [self.out(uB.amount - FEE, self.wallet_spk(), self.X_OUT)]
+            outs += [self.out(m.amount, OP_TRUE_SPK, m.txout.nAsset.vchCommitment) for m in ms]
+            tx = self.mktx([uB] + list(ms), outs + [self.fee(FEE, self.X_OUT)])
             s = self.tapscript(op, "m/6/0", tx, 0, B["tap"], "reclaim")
             leaf = B["tap"].leaves["reclaim"].script
-            self.setwit(tx, 0, [s] + list(reversed(owner_sigs)) + [bytes(leaf), control_block(B["tap"], "reclaim")])
+            self.setwit(tx, 0, reclaim_items(s, owner_sigs, list(ks)) + [bytes(leaf), control_block(B["tap"], "reclaim")])
+            for j in range(len(ms)):
+                self.setwit(tx, 1 + j, OP_TRUE_WITNESS)
             return tx
         self.refuse(reclaim_tx(rsigs[:3] + [b""]), "neg/three_releases_of_four",
                     "Script failed an OP_CHECKSIGVERIFY operation")
         self.refuse(reclaim_tx(rsigs[1:] + rsigs[:1]), "neg/releases_in_the_wrong_slots", SIG)
+        self.refuse(reclaim_tx(rsigs, ms=()), "neg/reclaim_without_M", "Introspection index out of bounds")
+        self.refuse(reclaim_tx(rsigs, ms=(m2_u,)), "neg/releases_for_round_1_with_round_2s_M", SIG)
+        self.refuse(reclaim_tx(r2sigs, ms=(m1_u,)), "neg/releases_for_round_2_with_round_1s_M", SIG)
         rtx = self.mktx([uB], [self.out(uB.amount - FEE, self.wallet_spk(), self.X_OUT), self.fee(FEE, self.X_OUT)])
         self.pad(rtx)
         self.refusal("swk/refuses_reclaim_for_display_order_genesis", op="tapscript", signer=op, path="m/6/0",

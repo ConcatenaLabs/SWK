@@ -160,7 +160,9 @@ regtest node, with every signature made by the wasm bindings
 (`Signer.signTapscript` and `Signer.signCsfs`) through
 `tests/node/scripts/arca_regtest_driver.js`: a node unrolled with an
 authorisation the kit signed, a leaf's collaborative path at one and two
-outputs, an exit claim, and a reclaim. Each negative case is forced into a
+outputs, an exit claim, and a reclaim whose releases each name the connector
+asset `M` of a round, issued from a connector output the kit's operator key
+signs for. Each negative case is forced into a
 block with `generateblock` on a node started with `-par=1`, and must fail in
 the mempool and in the block for its own named reason. The kit's own
 refusals are recorded too: a message or spend for another chain than the

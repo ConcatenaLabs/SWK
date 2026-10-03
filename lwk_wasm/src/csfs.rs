@@ -11,8 +11,12 @@
 //!   outputs: [{ asset, value, scriptPubkey }, ...],    // 1 to 4 outputs
 //!   otherInputs: [{ asset, value }, ...] }             // optional
 //! { kind: "unroll", children: [{ asset, value, scriptPubkey }, ...], time }
-//! { kind: "release", genesisHash, children: [{ asset, value, scriptPubkey }, ...] }
+//! { kind: "release", genesisHash, children: [{ asset, value, scriptPubkey }, ...], connector }
 //! ```
+//!
+//! A release's `connector` is `M`, the connector asset of the round that made
+//! the owner's new leaf (display hex): the release is void if that round is
+//! lost. Take it from the round the wallet validated, never from the operator.
 //!
 //! A rebind's `source` names the output it spends. For a leaf's
 //! collaborative path it is the leaf's record, `{ record }` (its JSON text,
@@ -112,6 +116,7 @@ enum MessageDto {
     Release {
         genesis_hash: String,
         children: Vec<OutputDto>,
+        connector: String,
     },
 }
 
@@ -225,9 +230,11 @@ pub(crate) fn parse_message(message: JsValue) -> Result<ArcaMessage, Error> {
         MessageDto::Release {
             genesis_hash,
             children,
+            connector,
         } => ArcaMessage::Release(ReleaseMessage {
             genesis_hash: genesis(&genesis_hash)?,
             children: outputs(&children)?,
+            connector: asset(&connector)?,
         }),
     })
 }
