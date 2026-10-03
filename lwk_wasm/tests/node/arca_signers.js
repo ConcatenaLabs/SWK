@@ -110,8 +110,8 @@ for (const s of v.spends) {
         digests++;
     }
 }
-assert.strictEqual(sighashes, 16);
-assert.strictEqual(digests, 11);
+assert.strictEqual(sighashes, 17);
+assert.strictEqual(digests, 12);
 
 // Refusals. The signer is made for the vectors' chain.
 const X = display(v.inputs.assets.X);

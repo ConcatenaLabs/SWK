@@ -22,7 +22,9 @@ use std::sync::Arc;
 use lwk_wollet::ark::keys::{self, OwnerNonce};
 use lwk_wollet::ark::store::ArkStore as Store;
 use lwk_wollet::ark::verify::{self, Recheck, VerifiedLeaf, VerifyError};
-use lwk_wollet::ark::{Chain, LeafRecord, MedianTime, RecordError, RelativeTime, WalletPolicy};
+use lwk_wollet::ark::{
+    Chain, LeafRecord, MedianTime, RecordError, RelativeTime, ReserveFloor, WalletPolicy,
+};
 use lwk_wollet::elements::hex::{FromHex, ToHex};
 use lwk_wollet::elements::secp256k1_zkp::XOnlyPublicKey;
 use lwk_wollet::elements::{encode, Transaction};
@@ -199,6 +201,16 @@ struct PolicyDto {
     horizon_seconds: Option<u32>,
     min_exit_delay_seconds: Option<u64>,
     max_exit_delay_seconds: Option<u64>,
+    max_levels: Option<u32>,
+    min_reserve_atoms: Option<u64>,
+    min_reserve_fee_rate: Option<FeeRateFloorDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeeRateFloorDto {
+    floor_per_kvb: u64,
+    multiple: u64,
 }
 
 fn relative(seconds: u64, what: &str) -> Result<RelativeTime, Error> {
@@ -306,10 +318,14 @@ impl VerdictDto {
 /// every leaf to its chain) and its policy.
 ///
 /// The policy object is `{ operator, minNoticeSeconds?, horizonSeconds?,
-/// minExitDelaySeconds?, maxExitDelaySeconds? }`: the operator key the wallet
-/// was told (x-only hex) and the bounds, which default to the specification's
-/// (a notice of at least 36 hours, a first expiry at least 27 days after now
-/// for a leaf taken from a round, an exit delay of 36 to 48 hours). Every
+/// minExitDelaySeconds?, maxExitDelaySeconds?, maxLevels?, minReserveAtoms?,
+/// minReserveFeeRate? }`: the operator key the wallet was told (x-only hex)
+/// and the bounds, which default to the specification's (a notice of at least
+/// 36 hours, a first expiry at least 27 days after now for a leaf taken from a
+/// round, an exit delay of 36 to 48 hours, a path of at most 5 levels, and a
+/// reserve of at least one atom on every node and on the entry). The reserve
+/// floor is `minReserveAtoms`, or `minReserveFeeRate: { floorPerKvb, multiple
+/// }` for the specification's fee-rate rule at the wallet's own floor. Every
 /// method takes `now`, the median time the wallet's chain source gives at
 /// the time of the call, so a verifier kept for a long time never applies a
 /// stale time.
@@ -368,6 +384,22 @@ impl ArkVerifier {
         if let Some(s) = dto.max_exit_delay_seconds {
             policy.max_exit_delay = relative(s, "maxExitDelaySeconds")?;
         }
+        if let Some(n) = dto.max_levels {
+            policy.max_levels = n as usize;
+        }
+        policy.min_reserve = match (dto.min_reserve_atoms, dto.min_reserve_fee_rate) {
+            (Some(_), Some(_)) => {
+                return Err(generic(
+                    "give minReserveAtoms or minReserveFeeRate, not both",
+                ))
+            }
+            (Some(a), None) => ReserveFloor::Atoms(a),
+            (None, Some(r)) => ReserveFloor::FeeRate {
+                floor_per_kvb: r.floor_per_kvb,
+                multiple: r.multiple,
+            },
+            (None, None) => policy.min_reserve,
+        };
         Ok(ArkVerifier { policy })
     }
 

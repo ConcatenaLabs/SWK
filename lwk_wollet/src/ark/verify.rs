@@ -35,9 +35,17 @@
 //!   [`verify_coin`]), and a leaf it already holds, when it checks it again
 //!   ([`recheck`]) or finds it in a restore ([`verify_held_leaf`]), need only
 //!   leave the exit deadline:
-//!   `E_0 ≥ now + EXIT_DEADLINE_MARGIN`. These build that policy from the
-//!   caller's ([`exit_deadline_policy`]) and ignore its horizon, so a leaf
-//!   is not refused, and unrolled, merely for being days old.
+//!   `E_0 ≥ now + EXIT_DEADLINE_MARGIN`. These apply the receipt form of the
+//!   caller's policy ([`WalletPolicy::receipt`]) whatever its horizon, so a
+//!   leaf is not refused, and unrolled, merely for being days old.
+//!
+//! Every leaf in a received coin's lineage, whoever owns it, meets the same
+//! policy: chain, operator, exit delay, depth and reserves. The record cannot
+//! show what is on-chain, and an Arca leaf that is on-chain is never spent
+//! off-chain, since past its exit delay its owner can exit it at once:
+//! [`verify_coin`] refuses a coin when an index of the chain reports any leaf
+//! or checkpoint of its lineage on-chain, and says when no index was asked
+//! ([`LineageCheck`]).
 //!
 //! Finality is not this module's claim. A verified leaf names the round it was
 //! checked against ([`VerifiedLeaf::round_txid`]); whether that round is
@@ -49,7 +57,7 @@
 //! batch output ([`recheck`]) and, if that fails, unrolls at once.
 
 use elements::secp256k1_zkp::XOnlyPublicKey;
-use elements::{AssetId, Transaction, Txid};
+use elements::{AssetId, Script, Transaction, Txid};
 
 use super::keys::OwnerNonce;
 use super::{
@@ -59,19 +67,9 @@ use super::{
 
 /// The time before the expiry by which an exit must start: the
 /// specification's exit deadline, three days, for the unroll, the exit delay
-/// and a margin for an anchor rollback.
-pub const EXIT_DEADLINE_MARGIN: u32 = 3 * 86_400;
-
-/// The policy a re-check or a receipt applies: the wallet's own, except that
-/// the first expiry need only leave the exit deadline,
-/// `E_0 ≥ now + EXIT_DEADLINE_MARGIN`, rather than the acceptance horizon a
-/// leaf taken from a round must leave.
-pub fn exit_deadline_policy(policy: &WalletPolicy) -> WalletPolicy {
-    WalletPolicy {
-        horizon: EXIT_DEADLINE_MARGIN,
-        ..*policy
-    }
-}
+/// and a margin for an anchor rollback. The Arca library's
+/// [`WalletPolicy::EXIT_DEADLINE`].
+pub const EXIT_DEADLINE_MARGIN: u32 = WalletPolicy::EXIT_DEADLINE;
 
 /// What a verification established about a leaf.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,7 +187,7 @@ pub fn verify_leaf(
 
 /// Verify the wallet's own leaf that it already holds, such as one found in a
 /// restore: as [`verify_leaf`], with the exit deadline in place of the
-/// acceptance horizon ([`exit_deadline_policy`]).
+/// acceptance horizon ([`WalletPolicy::receipt`]).
 pub fn verify_held_leaf(
     record: &LeafRecord,
     round: &Transaction,
@@ -197,19 +195,13 @@ pub fn verify_held_leaf(
     owner: &XOnlyPublicKey,
     owner_nonce: &OwnerNonce,
 ) -> Result<VerifiedLeaf, VerifyError> {
-    verify_leaf(
-        record,
-        round,
-        &exit_deadline_policy(policy),
-        owner,
-        owner_nonce,
-    )
+    verify_leaf(record, round, &policy.receipt(), owner, owner_nonce)
 }
 
 /// Verify a leaf the wallet does not own, such as the coin a sender is about
 /// to give it: the same checks as [`verify_leaf`] without the owner's key and
 /// nonce, and with the exit deadline in place of the acceptance horizon
-/// ([`exit_deadline_policy`]). A wallet never accepts a leaf of its own with
+/// ([`WalletPolicy::receipt`]). A wallet never accepts a leaf of its own with
 /// this alone.
 pub fn verify_round(
     record: &LeafRecord,
@@ -217,31 +209,65 @@ pub fn verify_round(
     policy: &WalletPolicy,
 ) -> Result<VerifiedLeaf, VerifyError> {
     let valid = record
-        .validate_round(round, &exit_deadline_policy(policy))
+        .validate_round(round, &policy.receipt())
         .map_err(VerifyError)?;
     Ok(VerifiedLeaf::new(record, valid, false))
+}
+
+/// How a received coin's lineage was checked against the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineageCheck {
+    /// An index of the chain reported no leaf or checkpoint of the lineage
+    /// on-chain.
+    Indexed,
+    /// No index was asked. The wallet relies on the operator's rule that no
+    /// Arca leaf on-chain is spent off-chain, and says so to its user.
+    OperatorRule,
+}
+
+/// A coin received out of round, as [`verify_coin`] accepted it.
+#[derive(Debug, Clone)]
+pub struct ReceivedCoin {
+    /// The coin, with everything needed to bring it on-chain.
+    pub coin: ValidCoin,
+    /// How its lineage was checked against the chain.
+    pub lineage: LineageCheck,
 }
 
 /// Verify a coin the wallet receives out of round, for its key `owner` and the
 /// `owner_nonce` it published: the Arca library's [`CoinRecord::validate`]
 /// against `rounds` (every round transaction the coin's lineage came from),
-/// under `policy` with the exit deadline in place of the acceptance horizon
-/// ([`exit_deadline_policy`]). Every batch leaf in the lineage meets that
-/// bound, so the coin's earliest expiry ([`ValidCoin::expiry`]) does too.
+/// under the receipt form of `policy` ([`WalletPolicy::receipt`]). Every leaf
+/// of the lineage meets the policy, and every batch leaf's first expiry lies
+/// past the exit deadline, so the coin's earliest expiry
+/// ([`ValidCoin::expiry`]) does too.
 ///
-/// This does not look at the chain. A leaf of the lineage already on-chain
-/// past its exit delay can be exited by its holder at once, so the receiver
-/// relies on the operator's rule that no leaf on-chain is spent off-chain;
-/// and the sender and the operator together could still sign another spend
-/// of an input.
+/// `on_chain` is an index of the chain: whether any transaction has paid a
+/// scriptPubKey. With it, the coin is refused ([`TransferError::OnChain`])
+/// when any leaf or checkpoint of its lineage ([`ValidCoin::lineage`]) is
+/// on-chain, since its owner could exit it under the receiver. A wallet that
+/// cannot reach its index passes `None` rather than guessing, and the result
+/// says the coin rests on the operator's rule ([`LineageCheck::OperatorRule`]).
+/// Either way the sender and the operator together could still sign another
+/// spend of an input: a coin received out of round is refreshed into a round
+/// before it is trusted further.
 pub fn verify_coin(
     coin: &CoinRecord,
     rounds: &[Transaction],
     policy: &WalletPolicy,
     owner: &XOnlyPublicKey,
     owner_nonce: &OwnerNonce,
-) -> Result<ValidCoin, TransferError> {
-    coin.validate(rounds, &exit_deadline_policy(policy), owner, owner_nonce)
+    on_chain: Option<&mut dyn FnMut(&Script) -> bool>,
+) -> Result<ReceivedCoin, TransferError> {
+    let coin = coin.validate(rounds, &policy.receipt(), owner, owner_nonce)?;
+    let lineage = match on_chain {
+        Some(index) => {
+            coin.check_lineage(index)?;
+            LineageCheck::Indexed
+        }
+        None => LineageCheck::OperatorRule,
+    };
+    Ok(ReceivedCoin { coin, lineage })
 }
 
 /// The outcome of checking a leaf again.
@@ -249,11 +275,12 @@ pub fn verify_coin(
 pub enum Recheck {
     /// The same round pays the batch output, and still passes.
     Same(VerifiedLeaf),
-    /// Another transaction pays the batch output now, and passes. The wallet
-    /// keeps the new round's txid. The operator never does this on purpose:
-    /// after a rollback it broadcasts the identical round again. While this
-    /// transaction stands, no forfeit bound to the previous round's connector
-    /// can be claimed.
+    /// Another transaction pays the batch output now, and passes: a new round
+    /// (the Arca library's `Recheck::NewRound`). The wallet keeps the new
+    /// round's txid. The operator never does this on purpose: after a rollback
+    /// it broadcasts the identical round again. Nothing signed for the old
+    /// round carries over: a forfeit bound to its connector can never be
+    /// claimed, so a leaf the wallet gave up for it is still its own.
     Replaced {
         /// The round the leaf was first checked against.
         previous: Txid,
@@ -265,11 +292,11 @@ pub enum Recheck {
 /// Check the wallet's own leaf again, after a rollback, against whichever
 /// transaction now pays its batch output; `previous_round` is the round it
 /// was last verified against. The policy is the caller's with the exit
-/// deadline in place of the acceptance horizon ([`exit_deadline_policy`]):
+/// deadline in place of the acceptance horizon ([`WalletPolicy::receipt`]):
 /// a leaf the wallet already holds is not refused for being days old, only
-/// once its exit must start. An error is an order to unroll at once: the
-/// notice `W`, counted from the replacement's release, is the time the wallet
-/// has.
+/// once its exit must start. With `round` on-chain, an error is an order to
+/// unroll at once: the notice `W`, counted from the replacement's release, is
+/// the time the wallet has.
 pub fn recheck(
     previous_round: &Txid,
     record: &LeafRecord,
@@ -301,7 +328,7 @@ mod tests {
     use serde_json::Value as Json;
 
     use super::*;
-    use crate::ark::{Chain, ClockSchedule};
+    use crate::ark::{Chain, ClockSchedule, ReserveFloor};
 
     fn vectors() -> Json {
         serde_json::from_str(include_str!("../../tests/data/arca_records.json")).unwrap()
@@ -367,7 +394,7 @@ mod tests {
     #[test]
     fn every_record_verifies_against_its_round() {
         let v = vectors();
-        let (mut n, mut longer) = (0, 0);
+        let (mut n, mut longer, mut unreserved) = (0, 0, 0);
         for batch in v["batches"].as_array().unwrap() {
             let round: Transaction = deserialize(&hex(&batch["round"]["tx"])).unwrap();
             let p = policy(&v, batch);
@@ -397,6 +424,22 @@ mod tests {
                     p.max_exit_delay = from_binary.exit_delay;
                     longer += 1;
                 }
+                // Some batches hold no reserve on a node or the entry, which
+                // the default floor of one atom refuses; a wallet that sets
+                // no floor verifies the leaf.
+                if let Err(err) = verify_leaf(&from_binary, &round, &p, &owner, &owner_nonce) {
+                    assert!(
+                        matches!(
+                            err.0,
+                            RecordError::NodeReserve { reserve: 0, .. }
+                                | RecordError::EntryReserve { reserve: 0, .. }
+                        ),
+                        "{name}: {err}"
+                    );
+                    assert_eq!(err.failed(), "wallet policy", "{name}: {err}");
+                    p.min_reserve = ReserveFloor::Atoms(0);
+                    unreserved += 1;
+                }
                 let ok = verify_leaf(&from_binary, &round, &p, &owner, &owner_nonce)
                     .unwrap_or_else(|e| panic!("{name}: {e}"));
                 assert_eq!(
@@ -425,7 +468,10 @@ mod tests {
         // records of a 64-leaf batch.
         assert_eq!(n, 61);
         assert!(longer > 0);
-        println!("{n} records verified, {longer} of them only under a longer exit delay");
+        assert!(unreserved > 0);
+        println!(
+            "{n} records verified, {longer} of them only under a longer exit delay, {unreserved} only with no reserve floor"
+        );
     }
 
     #[test]
@@ -772,7 +818,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.failed(), "wallet policy", "{err}");
         assert_eq!(
-            exit_deadline_policy(&c.policy),
+            c.policy.receipt(),
             WalletPolicy {
                 horizon: 3 * DAY,
                 ..c.policy
@@ -780,179 +826,121 @@ mod tests {
         );
     }
 
-    /// A batch of five leaves with test keys, its round, the base record of
-    /// leaf 0 as its owner hands it on, and a coin record for a receiver one
-    /// reassignment later.
+    use crate::ark::covenant::sign::sign_digest;
+    use crate::ark::covenant::spend::Pair;
+    use crate::ark::covenant::TransferPlan;
+    use crate::ark::fixture::{self, test_key, xonly, Batch};
+    use crate::ark::{ExplicitOutput, NewLeaf, Transfer, TransferInput};
+    use elements::secp256k1_zkp::Keypair;
+
+    /// A batch of five leaves with test keys, its round and the base record of
+    /// leaf 0 as its owner A hands it on; `reassign` moves a coin one hop on.
     struct Coins {
         policy: WalletPolicy,
         rounds: Vec<Transaction>,
         e0: u32,
+        s: Keypair,
+        a: Keypair,
         base: CoinRecord,
-        base_owner: (XOnlyPublicKey, OwnerNonce),
-        transferred: CoinRecord,
-        receiver: (XOnlyPublicKey, OwnerNonce),
+        delay: RelativeTime,
     }
 
-    fn coins() -> Coins {
-        use crate::ark::covenant::spend::Pair;
-        use crate::ark::covenant::{sign::sign_digest, LeafSpec, ReserveRule, Tree, TreeParams};
-        use crate::ark::{ExplicitOutput, NewLeaf, Template, Transfer, TransferInput};
-        use elements::secp256k1_zkp::{Keypair, Secp256k1};
-        use elements::{AssetIssuance, ContractHash};
+    const MARGIN: u64 = 2_000;
 
-        let secp = Secp256k1::new();
-        // Test keys, from fixed secrets; they hold nothing.
-        let key = |b: u8| Keypair::from_seckey_slice(&secp, &[b; 32]).unwrap();
-        let xonly = |k: &Keypair| k.x_only_public_key().0;
-        let (s, a, b) = (key(0x51), key(0xa1), key(0xb1));
-        let genesis =
-            BlockHash::from_str("16af270696dbd3a65ed61a2f48459c8d8e9110c0c9937938109e7d7c87e8e42c")
-                .unwrap();
-        let chain = Chain::new(genesis);
-        let x = AssetId::from_slice(&[0x28; 32]).unwrap();
-        let created = 1_800_000_000u32;
-        let e0 = created + 28 * DAY;
-        let issuer = OutPoint::new(Txid::from_byte_array([0x1e; 32]), 0);
-        let token = AssetId::new_issuance(issuer, ContractHash::from_byte_array([0; 32]));
-        let delay = RelativeTime::from_seconds_ceil(36 * 3600).unwrap();
-        let schedule = ClockSchedule::new(
-            token,
-            xonly(&s),
-            delay,
-            vec![
-                MedianTime::from_consensus(e0).unwrap(),
-                MedianTime::from_consensus(e0 + 28 * DAY).unwrap(),
-            ],
-        )
-        .unwrap();
-        let preimage = [0x33; 32];
-        let leaves: Vec<LeafSpec> = (0..5u8)
-            .map(|i| LeafSpec {
-                template: Template::Vtxo1,
-                owner: if i == 0 {
-                    xonly(&a)
-                } else {
-                    xonly(&key(0xc0 + i))
+    impl Coins {
+        fn new() -> Coins {
+            let a = test_key(0xa1);
+            let batch = Batch::new(
+                xonly(&a),
+                [0x40; 32],
+                1_800_000_000,
+                0x1e,
+                [0x33; 32],
+                vec![],
+            );
+            let now = batch.created;
+            // Leaf 0's base record: its preimage and its owner's unroll
+            // authorisations, usable from the round's creation.
+            let record = batch.tree.records()[0].clone();
+            let auths = record
+                .branch()
+                .unwrap()
+                .nodes
+                .iter()
+                .map(|n| {
+                    (
+                        sign_digest(&a, &n.unroll_authorisation(now).digest, &[0; 32]),
+                        now,
+                    )
+                })
+                .collect();
+            Coins {
+                policy: batch.policy(),
+                rounds: vec![batch.round.clone()],
+                e0: batch.e0,
+                s: fixture::operator(),
+                a,
+                base: CoinRecord::Leaf {
+                    record,
+                    preimage: batch.preimage,
+                    auths,
                 },
-                value: 1_000_000 + i as u64,
-                owner_nonce: [0x40 + i; 32],
-                operator_nonce: [0x60 + i; 32],
+                delay: fixture::delay(),
+            }
+        }
+
+        /// `record`, whose owner is `owner`, reassigned whole (less two
+        /// margins) to the new leaf of `to`, whose nonce is `nonce`, with exit
+        /// delay `delay`; the operator and the owner sign both steps. The
+        /// coin is resolved under `policy`.
+        fn reassign(
+            &self,
+            record: &CoinRecord,
+            owner: &Keypair,
+            to: &Keypair,
+            nonce: OwnerNonce,
+            delay: RelativeTime,
+            policy: &WalletPolicy,
+        ) -> CoinRecord {
+            let coin = record.resolve(&self.rounds, policy).unwrap();
+            let leaf = NewLeaf {
+                owner: xonly(to),
+                owner_nonce: nonce,
+                operator_nonce: [nonce[0] ^ 0xff; 32],
                 exit_delay: delay,
-                unlock_hash: elements::hashes::sha256::Hash::hash(&preimage).to_byte_array(),
-            })
-            .collect();
-        let tree = Tree::build(
-            TreeParams {
-                asset: x,
-                chain,
-                schedule,
-                burn: false,
-                radix: 4,
-                reserve: ReserveRule::Fixed {
-                    node: 3_000,
-                    entry: 1_000,
-                },
-                min_leaf: 1_000,
-            },
-            &leaves,
-        )
-        .unwrap();
-        // The round: the batch output, the token's one atom at clock 0, a fee.
-        let explicit = |asset: AssetId, value: u64, spk: Script| TxOut {
-            asset: Asset::Explicit(asset),
-            value: Value::Explicit(value),
-            nonce: elements::confidential::Nonce::Null,
-            script_pubkey: spk,
-            witness: Default::default(),
-        };
-        let mut round = Transaction {
-            version: 2,
-            lock_time: elements::LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: issuer,
-                ..Default::default()
-            }],
-            output: vec![
-                tree.batch_output().txout(),
-                explicit(token, 1, tree.clock0_script_pubkey()),
-                TxOut::new_fee(2_000, x),
-            ],
-        };
-        round.input[0].asset_issuance = AssetIssuance {
-            asset_blinding_nonce: elements::secp256k1_zkp::ZERO_TWEAK,
-            asset_entropy: [0; 32],
-            amount: Value::Explicit(1),
-            inflation_keys: Value::Null,
-            denomination: 0,
-        };
-        let rounds = vec![round];
-        let now = MedianTime::from_consensus(created).unwrap();
-        let policy = WalletPolicy::new(chain, xonly(&s), now);
+            };
+            let out = ExplicitOutput::new(
+                coin.asset,
+                coin.value - 2 * MARGIN,
+                leaf.policy(xonly(&self.s), self.policy.chain)
+                    .script_pubkey(),
+            );
+            let plan = TransferPlan {
+                inputs: vec![(coin.clone(), coin.value - MARGIN)],
+                outputs: vec![out],
+            };
+            let pair = |d: &[u8; 32]| Pair {
+                operator: sign_digest(&self.s, d, &[0; 32]),
+                owner: sign_digest(owner, d, &[0; 32]),
+            };
+            CoinRecord::Transfer(Box::new(Transfer {
+                inputs: vec![TransferInput {
+                    coin: record.clone(),
+                    checkpoint_value: coin.value - MARGIN,
+                    checkpoint: pair(&plan.checkpoint_message(0).unwrap().digest),
+                    reassignment: pair(&plan.reassignment_message(0).unwrap().digest),
+                }],
+                outputs: plan.outputs.clone(),
+                index: 0,
+                leaf,
+            }))
+        }
 
-        // Leaf 0's base record: its preimage and its owner's unroll
-        // authorisations, usable from the round's creation.
-        let record = tree.records()[0].clone();
-        let auths = record
-            .branch()
-            .unwrap()
-            .nodes
-            .iter()
-            .map(|n| {
-                (
-                    sign_digest(&a, &n.unroll_authorisation(now).digest, &[0; 32]),
-                    now,
-                )
-            })
-            .collect();
-        let base = CoinRecord::Leaf {
-            record: record.clone(),
-            preimage,
-            auths,
-        };
-
-        // A reassignment of it to B, the operator and A signing both steps.
-        let coin = base.resolve(&rounds, &policy).unwrap();
-        let margin = 2_000;
-        let new_leaf = NewLeaf {
-            owner: xonly(&b),
-            owner_nonce: [0xb2; 32],
-            operator_nonce: [0xb3; 32],
-            exit_delay: delay,
-        };
-        let out = ExplicitOutput::new(
-            x,
-            coin.value - 2 * margin,
-            new_leaf.policy(xonly(&s), chain).script_pubkey(),
-        );
-        let plan = crate::ark::covenant::TransferPlan {
-            inputs: vec![(coin.clone(), coin.value - margin)],
-            outputs: vec![out],
-        };
-        let cp = plan.checkpoint_message(0).unwrap().digest;
-        let re = plan.reassignment_message(0).unwrap().digest;
-        let pair = |d: &[u8; 32]| Pair {
-            operator: sign_digest(&s, d, &[0; 32]),
-            owner: sign_digest(&a, d, &[0; 32]),
-        };
-        let transferred = CoinRecord::Transfer(Box::new(Transfer {
-            inputs: vec![TransferInput {
-                coin: base.clone(),
-                checkpoint_value: coin.value - margin,
-                checkpoint: pair(&cp),
-                reassignment: pair(&re),
-            }],
-            outputs: plan.outputs.clone(),
-            index: 0,
-            leaf: new_leaf,
-        }));
-        Coins {
-            policy,
-            rounds,
-            e0,
-            base,
-            base_owner: (record.owner, record.owner_nonce),
-            transferred,
-            receiver: (xonly(&b), [0xb2; 32]),
+        fn base_owner(&self) -> (XOnlyPublicKey, OwnerNonce) {
+            match &self.base {
+                CoinRecord::Leaf { record, .. } => (record.owner, record.owner_nonce),
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -961,20 +949,25 @@ mod tests {
         // Review R4, F4 and e3: under the acceptance horizon a coin received
         // out of round is refused from the second day of the batch it comes
         // from; a receipt needs only E_0 ≥ now + the exit deadline.
-        let f = coins();
+        let f = Coins::new();
+        let b = test_key(0xb1);
+        let transferred = f.reassign(&f.base, &f.a, &b, [0xb2; 32], f.delay, &f.policy);
         let created = f.policy.now.to_consensus_u32();
         let deadline = f.e0 - EXIT_DEADLINE_MARGIN;
-        let both = [(&f.base, f.base_owner), (&f.transferred, f.receiver)];
+        let both = [
+            (&f.base, f.base_owner()),
+            (&transferred, (xonly(&b), [0xb2; 32])),
+        ];
         for (coin, (owner, nonce)) in both {
-            verify_coin(coin, &f.rounds, &f.policy, &owner, &nonce).unwrap();
+            verify_coin(coin, &f.rounds, &f.policy, &owner, &nonce, None).unwrap();
             for now in [created + 2 * DAY, created + 10 * DAY, deadline] {
                 let p = at(&f.policy, now);
                 // The library's validation under the acceptance horizon
                 // refuses it; the kit's receipt accepts it.
                 let err = coin.validate(&f.rounds, &p, &owner, &nonce).unwrap_err();
                 assert_eq!(err.kind(), "policy", "{err}");
-                let ok = verify_coin(coin, &f.rounds, &p, &owner, &nonce).unwrap();
-                assert_eq!(ok.expiry.to_consensus_u32(), f.e0);
+                let ok = verify_coin(coin, &f.rounds, &p, &owner, &nonce, None).unwrap();
+                assert_eq!(ok.coin.expiry.to_consensus_u32(), f.e0);
             }
             let err = verify_coin(
                 coin,
@@ -982,33 +975,104 @@ mod tests {
                 &at(&f.policy, deadline + 1),
                 &owner,
                 &nonce,
+                None,
             )
             .unwrap_err();
             assert_eq!(err.kind(), "policy", "{err}");
             assert!(err.to_string().contains("first expiry"), "{err}");
         }
-        let hops = |c: &CoinRecord, k: &(XOnlyPublicKey, OwnerNonce)| {
-            verify_coin(c, &f.rounds, &f.policy, &k.0, &k.1)
+        let hops = |c: &CoinRecord, k: (XOnlyPublicKey, OwnerNonce)| {
+            verify_coin(c, &f.rounds, &f.policy, &k.0, &k.1, None)
                 .unwrap()
+                .coin
                 .hops
         };
         assert_eq!(
             (
-                hops(&f.base, &f.base_owner),
-                hops(&f.transferred, &f.receiver)
+                hops(&f.base, f.base_owner()),
+                hops(&transferred, (xonly(&b), [0xb2; 32]))
             ),
             (0, 1)
         );
         // Everything else the library checks still holds: another key is
         // refused.
         let err = verify_coin(
-            &f.transferred,
+            &transferred,
             &f.rounds,
             &f.policy,
-            &f.base_owner.0,
-            &f.receiver.1,
+            &f.base_owner().0,
+            &[0xb2; 32],
+            None,
         )
         .unwrap_err();
         assert_eq!(err.kind(), "owner", "{err}");
+    }
+
+    #[test]
+    fn a_coin_is_refused_when_its_lineage_is_on_chain() {
+        // Review R4, F2 and e3; decision D31: an Arca leaf on-chain is never
+        // spent off-chain, since past its exit delay its owner can exit it
+        // under the receiver. With an index, a receiver refuses the coin when
+        // any leaf or checkpoint of its lineage is on-chain; without one, it
+        // says it relies on the operator.
+        let f = Coins::new();
+        let b = test_key(0xb1);
+        let coin = f.reassign(&f.base, &f.a, &b, [0xb2; 32], f.delay, &f.policy);
+        let (owner, nonce) = (xonly(&b), [0xb2; 32]);
+        let received = verify_coin(&coin, &f.rounds, &f.policy, &owner, &nonce, None).unwrap();
+        assert_eq!(received.lineage, LineageCheck::OperatorRule);
+        let lineage = received.coin.lineage();
+        // A's leaf, then its checkpoint; B's own leaf is not among them.
+        assert_eq!(lineage.len(), 2);
+        let mut nothing = |_: &Script| false;
+        let indexed = verify_coin(
+            &coin,
+            &f.rounds,
+            &f.policy,
+            &owner,
+            &nonce,
+            Some(&mut nothing),
+        )
+        .unwrap();
+        assert_eq!(indexed.lineage, LineageCheck::Indexed);
+        for on in &lineage {
+            let spk = on.output.script_pubkey.clone();
+            let mut index = |s: &Script| *s == spk;
+            let err = verify_coin(
+                &coin,
+                &f.rounds,
+                &f.policy,
+                &owner,
+                &nonce,
+                Some(&mut index),
+            )
+            .unwrap_err();
+            assert_eq!(err.kind(), "on_chain", "{err}");
+            assert!(err.to_string().contains(&on.kind.to_string()), "{err}");
+        }
+    }
+
+    #[test]
+    fn every_leaf_of_a_lineage_meets_the_policy() {
+        // Review R4, F1 and e2: B's leaf with an exit delay of one unit (512
+        // seconds), passed on to D. D accepted the coin, and B, exiting its
+        // leaf in nine blocks, took it back from under D.
+        let f = Coins::new();
+        let (b, d) = (test_key(0xb1), test_key(0xd1));
+        let short = RelativeTime::from_units(1).unwrap();
+        let mut loose = f.policy;
+        loose.min_exit_delay = short;
+        let to_b = f.reassign(&f.base, &f.a, &b, [0xb2; 32], short, &loose);
+        let to_d = f.reassign(&to_b, &b, &d, [0xd2; 32], f.delay, &loose);
+        // A policy that accepts the short delay takes the coin; the wallet's
+        // own refuses it for the leaf one hop up.
+        verify_coin(&to_d, &f.rounds, &loose, &xonly(&d), &[0xd2; 32], None).unwrap();
+        let err =
+            verify_coin(&to_d, &f.rounds, &f.policy, &xonly(&d), &[0xd2; 32], None).unwrap_err();
+        assert_eq!(err.kind(), "policy", "{err}");
+        assert!(matches!(
+            err,
+            TransferError::LineageExitDelay { delay: 1, .. }
+        ));
     }
 }
