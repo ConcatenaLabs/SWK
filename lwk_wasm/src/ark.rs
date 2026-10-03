@@ -37,6 +37,19 @@ fn generic(e: impl std::fmt::Display) -> Error {
     Error::Generic(e.to_string())
 }
 
+/// Read a plain object from JavaScript into `T`, refusing any field `T` does
+/// not name, at every level.
+///
+/// `serde_wasm_bindgen` reads a struct by asking the object for each field the
+/// struct names, so a field it does not name is never seen and
+/// `deny_unknown_fields` has nothing to refuse: a misspelt bound would quietly
+/// take its default. The object is read whole first, every key with it, and
+/// then into `T`, where `deny_unknown_fields` applies.
+pub(crate) fn from_js<T: serde::de::DeserializeOwned>(value: JsValue) -> Result<T, Error> {
+    let whole: serde_json::Value = serde_wasm_bindgen::from_value(value)?;
+    Ok(serde_json::from_value(whole)?)
+}
+
 fn refused(e: &RecordError) -> Error {
     Error::Generic(format!("record refused (kind {}): {e}", e.kind()))
 }
@@ -194,8 +207,8 @@ pub fn ark_parse_record(record: &str) -> Result<JsValue, Error> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PolicyDto {
     operator: String,
-    /// Refused when present: `now` is given to each call. Named here because
-    /// an object read from JavaScript ignores fields the struct does not name.
+    /// Refused when present, with its own message: `now` is given to each
+    /// call.
     now: Option<serde::de::IgnoredAny>,
     min_notice_seconds: Option<u64>,
     horizon_seconds: Option<u32>,
@@ -207,7 +220,7 @@ struct PolicyDto {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FeeRateFloorDto {
     floor_per_kvb: u64,
     multiple: u64,
@@ -319,7 +332,8 @@ impl VerdictDto {
 ///
 /// The policy object is `{ operator, minNoticeSeconds?, horizonSeconds?,
 /// minExitDelaySeconds?, maxExitDelaySeconds?, maxLevels?, minReserveAtoms?,
-/// minReserveFeeRate? }`: the operator key the wallet was told (x-only hex)
+/// minReserveFeeRate? }`, refusing any field it does not name: the operator key
+/// the wallet was told (x-only hex)
 /// and the bounds, which default to the specification's (a notice of at least
 /// 36 hours, a first expiry at least 27 days after now for a leaf taken from a
 /// round, an exit delay of 36 to 48 hours, a path of at most 5 levels, and a
@@ -358,7 +372,7 @@ impl ArkVerifier {
     /// A verifier for `network` with the `policy` object described above.
     #[wasm_bindgen(constructor)]
     pub fn new(network: &Network, policy: JsValue) -> Result<ArkVerifier, Error> {
-        let dto: PolicyDto = serde_wasm_bindgen::from_value(policy)?;
+        let dto: PolicyDto = from_js(policy)?;
         if dto.now.is_some() {
             return Err(generic(
                 "the policy takes no `now`: give the chain's median time to each call",

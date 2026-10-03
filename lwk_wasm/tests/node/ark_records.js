@@ -86,6 +86,10 @@ const shallow = verifier({ maxLevels: 1 }).verifyLeaf(dr.json, deep.round.tx, dl
 assert.strictEqual(shallow.accepted, false);
 assert.ok(/a path of \d+ levels; the wallet accepts 1 at most/.test(shallow.reason), shallow.reason);
 assert.throws(() => verifier({ minReserveAtoms: 0, minReserveFeeRate: { floorPerKvb: 1, multiple: 1 } }), /not both/);
+// A field the policy does not name is refused, not ignored: a misspelt bound
+// would otherwise take its default without a word.
+assert.throws(() => verifier({ maxExitDelaySecond: 172800 }), /unknown field `maxExitDelaySecond`/);
+assert.throws(() => verifier({ minReserveFeeRate: { floorPerKvb: 1, multiple: 1, mutliple: 4 } }), /unknown field `mutliple`/);
 
 // 2. The refusal vectors, by kind, from both the reader and the verifier.
 const any = v.batches[1];

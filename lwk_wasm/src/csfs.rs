@@ -26,6 +26,10 @@
 //! `htlc-refund-both` and `leafId` is the id of the leaf the output is, or
 //! was made from.
 //!
+//! Every object here, the message, its source, outputs and inputs, and the
+//! `limits` of `signCsfs`, is refused when it carries a field it does not
+//! name, so a misspelt field never quietly takes a default.
+//!
 //! A rebind's `otherInputs` are the transaction's other inputs, `[]` when the
 //! coin is spent alone; for a reassignment, every other checkpoint. What the
 //! transaction leaves to whoever broadcasts is reckoned over all of them.
@@ -64,7 +68,7 @@ impl Atoms {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OutputDto {
     asset: String,
     value: Atoms,
@@ -72,6 +76,7 @@ struct OutputDto {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InputDto {
     asset: String,
     value: Atoms,
@@ -92,15 +97,28 @@ struct NamedSourceDto {
     salt: String,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
+/// A source is `{ record }` when it names a record, and the named form
+/// otherwise; each refuses fields it does not name, which an untagged enum
+/// would report only as matching no variant.
 enum SourceDto {
     Record(RecordSourceDto),
     Named(NamedSourceDto),
 }
 
+impl<'de> Deserialize<'de> for SourceDto {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        let source = if v.get("record").is_some() {
+            serde_json::from_value(v).map(SourceDto::Record)
+        } else {
+            serde_json::from_value(v).map(SourceDto::Named)
+        };
+        source.map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum MessageDto {
     #[serde(rename_all = "camelCase")]
     Rebind {
@@ -180,7 +198,7 @@ pub(crate) fn parse_limits(limits: JsValue, genesis_hash: BlockHash) -> Result<C
     let dto: LimitsDto = if limits.is_undefined() || limits.is_null() {
         LimitsDto::default()
     } else {
-        serde_wasm_bindgen::from_value(limits)?
+        crate::ark::from_js(limits)?
     };
     Ok(match (dto.fee_floor_per_kvb, dto.max_uncommitted) {
         (Some(_), Some(_)) => {
@@ -196,7 +214,7 @@ pub(crate) fn parse_limits(limits: JsValue, genesis_hash: BlockHash) -> Result<C
 
 /// Parse a message object into the signer's typed message.
 pub(crate) fn parse_message(message: JsValue) -> Result<ArcaMessage, Error> {
-    let dto: MessageDto = serde_wasm_bindgen::from_value(message)?;
+    let dto: MessageDto = crate::ark::from_js(message)?;
     Ok(match dto {
         MessageDto::Rebind {
             source: src,

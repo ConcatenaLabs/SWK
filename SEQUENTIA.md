@@ -448,7 +448,9 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   are the transaction's other inputs, `[]` for a coin spent alone. `limits` is
   `{ feeFloorPerKvb }` for the specification's fee margin or
   `{ maxUncommitted }` for a ceiling in atoms; without it a rebind must commit
-  the whole coin.
+  the whole coin. A message, a source, an output or input, or `limits` with a
+  field it does not name is refused (`unknown field ...`), so a misspelt field
+  never quietly takes a default.
 - `src/ark.rs`: Arca leaves. `arkNewOwnerNonce()`, `arkLeafKeyPath(account,
   ownerNonce)`, `Signer.arkLeafKey(account, ownerNonce)` and
   `Signer.arkRestoreKey(account, record)` for the leaf keys;
@@ -459,7 +461,9 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   chain's median time `now` as its last argument (the policy names none, and
   refuses one), whose verdict is
   `{ accepted: true, leafId, roundTxid, asset, value, expiries, ... }` or
-  `{ accepted: false, failed, check, kind, reason }`; and `ArkStore(storage)`
+  `{ accepted: false, failed, check, kind, reason }`; a policy with a field
+  it does not name is refused, as a misspelt bound would otherwise take its
+  default; and `ArkStore(storage)`
   over a `JsStorage` object, with `putPending`, `putLeaf`, `putRestoredLeaf`
   and `removeLeaf` keeping the same rules as the native store. A record is its JSON text or its binary form as
   hex. Asset ids, the token and the genesis hash are display hex at this
