@@ -167,6 +167,16 @@ assert.throws(() => signer.signCsfs('m/6/0', rebindElsewhere, lwk.csfsDigest(reb
     /not this wallet's/);
 assert.throws(() => lwk.csfsDigest({ ...rebind, source: { ...rebind.source, path: 'exit' } }), /unknown rebindable path/);
 
+// A field a message, a source, an output or the limits do not name is refused,
+// not ignored: a misspelt ceiling would otherwise take its default.
+assert.throws(() => signer.signCsfs('m/6/0', rebind, d, { maxUncomitted: '9999000' }), /unknown field `maxUncomitted`/);
+assert.throws(() => lwk.csfsDigest({ ...rebind, source: { ...rebind.source, salts: '07'.repeat(32) } }), /unknown field `salts`/);
+assert.throws(() => lwk.csfsDigest({ ...rebind, source: { record: 'ab', leafId: 'a1'.repeat(32) } }), /unknown field `leafId`/);
+assert.throws(() => lwk.csfsDigest({ ...rebind, outputs: [{ ...rebind.outputs[0], amount: 5 }] }), /unknown field `amount`/);
+assert.throws(() => lwk.csfsDigest({ ...rebind, otherInputs: [{ asset: X, value: 1, vout: 0 }] }), /unknown field `vout`/);
+assert.throws(() => lwk.csfsDigest({ ...unroll, tme: 5 }), /unknown field `tme`/);
+assert.throws(() => lwk.csfsDigest({ ...release, connectorAsset: X }), /unknown field `connectorAsset`/);
+
 // What a reassignment leaves is reckoned over every input (review R4, F9):
 // a checkpoint of 100,000 atoms over outputs of 150,000 and 10,000.
 const spk = (b) => '5120' + b.repeat(32);
