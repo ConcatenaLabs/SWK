@@ -1071,7 +1071,7 @@ mod tests {
                 r["name"]
             );
         }
-        assert_eq!(v["records"].as_array().unwrap().len(), 6);
+        assert_eq!(v["records"].as_array().unwrap().len(), 7);
     }
 
     #[test]
@@ -1175,13 +1175,14 @@ mod tests {
                 release += 1;
             }
         }
-        // The leaf at m = 1 (twice) and m = 4, the checkpoint at m = 2, and
+        // The leaf at m = 1 (three times: into the checkpoint, the forfeit
+        // and a 43-byte script) and m = 4, the checkpoint at m = 2, and
         // htlc-1's three collaborative paths, all signed by owner and operator
         // except the claim, which the operator signs alone; the root, an inner
         // node and a watch service's timed authorisation; one release by four
         // owners.
-        assert_eq!((rebind, unroll, release), (7, 3, 1));
-        assert_eq!(sigs, 6 * 2 + 1 + 3 + 4);
+        assert_eq!((rebind, unroll, release), (8, 3, 1));
+        assert_eq!(sigs, 7 * 2 + 1 + 3 + 4);
     }
 
     /// The rebindable path a vector spend takes.

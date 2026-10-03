@@ -34,6 +34,7 @@ const created = (batch) => batch.inputs.expiries[0] - 28 * DAY;
 // 1. Every record.
 let n = 0;
 let longer = 0;
+let unreserved = 0;
 for (const b of v.batches) {
     const ver = verifier();
     const now = created(b);
@@ -56,6 +57,13 @@ for (const b of v.batches) {
             res = verifier({ maxExitDelaySeconds: fromHex.exitDelaySeconds })
                 .verifyLeaf(r.json, b.round.tx, leaf.owner, leaf.owner_nonce, now);
         }
+        if (!res.accepted && res.failed === 'wallet policy' && /holds a reserve of 0/.test(res.reason)) {
+            // No reserve on a node or the entry: refused by the default floor
+            // of one atom, until the wallet sets none.
+            unreserved++;
+            res = verifier({ minReserveAtoms: 0 })
+                .verifyLeaf(r.json, b.round.tx, leaf.owner, leaf.owner_nonce, now);
+        }
         assert.ok(res.accepted, `${name}: ${res.reason}`);
         assert.strictEqual(res.leafId, r.leaf_id, name);
         assert.strictEqual(res.batchVout, b.round.batch_vout, name);
@@ -68,6 +76,16 @@ for (const b of v.batches) {
 }
 assert.strictEqual(n, 61);
 assert.strictEqual(longer, 1);
+assert.strictEqual(unreserved, 7);
+// The tree bounds: a path deeper than the wallet allows, and both reserve
+// floors at once.
+const deep = v.batches.find((b) => b.records.length < b.inputs.leaves.length);
+const dr = deep.records[0];
+const dl = deep.inputs.leaves[dr.leaf];
+const shallow = verifier({ maxLevels: 1 }).verifyLeaf(dr.json, deep.round.tx, dl.owner, dl.owner_nonce, created(deep));
+assert.strictEqual(shallow.accepted, false);
+assert.ok(/a path of \d+ levels; the wallet accepts 1 at most/.test(shallow.reason), shallow.reason);
+assert.throws(() => verifier({ minReserveAtoms: 0, minReserveFeeRate: { floorPerKvb: 1, multiple: 1 } }), /not both/);
 
 // 2. The refusal vectors, by kind, from both the reader and the verifier.
 const any = v.batches[1];
@@ -239,5 +257,5 @@ assert.strictEqual(fresh2.putRestoredLeaf(ver1, r1.json, b1.round.tx, l1.owner, 
 assert.throws(() => fresh2.putRestoredLeaf(ver1, other.binary, b1.round.tx, lo.owner, lo.owner_nonce, deadline + 1), /leaf refused: wallet policy/);
 assert.ok([...map.keys()].every((k) => k.startsWith('ark/')), [...map.keys()]);
 
-console.log(`ark_records: ${n} records verified (${longer} under a longer exit delay), ${refusals} refusal vectors refused by kind; byte order, keys, policy and store hold`);
+console.log(`ark_records: ${n} records verified (${longer} under a longer exit delay, ${unreserved} with no reserve floor), ${refusals} refusal vectors refused by kind; byte order, keys, policy and store hold`);
 for (const r of reasons) console.log(`  refused: ${r}`);

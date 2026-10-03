@@ -160,7 +160,8 @@ script-path signing for covenant protocols whose leaves name the wallet's key.
   `RebindSource::leaf`.
 - `test_data/arca_vectors.json`: the Arca golden vectors, copied unchanged from
   `regtest/vectors/arca.json` in the
-  [`arca`](https://github.com/ConcatenaLabs/arca) repository (test keys only).
+  [`arca`](https://github.com/ConcatenaLabs/arca) repository at the revision
+  the workspace pins (test keys only); moving the pin copies it again.
   The unit tests recompute every ordinary script-path signature hash, every
   record and every collaborative, unroll and release message in it, and
   re-sign each with its test key; all match byte for byte.
@@ -261,12 +262,18 @@ Changes by file:
     client checks on the sweep token and its clock, applies the wallet's
     `WalletPolicy` (its chain, the operator key it was told, the shortest
     notice, how far after `now` the first expiry lies, the bounds of the exit
-    delay), and checks the record is for the wallet's key and owner nonce.
-    A refusal names what failed (`VerifyError::check` gives 1 to 5 for the
-    client checks). `verify_round` runs the same checks on a leaf the wallet
-    does not own, and `verify_coin` runs the Arca library's
-    `CoinRecord::validate` on a coin received out of round, back to every
-    round its lineage came from. A `VerifiedLeaf` names the round it was
+    delay, the deepest path, no node of one child outside a batch of one
+    leaf, and a floor on every reserve), and checks the record is for the
+    wallet's key and owner nonce. A refusal names what failed
+    (`VerifyError::check` gives 1 to 5 for the client checks). `verify_round`
+    runs the same checks on a leaf the wallet does not own, and `verify_coin`
+    runs the Arca library's `CoinRecord::validate` on a coin received out of
+    round, back to every round its lineage came from, every leaf of the
+    lineage under the same policy. Given an index of the chain, `verify_coin`
+    also refuses the coin when any leaf or checkpoint of its lineage is
+    on-chain, since an Arca leaf on-chain is never spent off-chain; without
+    one, its `ReceivedCoin` says the coin rests on the operator's rule
+    (`LineageCheck::OperatorRule`). A `VerifiedLeaf` names the round it was
     checked against and makes no claim of finality, which the caller's chain
     source decides; after any rollback that disconnects that round,
     `recheck(previous_round, …)` checks whichever transaction now pays the
@@ -274,14 +281,28 @@ Changes by file:
     from a round (`verify_leaf`) must leave the policy's acceptance horizon,
     27 days by default; a leaf or coin received (`verify_round`,
     `verify_coin`) and a leaf held (`recheck`) need only leave the exit
-    deadline, `E_0 ≥ now + 3 days` (`exit_deadline_policy`), whatever horizon
-    the caller's policy names. `now` is the chain source's median time at the
+    deadline, `E_0 ≥ now + 3 days` (the library's `WalletPolicy::receipt`),
+    whatever horizon the caller's policy names. `now` is the chain source's median time at the
     call. `tests/data/arca_records.json` is the Arca
     repository's `regtest/vectors/records.json`, copied unchanged; every
     record in it verifies against its round, and every refusal vector is
     refused by its kind. `tests/data/ark_byte_order.json` pins the byte
     order: ids in display hex in the JSON form, internal bytes in the binary
     form and in the rebindable message.
+  - `forfeit.rs`: the forfeit a wallet signs to give a leaf up in a round,
+    from the Arca library's `Forfeit::for_refresh` and `for_offboard`.
+    `forfeit::refresh` verifies the new leaf against the round itself as the
+    wallet's own leaf taken from a round, takes the unlock hash from that
+    leaf and the connector asset `M` from that round, and refuses unless
+    output `c` carries the operator's connector script, so nothing the
+    wallet signs over comes from the operator's word; it also refuses a
+    refund delay that could not end before the new batch's exit deadline even
+    for a forfeit published now. `forfeit::offboard` does the same for an
+    offboard output the round pays; the offboard's reclaim-delay rule is the
+    caller's to check. `GivenUp` names the leaf given up, from its record or
+    from a received coin. The wallet signs `Forfeit::message` with
+    `sign_csfs` as a rebind of the old leaf into the forfeit output with no
+    other input.
   - `store.rs`: `ArkStore`, the wallet's leaves over any of the kit's stores
     (`Arc<dyn DynStore>`), every key under `ark/`: each leaf's record by leaf
     id with the round txid and batch output index it was verified against,
@@ -405,7 +426,9 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   ownerNonce)`, `Signer.arkLeafKey(account, ownerNonce)` and
   `Signer.arkRestoreKey(account, record)` for the leaf keys;
   `arkParseRecord(record)` for a record's fields; `ArkVerifier(network,
-  policy)` with `verifyLeaf`, `verifyRound` and `recheck`, each taking the
+  policy)`, whose policy object also takes the tree bounds (`maxLevels`, and
+  `minReserveAtoms` or `minReserveFeeRate`), with `verifyLeaf`, `verifyRound`
+  and `recheck`, each taking the
   chain's median time `now` as its last argument (the policy names none, and
   refuses one), whose verdict is
   `{ accepted: true, leafId, roundTxid, asset, value, expiries, ... }` or

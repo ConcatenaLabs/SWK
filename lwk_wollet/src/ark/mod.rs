@@ -13,6 +13,8 @@
 //! - [`verify`]: a leaf checked against its round, a coin received out of
 //!   round checked back to its rounds, and a leaf checked again after a
 //!   rollback;
+//! - [`forfeit`]: the forfeit the wallet signs to give a leaf up in a round,
+//!   bound to the new leaf it validated and to that round's connector;
 //! - [`store`]: the wallet's leaves over the kit's store;
 //! - the scripts, the leaf and coin records and the client's checks,
 //!   re-exported from the Arca library (`arca-covenant`, [`covenant`]), never
@@ -31,6 +33,9 @@
 //! keys and witness programs have one order only and are written as their
 //! bytes.
 
+#[cfg(test)]
+mod fixture;
+pub mod forfeit;
 pub mod keys;
 pub mod store;
 pub mod verify;
@@ -40,8 +45,9 @@ pub mod verify;
 pub use arca_covenant as covenant;
 pub use arca_covenant::{
     check_round, Branch, Chain, ClockSchedule, CoinRecord, ExplicitOutput, LeafId, LeafPolicy,
-    LeafRecord, MedianTime, NewLeaf, RecordError, RelativeTime, RoundCheckFailure, Template,
-    Transfer, TransferError, TransferInput, ValidCoin, ValidLeaf, ValidOrigin, WalletPolicy,
+    LeafRecord, MedianTime, NewLeaf, RecordError, RelativeTime, ReserveFloor, RoundCheckFailure,
+    Template, Transfer, TransferError, TransferInput, ValidCoin, ValidLeaf, ValidOrigin,
+    WalletPolicy,
 };
 
 /// Errors from the Arca module.

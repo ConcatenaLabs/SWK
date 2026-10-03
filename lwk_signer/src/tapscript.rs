@@ -642,9 +642,9 @@ mod tests {
         }
         // Every script-path spend signed with an ordinary signature: the sweeps,
         // the clock steps, R, the exit claim, the reclaim's operator signature,
-        // the forfeit's two paths and the htlc refund.
-        assert_eq!(checked_sighashes, 16);
-        assert_eq!(checked_signatures, 16);
+        // the forfeit's two paths, the htlc refund and the connector's issue.
+        assert_eq!(checked_sighashes, 17);
+        assert_eq!(checked_signatures, 17);
     }
 
     fn spend_named<'a>(v: &'a Value, name: &str) -> &'a Value {
