@@ -19,6 +19,15 @@
 //! `lwk_signer`'s `sign_csfs` takes as a rebind of the old leaf into that one
 //! output with no other input.
 //!
+//! Once the wallet holds the new leaf's preimage and its round is final, it
+//! also signs the release of the lowest node above the old leaf, which lets
+//! the operator reclaim that node before the batch expires ([`release`],
+//! [`release_for_offboard`]). The release names the same round's connector
+//! asset `M`, so like the forfeit it is void if that round is lost; the
+//! wallet takes `H` from the old leaf it holds and `M` from the round it
+//! validated. `lwk_signer`'s `ReleaseMessage::release` makes it a message for
+//! `sign_csfs`, with the node's children for the wallet to show.
+//!
 //! After a rollback the operator broadcasts the identical round again, and
 //! every forfeit of it can still be claimed. A transaction with another txid
 //! paying the same batch is a new round: a forfeit signed for the old one can
@@ -29,11 +38,16 @@ use elements::secp256k1_zkp::XOnlyPublicKey;
 use elements::{AssetId, Transaction};
 
 pub use arca_covenant::spend::SpendError;
-pub use arca_covenant::{connector_asset, ConnectorPolicy, Forfeit, ForfeitPolicy, OffboardPolicy};
+pub use arca_covenant::{
+    connector_asset, ConnectorPolicy, Forfeit, ForfeitPolicy, OffboardPolicy, Release,
+};
 
 use super::keys::OwnerNonce;
 use super::verify::{VerifyError, EXIT_DEADLINE_MARGIN};
-use super::{LeafId, LeafPolicy, LeafRecord, RecordError, RelativeTime, ValidCoin, WalletPolicy};
+use super::{
+    ExplicitOutput, LeafId, LeafPolicy, LeafRecord, RecordError, RelativeTime, ValidCoin,
+    ValidLeaf, WalletPolicy,
+};
 
 /// A leaf the wallet gives up: its policy, the coin it holds and its id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,12 +191,93 @@ pub fn offboard(
     )?)
 }
 
+/// A release to sign: the Arca library's [`Release`] and the lowest node's
+/// children, in output order, for the wallet to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeRelease {
+    /// The release: chain, the node's children hash `H`, the old leaf's
+    /// owner key and the round's connector asset `M`.
+    pub release: Release,
+    /// The lowest node's children, whose records hash to `H`.
+    pub children: Vec<ExplicitOutput>,
+}
+
+/// The old leaf, checked against its own round. Only its structure matters
+/// here, not how long it has left: a leaf being given up may be close to its
+/// exit deadline.
+fn old_leaf(
+    old: &LeafRecord,
+    old_round: &Transaction,
+    policy: &WalletPolicy,
+) -> Result<ValidLeaf, ForfeitError> {
+    let any_time = WalletPolicy {
+        horizon: 0,
+        ..*policy
+    };
+    Ok(old
+        .validate_round(old_round, &any_time)
+        .map_err(VerifyError)?)
+}
+
+fn node_release(old: &ValidLeaf, release: Release) -> NodeRelease {
+    let children = old
+        .branch
+        .nodes
+        .last()
+        .map(|n| n.children.iter().map(|c| c.output()).collect())
+        .unwrap_or_default();
+    NodeRelease { release, children }
+}
+
+/// The release of the lowest node above `old` (checked against `old_round`),
+/// given up in a refresh for the new leaf `new`, which is verified against
+/// `round` as the wallet's own leaf it holds: under the receipt form of
+/// `policy`, for the wallet's key `owner` and the `owner_nonce` it picked.
+/// `M` is the connector asset spending output `c` of `round` issues; `c` must
+/// carry the operator's connector script. Sign it only once the preimage of
+/// the new leaf is held and `round` is final.
+#[allow(clippy::too_many_arguments)]
+pub fn release(
+    old: &LeafRecord,
+    old_round: &Transaction,
+    new: &LeafRecord,
+    round: &Transaction,
+    c: u32,
+    policy: &WalletPolicy,
+    owner: &XOnlyPublicKey,
+    owner_nonce: &OwnerNonce,
+) -> Result<NodeRelease, ForfeitError> {
+    let old = old_leaf(old, old_round, policy)?;
+    let new = new
+        .validate(round, &policy.receipt(), owner, owner_nonce)
+        .map_err(VerifyError)?;
+    let r = Release::for_refresh(&old, &new, round, c)?;
+    Ok(node_release(&old, r))
+}
+
+/// The release of the lowest node above `old` (checked against `old_round`),
+/// given up for the offboard output `offboard`, which `round` must pay, whose
+/// connector output `c` must carry the operator's connector script.
+pub fn release_for_offboard(
+    old: &LeafRecord,
+    old_round: &Transaction,
+    offboard: &OffboardPolicy,
+    round: &Transaction,
+    c: u32,
+    policy: &WalletPolicy,
+) -> Result<NodeRelease, ForfeitError> {
+    let old = old_leaf(old, old_round, policy)?;
+    let r = Release::for_offboard(&old, offboard, round, c)?;
+    Ok(node_release(&old, r))
+}
+
 #[cfg(test)]
 mod tests {
     use elements::hashes::{sha256, Hash};
     use elements::Script;
     use lwk_signer::csfs::{
         ArcaMessage, CommittedOutput, CsfsError, CsfsPolicy, RebindMessage, RebindSource,
+        ReleaseMessage,
     };
     use lwk_signer::SwSigner;
 
@@ -206,6 +301,7 @@ mod tests {
         signer: SwSigner,
         old_key: LeafKey,
         old: LeafRecord,
+        old_round: Transaction,
         new_key: LeafKey,
         new: Batch,
         policy: WalletPolicy,
@@ -245,6 +341,7 @@ mod tests {
         Refresh {
             signer,
             old: old_batch.tree.records()[0].clone(),
+            old_round: old_batch.round.clone(),
             old_key,
             new_key,
             new,
@@ -456,6 +553,162 @@ mod tests {
             matches!(err, ForfeitError::RefundAfterDeadline { .. }),
             "{err}"
         );
+    }
+
+    impl Refresh {
+        fn release(&self, c: u32, round: &Transaction) -> Result<NodeRelease, ForfeitError> {
+            release(
+                &self.old,
+                &self.old_round,
+                &self.new.tree.records()[0],
+                round,
+                c,
+                &self.policy,
+                &self.new_key.key,
+                &self.new_key.owner_nonce,
+            )
+        }
+    }
+
+    fn committed(o: &ExplicitOutput) -> CommittedOutput {
+        CommittedOutput {
+            asset: o.asset,
+            value: o.value,
+            script_pubkey: o.script_pubkey.clone(),
+        }
+    }
+
+    #[test]
+    fn a_release_is_bound_to_the_round_of_the_new_leaf() {
+        // D34: the release names the connector asset M of the round that
+        // made the new leaf, read from that round, and H from the old leaf.
+        let f = refresh_fixture(Some(xonly(&operator())), vec![]);
+        let r = f.release(C, &f.new.round).unwrap();
+        assert_eq!(r.release.connector, connector_asset(f.new.round.txid(), C));
+        assert_eq!(r.release.owner, f.old.owner);
+        let lowest = f.old.branch().unwrap().nodes.last().unwrap().clone();
+        assert_eq!(r.release.node_hash, lowest.children_hash());
+        let chain = f.policy.chain;
+        assert_eq!(
+            r.release.message().digest,
+            chain
+                .release_message(&lowest.children_hash(), r.release.connector)
+                .digest
+        );
+
+        // The kit's signer rebuilds the same digest from the node's children
+        // and M, signs it with the old leaf's key, and the release verifies.
+        let msg = ArcaMessage::Release(
+            ReleaseMessage::release(&r.release, r.children.iter().map(committed).collect())
+                .unwrap(),
+        );
+        let digest = msg.digest().unwrap();
+        assert_eq!(digest, r.release.message().digest);
+        let genesis = f.policy.chain.genesis_hash();
+        let policy = CsfsPolicy::with_ceiling(genesis, 0);
+        let sig = f
+            .signer
+            .sign_csfs(&f.old_key.path, &msg, &digest, &policy)
+            .unwrap();
+        r.release.verify(&sig).unwrap();
+        assert!(msg
+            .describe()
+            .join("\n")
+            .contains(&r.release.connector.to_string()));
+
+        // Signed for this round, it is no release for another: a
+        // replacement round has another M, and the signature fails there.
+        let mut replaced = f.new.round.clone();
+        replaced.input[0].sequence = elements::Sequence(0xffff_fffe);
+        let other = f.release(C, &replaced).unwrap();
+        assert_ne!(other.release.connector, r.release.connector);
+        assert!(other.release.verify(&sig).is_err());
+        // The message of the earlier form, without M, which RECLAIM no
+        // longer accepts, is not what the wallet signs.
+        let old_form = chain.release_prefix(&lowest.children_hash());
+        assert_eq!(old_form.len(), 76);
+        assert_eq!(msg.preimage().unwrap()[..76], old_form[..]);
+        assert_ne!(sha256::Hash::hash(&old_form).to_byte_array(), digest);
+
+        // Children that are not the node's are refused by the signer.
+        let mut wrong: Vec<CommittedOutput> = r.children.iter().map(committed).collect();
+        wrong[0].value += 1;
+        assert!(matches!(
+            ReleaseMessage::release(&r.release, wrong),
+            Err(CsfsError::OtherNode)
+        ));
+    }
+
+    #[test]
+    fn a_release_is_refused_when_its_round_does_not_bind_it() {
+        let f = refresh_fixture(Some(xonly(&operator())), vec![]);
+        for c in [0, 1, 3, 9] {
+            let err = f.release(c, &f.new.round).unwrap_err();
+            assert!(
+                matches!(err, ForfeitError::Spend(SpendError::Connector(n)) if n == c),
+                "{c}: {err}"
+            );
+        }
+        let none = refresh_fixture(None, vec![]);
+        assert!(matches!(
+            none.release(C, &none.new.round),
+            Err(ForfeitError::Spend(SpendError::Connector(C)))
+        ));
+        // The new leaf must verify against the round, as the wallet's own.
+        let err = f.release(C, &f.old_round).unwrap_err();
+        assert!(matches!(&err, ForfeitError::NewLeaf(_)), "{err}");
+        let err = release(
+            &f.old,
+            &f.old_round,
+            &f.new.tree.records()[0],
+            &f.new.round,
+            C,
+            &f.policy,
+            &f.new_key.key,
+            &[0x42; 32],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, ForfeitError::NewLeaf(e) if e.failed() == "owner"),
+            "{err}"
+        );
+        // The old leaf must verify against its own round.
+        let err = release(
+            &f.old,
+            &f.new.round,
+            &f.new.tree.records()[0],
+            &f.new.round,
+            C,
+            &f.policy,
+            &f.new_key.key,
+            &f.new_key.owner_nonce,
+        )
+        .unwrap_err();
+        assert!(matches!(&err, ForfeitError::NewLeaf(_)), "{err}");
+    }
+
+    #[test]
+    fn an_offboard_release_needs_the_offboard_and_the_connector() {
+        let s = xonly(&operator());
+        let off = OffboardPolicy {
+            unlock_hash: [0x55; 32],
+            destination: ExplicitOutput::new(asset(), 500_000, Script::from(vec![0x51])),
+            operator: s,
+            reclaim_delay: RelativeTime::from_seconds_ceil(10 * DAY as u64).unwrap(),
+        };
+        let f = refresh_fixture(Some(s), vec![off.output(1_000).txout()]);
+        let r =
+            release_for_offboard(&f.old, &f.old_round, &off, &f.new.round, C, &f.policy).unwrap();
+        assert_eq!(r.release.connector, connector_asset(f.new.round.txid(), C));
+        let without = refresh_fixture(Some(s), vec![]);
+        assert!(matches!(
+            release_for_offboard(&f.old, &f.old_round, &off, &without.new.round, C, &f.policy),
+            Err(ForfeitError::Spend(SpendError::Offboard(_)))
+        ));
+        assert!(matches!(
+            release_for_offboard(&f.old, &f.old_round, &off, &f.new.round, 3, &f.policy),
+            Err(ForfeitError::Spend(SpendError::Connector(3)))
+        ));
     }
 
     #[test]

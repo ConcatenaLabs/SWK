@@ -60,7 +60,8 @@ function explicitOutputs(txHex) {
 
 function vectorPath(s) {
     const paths = {
-        'leaf/collab': 'leaf', 'checkpoint/collab': 'checkpoint', 'htlc/claim': 'htlc-claim',
+        // A board's collaborative path is its leaf's own script.
+        'leaf/collab': 'leaf', 'board/collab': 'leaf', 'checkpoint/collab': 'checkpoint', 'htlc/claim': 'htlc-claim',
         'htlc/claim_both': 'htlc-claim-both', 'htlc/refund_both': 'htlc-refund-both',
     };
     const p = paths[`${s.output}/${s.leaf}`];
@@ -98,9 +99,15 @@ for (const s of v.spends) {
     } else if (s.t !== undefined) {
         msg = { kind: 'unroll', children: children(params), time: s.t };
         digest = s.digest;
-    } else if (s.release_digest) {
-        msg = { kind: 'release', genesisHash: genesis, children: children(params) };
-        digest = s.release_digest;
+    } else if (s.releases) {
+        // Each owner releases the node for the round of its own new leaf:
+        // the round's connector asset M ends the message.
+        for (const r of s.releases) {
+            const rel = { kind: 'release', genesisHash: genesis, children: children(params), connector: display(r.connector_asset) };
+            assert.strictEqual(lwk.csfsDigest(rel), r.digest, `${s.name} by ${r.owner}`);
+            assert.ok(lwk.csfsDescribe(rel).lines.some((l) => l.includes(display(r.connector_asset))));
+            digests++;
+        }
     }
     if (msg) {
         assert.strictEqual(lwk.csfsDigest(msg), digest, s.name);
@@ -110,8 +117,8 @@ for (const s of v.spends) {
         digests++;
     }
 }
-assert.strictEqual(sighashes, 17);
-assert.strictEqual(digests, 12);
+assert.strictEqual(sighashes, 18);
+assert.strictEqual(digests, 16);
 
 // Refusals. The signer is made for the vectors' chain.
 const X = display(v.inputs.assets.X);
@@ -121,7 +128,7 @@ assert.strictEqual(signer.genesisHash(), genesis);
 const reversed = Buffer.from(genesis, 'hex').reverse().toString('hex');
 const node = v.outputs.lowest_node.params;
 const unroll = { kind: 'unroll', children: children(node), time: 1791000000 };
-const release = { kind: 'release', genesisHash: genesis, children: children(node) };
+const release = { kind: 'release', genesisHash: genesis, children: children(node), connector: X };
 const sig = signer.signCsfs('m/6/0', unroll, lwk.csfsDigest(unroll));
 assert.strictEqual(sig.length, 128);
 assert.strictEqual(signer.signCsfs('m/6/0', release, lwk.csfsDigest(release)).length, 128);
@@ -130,6 +137,11 @@ assert.throws(() => signer.signCsfs('m/6/0', undefined, lwk.csfsDigest(unroll)),
 assert.throws(() => signer.signCsfs('m/6/0', { kind: 'unroll', children: [], time: 1791000000 }, sig.slice(0, 64)), /at least one child/);
 const releaseElsewhere = { ...release, genesisHash: reversed };
 assert.throws(() => signer.signCsfs('m/6/0', releaseElsewhere, lwk.csfsDigest(releaseElsewhere)), /not this wallet's/);
+// A release names its round: another connector asset is another message.
+const releaseOtherRound = { ...release, connector: '4e'.repeat(32) };
+assert.notStrictEqual(lwk.csfsDigest(releaseOtherRound), lwk.csfsDigest(release));
+assert.throws(() => signer.signCsfs('m/6/0', releaseOtherRound, lwk.csfsDigest(release)), /does not match the message/);
+assert.throws(() => lwk.csfsDigest({ kind: 'release', genesisHash: genesis, children: children(node) }), /connector/);
 
 // A rebind names its leaf and path, states what it leaves to whoever
 // broadcasts, and is refused above the ceiling.

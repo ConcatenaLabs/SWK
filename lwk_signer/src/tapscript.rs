@@ -621,7 +621,7 @@ mod tests {
             for (label, sig) in spend["signatures"].as_object().unwrap() {
                 // A reclaim also carries the owners' release signatures, which are
                 // message signatures, not signatures of this transaction.
-                if spend.get("release_digest").is_some() && label != "S" {
+                if spend.get("releases").is_some() && label != "S" {
                     continue;
                 }
                 let signer = signer_for(keys[label]["secret"].as_str().unwrap());
@@ -642,9 +642,10 @@ mod tests {
         }
         // Every script-path spend signed with an ordinary signature: the sweeps,
         // the clock steps, R, the exit claim, the reclaim's operator signature,
-        // the forfeit's two paths, the htlc refund and the connector's issue.
-        assert_eq!(checked_sighashes, 17);
-        assert_eq!(checked_signatures, 17);
+        // the forfeit's two paths, the htlc refund, the connector's issue and
+        // the owner's conversion of a board into its leaf.
+        assert_eq!(checked_sighashes, 18);
+        assert_eq!(checked_signatures, 18);
     }
 
     fn spend_named<'a>(v: &'a Value, name: &str) -> &'a Value {

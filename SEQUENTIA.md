@@ -120,7 +120,10 @@ script-path signing for covenant protocols whose leaves name the wallet's key.
   output it spends, the spent coin's asset and value, the 1 to 4 committed
   outputs, and the transaction's other inputs, which the digest does not name),
   `UnrollAuthorisation` (a node's children and the median time `t`)
-  and `ReleaseMessage` (genesis hash and a lowest node's children).
+  and `ReleaseMessage` (genesis hash, a lowest node's children and `M`, the
+  connector asset of the round that made the owner's new leaf, so that a
+  release is void if that round is lost; with the feature `ark`,
+  `ReleaseMessage::release` builds it from the Arca library's `Release`).
   The caller presents the digest together with the fields it was built from;
   the signer rebuilds the digest and refuses when the two differ, so it never
   signs a bare hash. It also refuses fields no script can produce: an output
@@ -157,14 +160,15 @@ script-path signing for covenant protocols whose leaves name the wallet's key.
   version −1. The genesis hash and asset ids enter the messages in internal
   byte order; `BlockHash` and `AssetId` parse display hex into it.
 - Feature `ark` adds the dependency on `arca-covenant` for
-  `RebindSource::leaf`.
+  `RebindSource::leaf` and `ReleaseMessage::release`.
 - `test_data/arca_vectors.json`: the Arca golden vectors, copied unchanged from
   `regtest/vectors/arca.json` in the
   [`arca`](https://github.com/ConcatenaLabs/arca) repository at the revision
   the workspace pins (test keys only); moving the pin copies it again.
   The unit tests recompute every ordinary script-path signature hash, every
-  record and every collaborative, unroll and release message in it, and
-  re-sign each with its test key; all match byte for byte.
+  record and every collaborative, unroll and release message in it (a
+  board's collaborative path is its leaf's own), and re-sign each with its
+  test key; all match byte for byte.
 
 A hardware signer gives the same guarantee only if its firmware does the same
 work on the device: compute the Elements script-path signature hash itself from
@@ -269,11 +273,15 @@ Changes by file:
     runs the same checks on a leaf the wallet does not own, and `verify_coin`
     runs the Arca library's `CoinRecord::validate` on a coin received out of
     round, back to every round its lineage came from, every leaf of the
-    lineage under the same policy. Given an index of the chain, `verify_coin`
-    also refuses the coin when any leaf or checkpoint of its lineage is
-    on-chain, since an Arca leaf on-chain is never spent off-chain; without
-    one, its `ReceivedCoin` says the coin rests on the operator's rule
-    (`LineageCheck::OperatorRule`). A `VerifiedLeaf` names the round it was
+    lineage under the same policy. Given an index of the chain
+    (`ChainIndex`: whether a scriptPubKey was ever paid, whether an outpoint
+    is unspent), `verify_coin` also refuses the coin when any leaf or
+    checkpoint of its lineage is on-chain, since an Arca leaf on-chain is
+    never spent off-chain, and when a board it rests on (`board-1`) is spent,
+    since its owner may have converted it into its leaf; without one, its
+    `ReceivedCoin` says the coin rests on the operator's rule
+    (`LineageCheck::OperatorRule`). A record that promises one leaf twice is
+    refused with kind `salt`. A `VerifiedLeaf` names the round it was
     checked against and makes no claim of finality, which the caller's chain
     source decides; after any rollback that disconnects that round,
     `recheck(previous_round, …)` checks whichever transaction now pays the
@@ -286,7 +294,10 @@ Changes by file:
     call. `tests/data/arca_records.json` is the Arca
     repository's `regtest/vectors/records.json`, copied unchanged; every
     record in it verifies against its round, and every refusal vector is
-    refused by its kind. `tests/data/ark_byte_order.json` pins the byte
+    refused by its kind. `tests/data/arca_transactions.json` is its
+    `regtest/vectors/transactions.json`, copied unchanged: every received
+    coin in it verifies, one of them resting on a board, and its refused
+    record is refused by its kind. `tests/data/ark_byte_order.json` pins the byte
     order: ids in display hex in the JSON form, internal bytes in the binary
     form and in the rebindable message.
   - `forfeit.rs`: the forfeit a wallet signs to give a leaf up in a round,
@@ -302,7 +313,23 @@ Changes by file:
     caller's to check. `GivenUp` names the leaf given up, from its record or
     from a received coin. The wallet signs `Forfeit::message` with
     `sign_csfs` as a rebind of the old leaf into the forfeit output with no
-    other input.
+    other input. Once it holds the new leaf's preimage and the round is
+    final, `forfeit::release` (or `release_for_offboard`) gives the release
+    of the lowest node above the old leaf, from the Arca library's
+    `Release::for_refresh` and `for_offboard`: `H` from the old leaf, checked
+    against its own round, and `M` from the round the new leaf or offboard
+    was validated against, with the node's children for the wallet to show.
+  - `transfer.rs`: paying out of round. `Reassignment::new` builds the
+    reassignment a sender signs: one leaf per `Payment` to a
+    `ReceiveRequest` (the receiver's owner key, owner nonce and exit delay),
+    the sender's change among them, each with a fresh random creator nonce
+    (`new_creator_nonce`), the second half of the leaf's salt. Two
+    reassignments that pay one request therefore never commit to outputs one
+    transaction could satisfy for both, which the operator refuses to
+    co-sign (kind `merge`). It refuses a request paid twice and whatever a
+    receiver would refuse (an output count outside 1 to 4, a checkpoint worth
+    more than its coin, outputs taking more than the checkpoints hold);
+    `Reassignment::record` gives each receiver its coin record.
   - `store.rs`: `ArkStore`, the wallet's leaves over any of the kit's stores
     (`Arc<dyn DynStore>`), every key under `ark/`: each leaf's record by leaf
     id with the round txid and batch output index it was verified against,
@@ -413,7 +440,7 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   `csfsDigest(message)` and `csfsDescribe(message)` (`{ kind, digest, lines }`).
   A message is a plain object: `{ kind: "rebind", source, assetIn, valueIn,
   outputs }`, `{ kind: "unroll", children, time }` or
-  `{ kind: "release", genesisHash, children }`, each output or child
+  `{ kind: "release", genesisHash, children, connector }`, each output or child
   `{ asset, value, scriptPubkey }`; asset ids and the genesis hash in display
   hex, amounts in atoms as a number or a decimal string. A rebind's `source`
   is the leaf's record, `{ record }` (its JSON text or its binary form as hex), or
