@@ -228,15 +228,43 @@ Changes by file:
     `sequentia_stake_script()` and `TxBuilder::add_stake_output(staker_pubkey,
     csv, satoshi)` build the CSV-locked bonding output used to stake for block
     production.
-  - Staking pools: `TxBuilder::add_delegation_output()` pays the bare
+  - Staking pools: `TxBuilder::add_record_authorization(pubkey, satoshi)`
+    pays the staking key's `P2WPKH`, the coin that authorises a delegation
+    record (below). `TxBuilder::add_delegation_output()` pays the bare
     delegation-record script (`"SEQDEL" OP_DROP <signer> OP_DROP <controller>
-    OP_CHECKSIG`) that lends the wallet's stake weight to a pool signer.
-- `src/sequentia_delegation.rs` (feature `sequentia`): spends a delegation
-  record, which no descriptor matches. `build_delegation_spend_tx()` either
-  reclaims the record (leave the pool) or re-points it to another signer in
-  the same transaction (consensus allows one live record per controller, so
-  the two steps must not be separate transactions). Also
+    OP_CHECKSIG`) straight from wallet coins, which the network accepts only
+    below `pos_hardening_height` (on the testnet the same height as its
+    `pos_records_v2_height`; block 1 on every other chain).
+- `src/sequentia_delegation.rs` (feature `sequentia`): creates and spends
+  delegation records, which no descriptor matches. A record must be created
+  by a transaction spending a coin of its controller, so
+  `build_delegation_create_tx()` funds it from such a coin and nothing else:
+  the wallet pays the staking key's `P2WPKH` first
+  (`add_record_authorization`), and the two transactions are mined together.
+  `build_delegation_spend_tx()` either reclaims the record (leave the pool) or
+  re-points it to another signer in the same transaction (consensus allows one
+  live record per controller, so the two steps must not be separate
+  transactions; the spent record authorises the new one). Also
   `sequentia_delegation_script()` and `parse_delegation_script()`.
+- `src/sequentia_stake_records.rs` (feature `sequentia`): stake record spends
+  (staking, unbonding, delegation and payout outputs) and two-step unbonding.
+  `StakeRecordSigning` names the signature a spend needs in the block after
+  the wallet's tip: the legacy hash below the chain's `pos_records_v2_height`,
+  and from it the segwit-v0 hash over the record script, committing to the
+  amount, in a scriptSig of one minimal low-S push. `pos_records_v2_height()`
+  is `SEQUENTIA_TESTNET_POS_RECORDS_V2_HEIGHT` for
+  `Network::sequentia_testnet()` (matched on its whole definition, genesis
+  hash included) and 1 on every other chain; no node RPC reports it.
+  `sign_stake_record_input()` signs any record spend that way.
+  `build_unbond_tx()` moves staking outputs into an unbonding output of the
+  same key (`sequentia_unbond_script()`, `"SEQUNBOND" OP_DROP <key>
+  OP_CHECKSIG`), its fee capped at 1% of the stake (`unbond_fee_cap()`);
+  `build_unbond_claim_tx()` sends unbonding outputs to an address once the
+  unbonding depth has passed. `build_record_create_tx()` creates any record
+  from a `P2WPKH` coin of its key; the kit announces no payout policy of its
+  own (that belongs to the node wallet), but its tests create and withdraw one
+  this way. Also `parse_stake_script()`, `key_coin_script()` and
+  `find_key_coins()`.
 - `src/seqob_covenant.rs` (feature `sequentia`): the raw-Elements FILL and
   REFUND transaction assemblers for a resting SeqOB passive-CLOB covenant
   order (`build_covenant_fill_tx()`, `build_covenant_refund_tx()`). The
@@ -406,6 +434,18 @@ Changes by file:
     CLTV timelocks are liveness only.
 - `examples/sequentia_sync.rs`: end-to-end watch-only sync against the live
   explorer (`cargo run -p lwk_wollet --example sequentia_sync`).
+- `tests/sequentia_stake_records.rs`: every stake record transaction the kit
+  builds, confirmed in a block a proof-of-stake `sequentiad` produces on an
+  `elementsregtest` chain, under the node's default relay policy: a bond, a
+  delegation created with the controller's coin, a re-point, a reclaim, a
+  payout announcement and its withdrawal, and an unbond in two steps; then a
+  chain crossing `pos_records_v2_height` at block 12, signed the legacy way
+  below it and the second-generation way at it. Each wrong case (a record from
+  wallet coins alone, a spend signed for the other generation, a claim before
+  the unbonding depth) is refused by the mempool and by a block
+  (`testproposedblock` on the node's own next block with the transaction
+  added), which accepts the right one. It needs `SEQUENTIAD_EXEC`, and runs
+  `lwk_wasm/tests/node/stake_records.js` when the node package is linked.
 - `examples/rescue_test.rs`: live functional test of bump/replace/CPFP against
   the testnet (needs a funded wallet).
 
@@ -429,7 +469,8 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
 - `src/seqdex_htlc.rs`: `generateSwapSecret`, `htlcKeypair`,
   `buildSeqHtlcRedeemScript`, `buildSeqHtlcClaimTx`, `buildSeqHtlcRefundTx`.
 - `src/tx_builder.rs`: `feeAsset()` (any-asset fees), `addExplicitRecipient()`,
-  `addStakeOutput()`, `sequentiaStakeScript()`, `addDelegationOutput()`.
+  `addStakeOutput()`, `sequentiaStakeScript()`, `addRecordAuthorization()`,
+  `addDelegationOutput()`.
 - `src/wollet.rs`: explicit-UTXO and rescue (bump/replace/CPFP) bindings.
 - `src/network.rs`: `Network.regtestWithGenesis(policyAsset, genesisHash)`, a
   regtest network for a chain started with its own parameters, whose genesis
@@ -535,7 +576,15 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
 - `src/seqob_covenant.rs`: `buildCovenantFillTx`, `buildCovenantRefundTx`,
   `covenantMakerAddress`, `covenantMakerDescriptor`, `scriptToAddress`.
 - `src/sequentia_delegation.rs`: `sequentiaDelegationScript`,
-  `parseDelegationScript`, `findDelegationRecords`, `buildDelegationSpendTx`.
+  `parseDelegationScript`, `findDelegationRecords`, `buildDelegationCreateTx`,
+  `buildDelegationSpendTx`, `stakeRecordSigning`. The builders take the chain
+  tip (`tipHeight`, defaulting to `locktime`) and sign for the block after it.
+- `src/sequentia_stake_records.rs`: `buildUnbondTx` and `buildUnbondClaimTx`
+  (the two steps of unbonding), `sequentiaUnbondScript`, `unbondFeeCap`.
+- `tests/node/stake_records.js`: the wasm half of
+  `lwk_wollet/tests/sequentia_stake_records.rs`: every recipe the test's
+  confirmed transactions came from, through the bindings, must give the same
+  transaction byte for byte.
 - `src/coinjoin.rs`: `coinjoinSignInputs`, `coinjoinUnblindOutputs`.
 - `src/openamp.rs`: the `Openamp` client class (`registerUser`, `getUser`,
   `enclaveAddress`, `assetInfo`, `createTransfer`, `completeTransfer`) and
@@ -556,7 +605,7 @@ purposes (BIP44 `44'`, BIP49 `49'`, BIP84 `84'`, BIP86 `86'`, AMP2 `87'`):
 
 | Path | Key |
 |---|---|
-| `m/2/0` | The staking key: stake bonding, staking-pool delegation, and messages signed as the staker |
+| `m/2/0` | The staking key: stake bonding and unbonding, staking-pool delegation (with the `P2WPKH` coin that authorises a record), and messages signed as the staker |
 | `m/3/0` | The SeqDEX HTLC key (`htlcKeypair`), and the cross-chain swap's Sequentia claim key in its legacy relative mode; the cross-chain swap's own keys are at `m/84'/1'/0'/2/0` (BTC refund), `/3/0` (Sequentia claim) and `/4/0` (BTC claim) |
 | `m/5/0` | The OpenAMP enclave key, which signs raw 32-byte digests (`openampSignSighash`) |
 | `m/6'/<account>'/c1'/c2'/c3'/c4'` | Arca leaf keys, one per leaf, from the leaf's owner nonce (`ark::keys`) |
@@ -570,9 +619,9 @@ shares a path with one that signs anything else.
 - Sequentia is transparent by default; confidentiality is opt-in. Docs and code
   never assume blinded-by-default (that is the Liquid model).
 - The Sequence token (SEQ; tSEQ on testnet) is the policy asset but has no
-  privilege anywhere in the kit except the staking output builder; fees are
-  payable in any accepted asset and fee rates are denominated in the chosen
-  asset's own units per vByte.
+  privilege anywhere in the kit except staking (bonding, unbonding and
+  delegation records); fees are payable in any accepted asset and fee rates
+  are denominated in the chosen asset's own units per vByte.
 - One redeemScript source for cross-chain HTLCs: the Bitcoin leg wraps the same
   builder the Sequentia leg uses, so the legs cannot drift (this is why the
   `btc` feature implies `sequentia`).

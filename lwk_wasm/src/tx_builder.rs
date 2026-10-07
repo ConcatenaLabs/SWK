@@ -170,6 +170,12 @@ impl TxBuilder {
     /// the old record and create the new one in one transaction (consensus
     /// permits at most one live record per controller); use
     /// `buildDelegationSpendTx` with `rotateTo` for that, and for leaving.
+    ///
+    /// The network accepts a record only from a transaction that spends a coin
+    /// of its controller (from `pos_hardening_height`: 163,000 on the testnet,
+    /// block 1 on every other chain), which a wallet's own coins are not. Create
+    /// the record with `addRecordAuthorization` and `buildDelegationCreateTx`
+    /// instead; this output alone is valid only below that height.
     #[wasm_bindgen(js_name = addDelegationOutput)]
     pub fn add_delegation_output(
         self,
@@ -193,6 +199,16 @@ impl TxBuilder {
             .inner
             .add_delegation_output(&controller, &signer, satoshi)
             .into())
+    }
+
+    /// Pay `satoshi` of the Sequence token (SEQ), unblinded, to the `P2WPKH` of
+    /// `pubkey` (33-byte hex, normally `Signer.stakerPublicKey()`): the coin of
+    /// the staking key that `buildDelegationCreateTx` spends to create a
+    /// delegation record. Pay the record's value plus that transaction's fee.
+    #[wasm_bindgen(js_name = addRecordAuthorization)]
+    pub fn add_record_authorization(self, pubkey: &str, satoshi: u64) -> Result<TxBuilder, Error> {
+        let key = lwk_wollet::sequentia_delegation::delegation_pubkey_from_hex(pubkey, "key")?;
+        Ok(self.inner.add_record_authorization(&key, satoshi).into())
     }
 
     /// Issue an asset

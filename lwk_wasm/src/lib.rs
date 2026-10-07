@@ -52,6 +52,8 @@ mod seqob_covenant;
 // SEQUENTIA staking pools: join, move between, and (the half a descriptor wallet
 // cannot do alone) leave one.
 mod sequentia_delegation;
+// SEQUENTIA unbonding in two steps, signed with the staking key.
+mod sequentia_stake_records;
 // SEQUENTIA staking rewards: which coins a staker was PAID, and which of them
 // to convert. Shared by every light wallet so the two decisions cannot drift.
 mod staking_rewards;
@@ -156,8 +158,11 @@ pub use seqdex_htlc::{
 };
 pub use seqob_covenant::{build_covenant_fill_tx_js, script_to_address};
 pub use sequentia_delegation::{
-    build_delegation_spend_tx_js, find_delegation_records_js, parse_delegation_script_js,
-    sequentia_delegation_script_js,
+    build_delegation_create_tx_js, build_delegation_spend_tx_js, find_delegation_records_js,
+    parse_delegation_script_js, sequentia_delegation_script_js, stake_record_signing_js,
+};
+pub use sequentia_stake_records::{
+    build_unbond_claim_tx_js, build_unbond_tx_js, sequentia_unbond_script_js, unbond_fee_cap_js,
 };
 pub use staking_rewards::{
     attribute_staking_rewards_js, decide_reward_conversion_js, plan_reward_batches_js,

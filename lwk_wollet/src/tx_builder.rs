@@ -349,6 +349,14 @@ impl TxBuilder {
     /// the old record and create the new one in the same transaction, because
     /// consensus permits at most one unspent record per controller; use
     /// [`crate::build_delegation_spend_tx`] for that.
+    ///
+    /// The network accepts a record only from a transaction that spends a coin
+    /// of its controller (from `pos_hardening_height`: 163,000 on the testnet,
+    /// block 1 on every other chain), and the wallet's descriptor coins are not
+    /// the staking key's. A wallet creates the record with
+    /// [`Self::add_record_authorization`] and
+    /// [`crate::build_delegation_create_tx`] instead; this output alone is valid
+    /// only below that height.
     #[cfg(feature = "sequentia")]
     pub fn add_delegation_output(
         mut self,
@@ -363,6 +371,24 @@ impl TxBuilder {
                 controller_pubkey,
                 signer_pubkey,
             ),
+            blinding_pubkey: None,
+            asset,
+        });
+        self
+    }
+
+    /// Pay `satoshi` of the Sequence token (SEQ), unblinded, to the `P2WPKH` of
+    /// `pubkey` (33-byte compressed): a coin of that key, which the transaction
+    /// creating a delegation record spends to show the key authorised it
+    /// ([`crate::build_delegation_create_tx`]). Pay the record's value plus
+    /// the fee of that transaction, and spend the coin straight away; the two
+    /// transactions are mined together.
+    #[cfg(feature = "sequentia")]
+    pub fn add_record_authorization(mut self, pubkey: &[u8], satoshi: u64) -> Self {
+        let asset = *self.network().policy_asset();
+        self.recipients.push(Recipient {
+            satoshi,
+            script_pubkey: crate::sequentia_stake_records::key_coin_script(pubkey),
             blinding_pubkey: None,
             asset,
         });

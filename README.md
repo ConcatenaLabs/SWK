@@ -40,16 +40,24 @@ on top of the upstream history, listed precisely in [SEQUENTIA.md](SEQUENTIA.md)
   primitives (`bump_fee_of`, `replace_tx_of`, `cpfp_of`) work with any-asset fees.
 - **Staking**: `sequentia_stake_script` / `TxBuilder::add_stake_output` build the
   CSV-locked bonding output used to stake Sequence tokens for block production
-  (the only place the Sequence token is special).
+  (the only place the Sequence token is special), and `sequentia_stake_records`
+  takes a stake out in two steps (`build_unbond_tx`, then
+  `build_unbond_claim_tx` once the unbonding depth has passed). Every spend of
+  a stake record carries the signature the chain wants at the next block
+  (`StakeRecordSigning`): from the chain's `pos_records_v2_height`
+  (`pos_records_v2_height()` carries it per network) it commits to the amount
+  spent.
 - **SeqDEX primitives**: the same-chain atomic-swap `SeqdexSwapRequest` builder
   and the Sequentia-leg HTLC (redeem script, claim, refund) for cross-chain
   BTC-to-asset swaps, byte-compatible with the SeqDEX daemon.
 - **SeqOB covenant orders**: `seqob_covenant` assembles the raw FILL and REFUND
   transactions for a resting passive-CLOB covenant order (a taproot script-path
   input with no signature, plus the taker's own key-path funding inputs).
-- **Staking-pool delegation**: `TxBuilder::add_delegation_output` creates a
-  delegation record and `sequentia_delegation` spends one (leave a pool, or
-  re-point to another signer in the same transaction).
+- **Staking-pool delegation**: `sequentia_delegation` creates a delegation
+  record from a coin of the staking key (`TxBuilder::add_record_authorization`
+  pays it, `build_delegation_create_tx` spends it into the record, both mined
+  together) and spends one (leave a pool, or re-point to another signer in the
+  same transaction).
 - **CoinJoin**: `coinjoin::sign_coinjoin_inputs` signs the wallet's own P2WPKH
   inputs of a coordinator-built seqcj round transaction.
 - **OpenAMP restricted assets** (feature `openamp`): AID derivation, the tagged
@@ -113,10 +121,10 @@ Sequentia example in `lwk_simplicity`.
 
 | Crate | What it is |
 |---|---|
-| `lwk_wollet` | The watch-only wallet core (CT descriptors, scanning, balances, PSET create/finalize). Sequentia additions: explicit-output handling, any-asset fees + RBF/CPFP rescue, staking output, SeqDEX swap/HTLC builders, SeqOB covenant fill/refund, staking-pool delegation, CoinJoin input signing, the OpenAMP client (feature `openamp`), adaptor signatures (feature `adaptor`), the Arca leaf module (feature `ark`, `src/ark/`), and the whole Bitcoin parent-chain module (`src/btc/`). |
+| `lwk_wollet` | The watch-only wallet core (CT descriptors, scanning, balances, PSET create/finalize). Sequentia additions: explicit-output handling, any-asset fees + RBF/CPFP rescue, staking output and two-step unbonding, SeqDEX swap/HTLC builders, SeqOB covenant fill/refund, staking-pool delegation, CoinJoin input signing, the OpenAMP client (feature `openamp`), adaptor signatures (feature `adaptor`), the Arca leaf module (feature `ark`, `src/ark/`), and the whole Bitcoin parent-chain module (`src/btc/`). |
 | `lwk_common` | Shared types. Sequentia addition: `Network::sequentia_testnet()` and Sequentia address parameters. |
 | `lwk_signer` | Software signer (BIP39 mnemonic to PSET signatures); signs Sequentia PSETs as-is. Sequentia additions: `sign_tapscript`, a script-path signature at any leaf version over the Elements signature hash, for covenant leaves whose signature opcodes check the wallet's key, under `SIGHASH_DEFAULT` or `SIGHASH_ALL` unless the caller names another type; `sign_csfs`, a message signature for `OP_CHECKSIGFROMSTACK` over Arca's three messages, which rebuilds the digest from the message's fields, refuses a mismatch or another chain than the wallet's, and caps what a rebind leaves to whoever broadcasts. Each has a `describe` for the approval screen. |
-| `lwk_wasm` | WebAssembly bindings (wasm-bindgen). Sequentia additions: `Network.sequentiaTestnet()`, `BtcWallet`, the `xchain*` HTLC helpers, SeqDEX bindings, `buildCovenantFillTx` / `buildCovenantRefundTx`, delegation (`buildDelegationSpendTx`, `findDelegationRecords`), `coinjoinSignInputs` / `coinjoinUnblindOutputs`, the `Openamp` client and enclave helpers, `adaptor*`, `Signer.signTapscript` / `tapscriptSighash` / `tapscriptDescribe`, `Signer.signCsfs` / `csfsDigest` / `csfsDescribe`, Arca leaves (`ArkVerifier`, `ArkStore`, `arkParseRecord`, `Signer.arkLeafKey`), staking and any-asset-fee bindings. |
+| `lwk_wasm` | WebAssembly bindings (wasm-bindgen). Sequentia additions: `Network.sequentiaTestnet()`, `BtcWallet`, the `xchain*` HTLC helpers, SeqDEX bindings, `buildCovenantFillTx` / `buildCovenantRefundTx`, delegation (`buildDelegationCreateTx`, `buildDelegationSpendTx`, `findDelegationRecords`), unbonding (`buildUnbondTx`, `buildUnbondClaimTx`), `coinjoinSignInputs` / `coinjoinUnblindOutputs`, the `Openamp` client and enclave helpers, `adaptor*`, `Signer.signTapscript` / `tapscriptSighash` / `tapscriptDescribe`, `Signer.signCsfs` / `csfsDigest` / `csfsDescribe`, Arca leaves (`ArkVerifier`, `ArkStore`, `arkParseRecord`, `Signer.arkLeafKey`), staking and any-asset-fee bindings. |
 | `lwk_bindings` | UniFFI bindings (Python, Kotlin, Swift, C#, Go, C++). Upstream API surface (no Sequentia network exposed yet); only the `Contract::from_parts` call changed. |
 | `lwk_cli` / `lwk_app` / `lwk_rpc_model` / `lwk_tiny_jrpc` | JSON-RPC wallet server and CLI client. Upstream apart from `lwk_app`'s `Contract::from_parts` call: no `sequentia` network selector yet (networks: liquid, liquid-testnet, regtest). |
 | `lwk_jade`, `lwk_ledger`, `lwk_hwi` | Hardware-signer support (upstream; not wired to Sequentia flows). |
@@ -170,9 +178,10 @@ lwk_wollet = { features = ["btc-async"] }      # wasm / async apps
 `Network.sequentiaTestnet()`, `Network.isSequentia()`, the dual-chain
 `BtcWallet`, the `xchain*` helpers for cross-chain swaps,
 `TxBuilder.feeAsset()` / `addStakeOutput()` / `addExplicitRecipient()` /
-`addDelegationOutput()`, `Signer.stakerPublicKey()`, `buildCovenantFillTx()`,
-`buildDelegationSpendTx()`, `coinjoinSignInputs()`, the `Openamp` client, and
-the `adaptor*` functions.
+`addRecordAuthorization()`, `Signer.stakerPublicKey()`, `buildCovenantFillTx()`,
+`buildDelegationCreateTx()` / `buildDelegationSpendTx()`, `buildUnbondTx()` /
+`buildUnbondClaimTx()`, `coinjoinSignInputs()`, the `Openamp` client, and the
+`adaptor*` functions.
 
 ```sh
 cd lwk_wasm
@@ -192,6 +201,7 @@ Standard Rust workspace (toolchain pinned in `rust-toolchain.toml`):
 cargo build                                                             # whole workspace
 cargo test -p lwk_wollet --lib --features btc-blocking,btc-async btc   # dual-chain tests
 cargo test -p lwk_wollet --lib --features sequentia seqdex             # SeqDEX builders
+cargo test -p lwk_wollet --lib --features sequentia sequentia_          # staking records
 ```
 
 Notes:
@@ -201,8 +211,14 @@ Notes:
   failing upstream fixture tests. The workspace enables the vendored `elements`
   crate's `sequentia` feature globally, which changes the transaction and
   header wire format, so upstream Liquid test vectors no longer deserialize.
-  The Sequentia-specific test modules (`btc`, `seqdex_htlc`, `seqdex_swap`) all
-  pass; use the filtered commands above.
+  The Sequentia-specific test modules (`btc`, `seqdex_htlc`, `seqdex_swap`,
+  `sequentia_delegation`, `sequentia_stake_records`) all pass; use the filtered
+  commands above.
+- `lwk_wollet/tests/sequentia_stake_records.rs` has a proof-of-stake
+  `sequentiad` on a regtest chain confirm every staking transaction the kit
+  builds, and refuse each wrong one in the mempool and in a block:
+  `SEQUENTIAD_EXEC=/path/to/sequentiad cargo test -p lwk_wollet --features
+  sequentia --test sequentia_stake_records`.
 - Upstream integration tests (`lwk_wollet/tests/e2e.rs` and friends) need a
   local Elements/Liquid test environment (see `lwk_test_util` and
   `lwk_containers`); they exercise upstream Liquid behavior, not Sequentia.
