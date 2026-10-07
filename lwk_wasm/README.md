@@ -7,8 +7,9 @@
 > and `Network.isSequentia()`, the Bitcoin testnet4 `BtcWallet` (dual-chain
 > wallets), the `xchain*` helpers (cross-chain BTC-to-asset HTLC swaps), SeqDEX
 > bindings (`SwapRequest`, `buildSeqHtlc*`), `TxBuilder.feeAsset()` (any-asset
-> fees), `addStakeOutput()` and `Signer.stakerPublicKey()` (staking),
-> `addDelegationOutput()` / `buildDelegationSpendTx()` (staking pools),
+> fees), `addStakeOutput()`, `buildUnbondTx()` / `buildUnbondClaimTx()` and
+> `Signer.stakerPublicKey()` (staking), `addRecordAuthorization()` /
+> `buildDelegationCreateTx()` / `buildDelegationSpendTx()` (staking pools),
 > `buildCovenantFillTx()` / `buildCovenantRefundTx()` (SeqOB covenant orders),
 > `coinjoinSignInputs()` / `coinjoinUnblindOutputs()` (CoinJoin), the `Openamp`
 > client and `adaptor*` functions. See
@@ -153,6 +154,23 @@ the second also needs a `sequentiad` binary, and fails without one:
 cd lwk_wasm/tests/node && node ark_records.js
 SEQUENTIAD_EXEC=/path/to/sequentiad cargo test -p lwk_wollet \
   --no-default-features --features ark --test ark_regtest -- --nocapture
+```
+
+### Stake records on regtest
+
+`lwk_wollet/tests/sequentia_stake_records.rs` has a proof-of-stake
+`sequentiad` confirm every stake record transaction the kit builds (a bond, a
+delegation created with the staking key's coin, a re-point, a reclaim, an
+unbond in two steps) on both sides of the chain's `pos_records_v2_height`, and
+then runs `tests/node/stake_records.js`, which builds each of them again
+through the bindings from the recipe a wallet would pass and must get the same
+transaction byte for byte. The wasm half needs the node package above, linked
+or installed as `lwk_node` in `tests/node/node_modules`, and is skipped, with a
+line saying so, without it:
+
+```shell
+SEQUENTIAD_EXEC=/path/to/sequentiad cargo test -p lwk_wollet \
+  --features sequentia --test sequentia_stake_records -- --nocapture
 ```
 
 ### Arca signers on regtest

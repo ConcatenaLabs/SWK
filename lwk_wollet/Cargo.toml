@@ -183,6 +183,11 @@ name = "ark_regtest"
 path = "tests/ark_regtest.rs"
 required-features = ["ark"]
 
+[[test]]
+name = "sequentia_stake_records"
+path = "tests/sequentia_stake_records.rs"
+required-features = ["sequentia"]
+
 [[example]]
 name = "list_transactions"
 

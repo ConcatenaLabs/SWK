@@ -126,6 +126,11 @@ mod seqob_covenant;
 // wallet cannot do on its own) spend one to re-point or leave a pool.
 #[cfg(feature = "sequentia")]
 pub mod sequentia_delegation;
+// SEQUENTIA stake records: which signature a spend of a staking, unbonding,
+// delegation or payout output carries at a given height, and unbonding in two
+// steps.
+#[cfg(feature = "sequentia")]
+pub mod sequentia_stake_records;
 // SEQUENTIA staking rewards: which coins a staker was PAID, and which of them to
 // convert. Pure; the light wallets share this rather than each inventing one.
 #[cfg(feature = "sequentia")]
@@ -180,8 +185,15 @@ pub use crate::wollet::DirectoryIdHash;
 pub use crate::tx_builder::{BuiltTx, TxBuilder, WolletTxBuilder};
 #[cfg(feature = "sequentia")]
 pub use crate::sequentia_delegation::{
-    build_delegation_spend_tx, parse_delegation_script, sequentia_delegation_script,
-    DelegationSpendPlan,
+    build_delegation_create_tx, build_delegation_spend_tx, parse_delegation_script,
+    sequentia_delegation_script, DelegationCreatePlan, DelegationSpendPlan,
+};
+#[cfg(feature = "sequentia")]
+pub use crate::sequentia_stake_records::{
+    build_record_create_tx, build_unbond_claim_tx, build_unbond_tx, parse_stake_script,
+    parse_unbond_script, pos_records_v2_height, sequentia_unbond_script, sign_stake_record_input,
+    stake_record_sighash, ParsedStakeScript, RecordCreatePlan, StakeOutput, StakeRecordSigning,
+    UnbondClaimPlan, UnbondPlan, UnbondingOutput, SEQUENTIA_TESTNET_POS_RECORDS_V2_HEIGHT,
 };
 #[cfg(feature = "sequentia")]
 pub use crate::staking_rewards::{
