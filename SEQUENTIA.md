@@ -449,6 +449,22 @@ Changes by file:
 - `examples/rescue_test.rs`: live functional test of bump/replace/CPFP against
   the testnet (needs a funded wallet).
 
+## `lwk_contracts`
+
+A crate of this fork: the contract engine for templates written with
+[`sequentia-contracts`](https://github.com/ConcatenaLabs/sequentia-contracts)
+(descriptor versions 1 and 2). It depends on that repository's reader and its
+pinned compiler, `simplicityhl` 0.7.2 (with `simplicity-lang` 0.8.0, whose C
+library carries its own symbol prefix, so it links beside the 0.7.0 that
+`lwk_simplicity` uses). `lwk_contracts/README.md` describes what it does;
+`templates/PIN.json` names the revision of the templates it carries.
+
+Taking these libraries moved three entries of `Cargo.lock`: `bitcoin_hashes`
+0.14.0 to 0.14.1 and `semver` 1.0.27 to 1.0.28, which they require, and `psm`
+held at 0.1.26, the last release that builds with the pinned Rust 1.85. The
+Simplex SDK itself needs Rust 1.87, so the engine uses its libraries directly
+and ports its budget rule.
+
 ## `lwk_wasm`
 
 Built with `lwk_wollet` features `sequentia`, `openamp`, `adaptor`,
@@ -465,6 +481,14 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
 - `src/xchain.rs`: the `xchain*` helper functions (secret and key derivation,
   BTC HTLC, Sequentia redeem script, Sequentia claim, BTC claim and refund)
   wrapping `lwk_wollet::btc::xchain` for the web wallet.
+- `src/contract_engine.rs`: the contract engine (`lwk_contracts`):
+  `ContractTemplate` (a descriptor and its resolved sources, checked; the
+  carried templates by hash, `knownList`), `ContractInstance` (the output,
+  address, derivation and paths of an instance; `planDrip` for the faucet
+  drip covenant) and `ContractSpend` (the spend of a path, its outputs'
+  roles, its locks). Values cross as JSON text.
+- `build-web.sh`: the browser build (`wasm-pack build --target web
+  --release`) with every build-machine path remapped, failing if one remains.
 - `src/seqdex_swap.rs`: `SwapRequest` (same-chain SeqDEX swap proposal).
 - `src/seqdex_htlc.rs`: `generateSwapSecret`, `htlcKeypair`,
   `buildSeqHtlcRedeemScript`, `buildSeqHtlcClaimTx`, `buildSeqHtlcRefundTx`.
@@ -609,6 +633,7 @@ purposes (BIP44 `44'`, BIP49 `49'`, BIP84 `84'`, BIP86 `86'`, AMP2 `87'`):
 | `m/3/0` | The SeqDEX HTLC key (`htlcKeypair`), and the cross-chain swap's Sequentia claim key in its legacy relative mode; the cross-chain swap's own keys are at `m/84'/1'/0'/2/0` (BTC refund), `/3/0` (Sequentia claim) and `/4/0` (BTC claim) |
 | `m/5/0` | The OpenAMP enclave key, which signs raw 32-byte digests (`openampSignSighash`) |
 | `m/6'/<account>'/c1'/c2'/c3'/c4'` | Arca leaf keys, one per leaf, from the leaf's owner nonce (`ark::keys`) |
+| `m/8383'/<coin>'/0'/...` | Contract keys (`lwk_contracts`): the keys a contract template names, `0/0` by default; `<coin>` is 1776 on mainnet and 1 elsewhere. The account and its default are the Simplex fork's, so a key made there signs here |
 
 The SeqLN device keys of the web wallet and Ambra are under `m/1017'`. A new
 role takes the next free number here; a key that signs raw digests never

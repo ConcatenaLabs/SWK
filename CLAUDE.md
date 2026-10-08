@@ -41,9 +41,14 @@ fail; treat those as expected fork behaviour rather than as something you broke.
 ## The WASM build, and who consumes it
 
 ```sh
-cd lwk_wasm
-wasm-pack build --target web --release      # needs clang for the secp256k1 build
+lwk_wasm/build-web.sh                        # wasm-pack build --target web --release, paths remapped
 ```
+
+The script remaps every build-machine path (home directory, checkout, cargo
+caches) out of the `.wasm` and fails if one remains: a plain `wasm-pack
+build` embeds them in panic locations, so the published file would name this
+machine and differ from a build made elsewhere. It needs clang with a wasm32
+backend, for the secp256k1 and Simplicity C libraries.
 
 `--target web` is not optional. The output lands in `lwk_wasm/pkg/` (gitignored, never committed)
 and is consumed by

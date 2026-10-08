@@ -1,0 +1,25 @@
+/* One key, held as a parameter in the data leaf: the fixed-root form of a
+ * one-key spend.
+ *
+ * The output is  P2TR(NUMS, TapBranch(TapLeaf_0xbe(CMR), H_TapData(PK)))
+ * where PK, the owner's 32-byte x-only key, is the template's only parameter.
+ * The program takes no compile-time parameter, so its commitment root is one
+ * constant for every instance, and an instance's address is computed from PK
+ * with one hash and one curve tweak.
+ *
+ * The spender supplies PK in the witness. The program checks it against the
+ * data leaf beside it, which consensus has already bound to the output key
+ * through the control block (jet::tappath(0) is that sibling's hash), then
+ * checks a BIP340 signature by PK over the transaction's sig_all_hash.
+ */
+fn tapdata(pk: Pubkey) -> u256 {
+    let ctx: Ctx8 = jet::tapdata_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, pk);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+fn main() {
+    let pk: Pubkey = witness::PK;
+    assert!(jet::eq_256(tapdata(pk), unwrap(jet::tappath(0))));
+    jet::bip_0340_verify((pk, jet::sig_all_hash()), witness::SIG);
+}

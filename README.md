@@ -115,7 +115,7 @@ Consumers of SWK:
 ## Workspace crates
 
 Sequentia changes are concentrated in `lwk_common`, `lwk_wollet`, `lwk_signer`,
-`lwk_wasm`, and the vendored `rust-elements`; the other crates are upstream LWK, apart from
+`lwk_wasm`, `lwk_contracts` (the fork's own crate), and the vendored `rust-elements`; the other crates are upstream LWK, apart from
 a `Contract::from_parts` call site in `lwk_app` and `lwk_bindings` and one
 Sequentia example in `lwk_simplicity`.
 
@@ -124,10 +124,11 @@ Sequentia example in `lwk_simplicity`.
 | `lwk_wollet` | The watch-only wallet core (CT descriptors, scanning, balances, PSET create/finalize). Sequentia additions: explicit-output handling, any-asset fees + RBF/CPFP rescue, staking output and two-step unbonding, SeqDEX swap/HTLC builders, SeqOB covenant fill/refund, staking-pool delegation, CoinJoin input signing, the OpenAMP client (feature `openamp`), adaptor signatures (feature `adaptor`), the Arca leaf module (feature `ark`, `src/ark/`), and the whole Bitcoin parent-chain module (`src/btc/`). |
 | `lwk_common` | Shared types. Sequentia addition: `Network::sequentia_testnet()` and Sequentia address parameters. |
 | `lwk_signer` | Software signer (BIP39 mnemonic to PSET signatures); signs Sequentia PSETs as-is. Sequentia additions: `sign_tapscript`, a script-path signature at any leaf version over the Elements signature hash, for covenant leaves whose signature opcodes check the wallet's key, under `SIGHASH_DEFAULT` or `SIGHASH_ALL` unless the caller names another type; `sign_csfs`, a message signature for `OP_CHECKSIGFROMSTACK` over Arca's three messages, which rebuilds the digest from the message's fields, refuses a mismatch or another chain than the wallet's, and caps what a rebind leaves to whoever broadcasts. Each has a `describe` for the approval screen. |
-| `lwk_wasm` | WebAssembly bindings (wasm-bindgen). Sequentia additions: `Network.sequentiaTestnet()`, `BtcWallet`, the `xchain*` HTLC helpers, SeqDEX bindings, `buildCovenantFillTx` / `buildCovenantRefundTx`, delegation (`buildDelegationCreateTx`, `buildDelegationSpendTx`, `findDelegationRecords`), unbonding (`buildUnbondTx`, `buildUnbondClaimTx`), `coinjoinSignInputs` / `coinjoinUnblindOutputs`, the `Openamp` client and enclave helpers, `adaptor*`, `Signer.signTapscript` / `tapscriptSighash` / `tapscriptDescribe`, `Signer.signCsfs` / `csfsDigest` / `csfsDescribe`, Arca leaves (`ArkVerifier`, `ArkStore`, `arkParseRecord`, `Signer.arkLeafKey`), staking and any-asset-fee bindings. |
+| `lwk_wasm` | WebAssembly bindings (wasm-bindgen). Sequentia additions: `Network.sequentiaTestnet()`, `BtcWallet`, the `xchain*` HTLC helpers, SeqDEX bindings, `buildCovenantFillTx` / `buildCovenantRefundTx`, delegation (`buildDelegationCreateTx`, `buildDelegationSpendTx`, `findDelegationRecords`), unbonding (`buildUnbondTx`, `buildUnbondClaimTx`), the contract engine (`ContractTemplate`, `ContractInstance`, `ContractSpend`), `coinjoinSignInputs` / `coinjoinUnblindOutputs`, the `Openamp` client and enclave helpers, `adaptor*`, `Signer.signTapscript` / `tapscriptSighash` / `tapscriptDescribe`, `Signer.signCsfs` / `csfsDigest` / `csfsDescribe`, Arca leaves (`ArkVerifier`, `ArkStore`, `arkParseRecord`, `Signer.arkLeafKey`), staking and any-asset-fee bindings. |
 | `lwk_bindings` | UniFFI bindings (Python, Kotlin, Swift, C#, Go, C++). Upstream API surface (no Sequentia network exposed yet); only the `Contract::from_parts` call changed. |
 | `lwk_cli` / `lwk_app` / `lwk_rpc_model` / `lwk_tiny_jrpc` | JSON-RPC wallet server and CLI client. Upstream apart from `lwk_app`'s `Contract::from_parts` call: no `sequentia` network selector yet (networks: liquid, liquid-testnet, regtest). |
 | `lwk_jade`, `lwk_ledger`, `lwk_hwi` | Hardware-signer support (upstream; not wired to Sequentia flows). |
+| `lwk_contracts` | The contract engine (a crate of this fork): reads a `sequentia-contracts` descriptor with that repository's reader and pinned compiler, recomputes an instance's address and leaves, lists its paths and what each needs, builds the spend of a path, runs its program against the final transaction, and signs with a contract key. See `lwk_contracts/README.md`. |
 | `lwk_simplicity` | Upstream Simplicity utilities plus one Sequentia example, `examples/live_covenant.rs`, which derives and spends a Simplicity leaf on the live testnet. |
 | `lwk_boltz`, `lwk_payment_instructions`, `amp2_mock`, `lwk_containers`, `lwk_test_util` | Upstream LWK crates (Boltz swaps, payment-URI parsing, test infrastructure). Unmodified on this branch. |
 | `rust-elements` (vendored, not a workspace member) | Fork of the `elements` crate wired in via `[patch.crates-io]`, with a `sequentia` cargo feature for anchored headers, issuance denomination, and `tb`/`tsqb` address parsing. |
@@ -180,13 +181,17 @@ lwk_wollet = { features = ["btc-async"] }      # wasm / async apps
 `TxBuilder.feeAsset()` / `addStakeOutput()` / `addExplicitRecipient()` /
 `addRecordAuthorization()`, `Signer.stakerPublicKey()`, `buildCovenantFillTx()`,
 `buildDelegationCreateTx()` / `buildDelegationSpendTx()`, `buildUnbondTx()` /
-`buildUnbondClaimTx()`, `coinjoinSignInputs()`, the `Openamp` client, and the
-`adaptor*` functions.
+`buildUnbondClaimTx()`, `coinjoinSignInputs()`, the `Openamp` client, the
+`adaptor*` functions, and the contract engine (`ContractTemplate`,
+`ContractInstance`, `ContractSpend`).
 
 ```sh
-cd lwk_wasm
-wasm-pack build --target web --release    # needs clang for the secp256k1 build
+lwk_wasm/build-web.sh    # wasm-pack build --target web --release; needs clang
 ```
+
+The script remaps the build machine's paths out of the `.wasm` and fails if
+one remains, so a published package names no machine and two builds of one
+commit agree.
 
 The fork is not published to npm; the `lwk_wasm` npm package is upstream LWK.
 Consume the fork by building `pkg/` yourself (this is what

@@ -1,0 +1,265 @@
+{
+  "descriptor": 2,
+  "template": {
+    "budget": {
+      "max": 4000050,
+      "offset": 50,
+      "per_witness_byte": 4
+    },
+    "internal_key": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "name": "sequentia/faucet-drip",
+    "params": [
+      {
+        "label": "Dripped asset",
+        "name": "ASSET",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Faucet key",
+        "name": "FAUCET_KEY",
+        "role": "pubkey",
+        "type": "Pubkey"
+      },
+      {
+        "label": "Interval between drips, in units of 512 seconds",
+        "name": "INTERVAL",
+        "role": "number",
+        "type": "u16"
+      },
+      {
+        "label": "Most a drip pays in fees, in the dripped asset",
+        "name": "FEE_CAP",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Tier 1: the reserve holds at least",
+        "name": "TIER1_FLOOR",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Tier 1: a drip pays at most",
+        "name": "TIER1_MAX",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Tier 2: the reserve holds at least",
+        "name": "TIER2_FLOOR",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Tier 2: a drip pays at most",
+        "name": "TIER2_MAX",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Tier 3: the reserve holds at least",
+        "name": "TIER3_FLOOR",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Tier 3: a drip pays at most",
+        "name": "TIER3_MAX",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Below tier 3: a drip pays at most",
+        "name": "TIER4_MAX",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Recovery delay",
+        "name": "RECOVERY_DELAY",
+        "role": "sequence",
+        "type": "u32"
+      },
+      {
+        "label": "Treasury key",
+        "name": "TREASURY_KEY",
+        "role": "pubkey",
+        "type": "Pubkey"
+      }
+    ],
+    "paths": [
+      {
+        "effect": "Pays output 1, in ASSET, to any script but this one, at most TIER1_MAX while the reserve holds at least TIER1_FLOOR, else TIER2_MAX from TIER2_FLOOR, else TIER3_MAX from TIER3_FLOOR, else TIER4_MAX; once INTERVAL units of 512 seconds have passed since the reserve confirmed; with fees of at most FEE_CAP in ASSET; and pays the rest to output 0 at this script, which waits the interval again. The reserve must be input 0.",
+        "leaf": "drip",
+        "name": "drip",
+        "who": "the holder of FAUCET_KEY"
+      },
+      {
+        "effect": "Spends the whole reserve into any transaction TREASURY_KEY signs, once the reserve has gone RECOVERY_DELAY, a BIP68 relative lock, without a drip. Each drip starts the delay again, so while drips continue the reserve cannot be recovered.",
+        "leaf": "recover",
+        "name": "recover",
+        "who": "the holder of TREASURY_KEY"
+      }
+    ],
+    "slots": [],
+    "summary": "A faucet reserve that pays out at most one tier per interval to whatever the faucet key signs for, and that the treasury key recovers once drips stop.",
+    "tree": {
+      "branch": [
+        {
+          "branch": [
+            {
+              "leaf": "drip",
+              "simplicity": {
+                "cmr": "5251ec00d9799dbcdb31da4534f25ef9960321f195e2e24ef7125c46f24b972a",
+                "compiler": {
+                  "name": "simplicityhl",
+                  "version": "0.7.2"
+                },
+                "max_cost_wu": 432,
+                "source": "faucet_drip.simf",
+                "source_sha256": "f6b1bc9cf01ed7c69a832e9bfd3b99a68f92058ca6f14e6f388c1cc5608a6082",
+                "witness": [
+                  {
+                    "name": "ASSET",
+                    "source": "param:ASSET",
+                    "type": "u256"
+                  },
+                  {
+                    "name": "FAUCET_KEY",
+                    "source": "param:FAUCET_KEY",
+                    "type": "Pubkey"
+                  },
+                  {
+                    "name": "INTERVAL",
+                    "source": "param:INTERVAL",
+                    "type": "u16"
+                  },
+                  {
+                    "name": "FEE_CAP",
+                    "source": "param:FEE_CAP",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "TIER1_FLOOR",
+                    "source": "param:TIER1_FLOOR",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "TIER1_MAX",
+                    "source": "param:TIER1_MAX",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "TIER2_FLOOR",
+                    "source": "param:TIER2_FLOOR",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "TIER2_MAX",
+                    "source": "param:TIER2_MAX",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "TIER3_FLOOR",
+                    "source": "param:TIER3_FLOOR",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "TIER3_MAX",
+                    "source": "param:TIER3_MAX",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "TIER4_MAX",
+                    "source": "param:TIER4_MAX",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "SIG",
+                    "source": "signature:sig_all_hash:FAUCET_KEY",
+                    "type": "Signature"
+                  }
+                ]
+              }
+            },
+            {
+              "data": [
+                "ASSET",
+                "FAUCET_KEY",
+                "INTERVAL",
+                "FEE_CAP",
+                "TIER1_FLOOR",
+                "TIER1_MAX",
+                "TIER2_FLOOR",
+                "TIER2_MAX",
+                "TIER3_FLOOR",
+                "TIER3_MAX",
+                "TIER4_MAX"
+              ],
+              "leaf": "params"
+            }
+          ]
+        },
+        {
+          "leaf": "recover",
+          "tapscript": [
+            {
+              "num": "RECOVERY_DELAY"
+            },
+            "b275",
+            {
+              "push": "TREASURY_KEY"
+            },
+            "ac"
+          ]
+        }
+      ]
+    },
+    "version": 1
+  },
+  "template_hash": "12986f202fbfb850f7699c5d5188f261f276de6c7038142f0a28bbb672b5af34",
+  "chains": [
+    {
+      "name": "sequentia-testnet",
+      "genesis": "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e",
+      "bech32_hrp": "tb"
+    },
+    {
+      "name": "elementsregtest",
+      "genesis": null,
+      "bech32_hrp": "ert"
+    }
+  ],
+  "measured": {
+    "source": "harness/records/f1.json",
+    "drip": {
+      "transaction": "the reserve as input 0; the successor, the drip and the fee, all explicit, in the reserve's asset",
+      "vsize": 581,
+      "weight": 2323,
+      "program_bytes": 1024,
+      "witness_bytes": 194,
+      "cost_bound_wu": 423,
+      "budget_wu": 5466
+    },
+    "drip_in_tier_2": {
+      "transaction": "the same, from a reserve under the first tier's floor",
+      "vsize": 594,
+      "weight": 2373,
+      "program_bytes": 1074,
+      "witness_bytes": 194,
+      "cost_bound_wu": 427,
+      "budget_wu": 5666
+    },
+    "recover": {
+      "transaction": "the reserve's whole amount less the fee to one output, by the tapscript leaf",
+      "vsize": 207,
+      "weight": 828,
+      "witness_stack_items_bytes": [
+        64,
+        40,
+        65
+      ]
+    }
+  }
+}

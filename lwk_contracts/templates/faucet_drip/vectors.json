@@ -1,0 +1,350 @@
+{
+  "addresses": [
+    {
+      "address": {
+        "elementsregtest": "ert1pjqn9l39fhqyvt0pswqwnh3vcefqsqv5gtxr2cwwwur5f706x4j9qhz57xk",
+        "sequentia-testnet": "tb1pjqn9l39fhqyvt0pswqwnh3vcefqsqv5gtxr2cwwwur5f706x4j9qtgkx6g"
+      },
+      "leaves": {
+        "drip": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0db8e4819a1d952be7005b1751ec59a79516d6ebd7f3b3ef44dc99682a4f8341b2e96d3050b838855daa817b89005e89aa058f6ac3893ac8ee6780a0a23806bd3",
+          "hash": "a93aa3cd7b669c95bd232f56877add8a92ced5b956e996766ade6cc1b4f8c5d6"
+        },
+        "params": {
+          "data": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc879be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000100000000000186a0002386f26fc100000000048c2739500000038d7ea4c68000000001d1a94a200000005af3107a40000000002e90edd00000000004a817c800",
+          "hash": "db8e4819a1d952be7005b1751ec59a79516d6ebd7f3b3ef44dc99682a4f8341b"
+        },
+        "recover": {
+          "control_block": "c550929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac05b1c7545a9ff247809e19387064a47086616d90fd8d8cbb13d610cda0faa83bc",
+          "hash": "2e96d3050b838855daa817b89005e89aa058f6ac3893ac8ee6780a0a23806bd3",
+          "script": "03c71340b27520c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5ac"
+        }
+      },
+      "merkle_root": "a1345d79be2434f4d512fae8d9d97904b525916cbea42c83053e44872741e1dc",
+      "name": "testnet tSEQ tiers, faucet key 1, treasury key 2",
+      "output_key": "90265fc4a9b808c5bc30701d3bc598ca410032885986ac39cee0e89f3f46ac8a",
+      "output_key_parity": 1,
+      "params": {
+        "ASSET": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8",
+        "FAUCET_KEY": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "FEE_CAP": "00000000000186a0",
+        "INTERVAL": "0001",
+        "RECOVERY_DELAY": "004013c7",
+        "TIER1_FLOOR": "002386f26fc10000",
+        "TIER1_MAX": "0000048c27395000",
+        "TIER2_FLOOR": "00038d7ea4c68000",
+        "TIER2_MAX": "000001d1a94a2000",
+        "TIER3_FLOOR": "00005af3107a4000",
+        "TIER3_MAX": "0000002e90edd000",
+        "TIER4_MAX": "00000004a817c800",
+        "TREASURY_KEY": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+      },
+      "script_pubkey": "512090265fc4a9b808c5bc30701d3bc598ca410032885986ac39cee0e89f3f46ac8a",
+      "slots": {},
+      "tweak": "bccb378cfe3023dcb55b8e9280d316324b8efe034c753c42d40ad6f3e60b9aaf"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pvvaz5yerwam3vr4vreg4haqez8uq7k3z0nz6969gpm2vnahpt99sylgy6h",
+        "sequentia-testnet": "tb1pvvaz5yerwam3vr4vreg4haqez8uq7k3z0nz6969gpm2vnahpt99sc42uxf"
+      },
+      "leaves": {
+        "drip": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0db8e4819a1d952be7005b1751ec59a79516d6ebd7f3b3ef44dc99682a4f8341bcae56fd6de092973e83e0a2ba964f5c0fd8b9ba422069171d2f1492423fcb42f",
+          "hash": "a93aa3cd7b669c95bd232f56877add8a92ced5b956e996766ade6cc1b4f8c5d6"
+        },
+        "params": {
+          "data": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc879be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000100000000000186a0002386f26fc100000000048c2739500000038d7ea4c68000000001d1a94a200000005af3107a40000000002e90edd00000000004a817c800",
+          "hash": "db8e4819a1d952be7005b1751ec59a79516d6ebd7f3b3ef44dc99682a4f8341b"
+        },
+        "recover": {
+          "control_block": "c550929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac05b1c7545a9ff247809e19387064a47086616d90fd8d8cbb13d610cda0faa83bc",
+          "hash": "cae56fd6de092973e83e0a2ba964f5c0fd8b9ba422069171d2f1492423fcb42f",
+          "script": "03c71340b27520f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9ac"
+        }
+      },
+      "merkle_root": "cfac548401ec059abd6110e14cf47613b789b36261d5c929af3339c9ed947668",
+      "name": "testnet tSEQ tiers, faucet key 1, treasury key 3",
+      "output_key": "633a2a13237777160eac1e515bf41911f80f5a227cc5a2e8a80ed4c9f6e1594b",
+      "output_key_parity": 1,
+      "params": {
+        "ASSET": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8",
+        "FAUCET_KEY": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "FEE_CAP": "00000000000186a0",
+        "INTERVAL": "0001",
+        "RECOVERY_DELAY": "004013c7",
+        "TIER1_FLOOR": "002386f26fc10000",
+        "TIER1_MAX": "0000048c27395000",
+        "TIER2_FLOOR": "00038d7ea4c68000",
+        "TIER2_MAX": "000001d1a94a2000",
+        "TIER3_FLOOR": "00005af3107a4000",
+        "TIER3_MAX": "0000002e90edd000",
+        "TIER4_MAX": "00000004a817c800",
+        "TREASURY_KEY": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+      },
+      "script_pubkey": "5120633a2a13237777160eac1e515bf41911f80f5a227cc5a2e8a80ed4c9f6e1594b",
+      "slots": {},
+      "tweak": "979cee861078b8f8582b8f128d10de61d266492b19e31da5d0b970d09c2c5d63"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pgp26g4u57w5pknnl5pvf0gftdtaeltf2x4l6e0wzrteqhpxxuh4qh3lzuz",
+        "sequentia-testnet": "tb1pgp26g4u57w5pknnl5pvf0gftdtaeltf2x4l6e0wzrteqhpxxuh4qtma6qu"
+      },
+      "leaves": {
+        "drip": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0db8e4819a1d952be7005b1751ec59a79516d6ebd7f3b3ef44dc99682a4f8341b15715a03473813ba2aea8c4a16096243a896b24b637103a239a73be311c61b15",
+          "hash": "a93aa3cd7b669c95bd232f56877add8a92ced5b956e996766ade6cc1b4f8c5d6"
+        },
+        "params": {
+          "data": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc879be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000100000000000186a0002386f26fc100000000048c2739500000038d7ea4c68000000001d1a94a200000005af3107a40000000002e90edd00000000004a817c800",
+          "hash": "db8e4819a1d952be7005b1751ec59a79516d6ebd7f3b3ef44dc99682a4f8341b"
+        },
+        "recover": {
+          "control_block": "c450929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac05b1c7545a9ff247809e19387064a47086616d90fd8d8cbb13d610cda0faa83bc",
+          "hash": "15715a03473813ba2aea8c4a16096243a896b24b637103a239a73be311c61b15",
+          "script": "03c71340b275202f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4ac"
+        }
+      },
+      "merkle_root": "2d8a82afe123d41c2844f14ab52dad51e59981462fc9d9aa1d9663166fcecc44",
+      "name": "testnet tSEQ tiers, faucet key 1, treasury key 5",
+      "output_key": "4055a45794f3a81b4e7fa05897a12b6afb9fad2a357facbdc21af20b84c6e5ea",
+      "output_key_parity": 0,
+      "params": {
+        "ASSET": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8",
+        "FAUCET_KEY": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "FEE_CAP": "00000000000186a0",
+        "INTERVAL": "0001",
+        "RECOVERY_DELAY": "004013c7",
+        "TIER1_FLOOR": "002386f26fc10000",
+        "TIER1_MAX": "0000048c27395000",
+        "TIER2_FLOOR": "00038d7ea4c68000",
+        "TIER2_MAX": "000001d1a94a2000",
+        "TIER3_FLOOR": "00005af3107a4000",
+        "TIER3_MAX": "0000002e90edd000",
+        "TIER4_MAX": "00000004a817c800",
+        "TREASURY_KEY": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4"
+      },
+      "script_pubkey": "51204055a45794f3a81b4e7fa05897a12b6afb9fad2a357facbdc21af20b84c6e5ea",
+      "slots": {},
+      "tweak": "7462aa8577814232696766ffff2986b4e7fc20e17bb2a885abe974b79797af60"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pkmmu4y6v0stkl7q6y4j57lwpg78hh7ckg9znv5y25gyllq6pnkds7p5stw",
+        "sequentia-testnet": "tb1pkmmu4y6v0stkl7q6y4j57lwpg78hh7ckg9znv5y25gyllq6pnkdsztkghs"
+      },
+      "leaves": {
+        "drip": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0db8e4819a1d952be7005b1751ec59a79516d6ebd7f3b3ef44dc99682a4f8341b68eea02099e2e2e310e4ef7f41a1f5a02cb5c7fc7c69188b57c786945920a59c",
+          "hash": "a93aa3cd7b669c95bd232f56877add8a92ced5b956e996766ade6cc1b4f8c5d6"
+        },
+        "params": {
+          "data": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc879be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000100000000000186a0002386f26fc100000000048c2739500000038d7ea4c68000000001d1a94a200000005af3107a40000000002e90edd00000000004a817c800",
+          "hash": "db8e4819a1d952be7005b1751ec59a79516d6ebd7f3b3ef44dc99682a4f8341b"
+        },
+        "recover": {
+          "control_block": "c450929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac05b1c7545a9ff247809e19387064a47086616d90fd8d8cbb13d610cda0faa83bc",
+          "hash": "68eea02099e2e2e310e4ef7f41a1f5a02cb5c7fc7c69188b57c786945920a59c",
+          "script": "03c71340b275205cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bcac"
+        }
+      },
+      "merkle_root": "b40990deb2e175372b3b6eccddffe75a78bccaa6a9964dd5ba3c1c5c3bb98f70",
+      "name": "testnet tSEQ tiers, faucet key 1, treasury key 7",
+      "output_key": "b6f7ca934c7c176ff81a25654f7dc1478f7bfb16414536508aa209ff83419d9b",
+      "output_key_parity": 0,
+      "params": {
+        "ASSET": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8",
+        "FAUCET_KEY": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "FEE_CAP": "00000000000186a0",
+        "INTERVAL": "0001",
+        "RECOVERY_DELAY": "004013c7",
+        "TIER1_FLOOR": "002386f26fc10000",
+        "TIER1_MAX": "0000048c27395000",
+        "TIER2_FLOOR": "00038d7ea4c68000",
+        "TIER2_MAX": "000001d1a94a2000",
+        "TIER3_FLOOR": "00005af3107a4000",
+        "TIER3_MAX": "0000002e90edd000",
+        "TIER4_MAX": "00000004a817c800",
+        "TREASURY_KEY": "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc"
+      },
+      "script_pubkey": "5120b6f7ca934c7c176ff81a25654f7dc1478f7bfb16414536508aa209ff83419d9b",
+      "slots": {},
+      "tweak": "c973d2590126755cd6154c79711526a53477806d83c2d5a42af2b3805872fbd5"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pyd2vxhn7jf7hsru3jfq3s9tgcayppd2y8m0jchu86shekt5zu87qdqtg6q",
+        "sequentia-testnet": "tb1pyd2vxhn7jf7hsru3jfq3s9tgcayppd2y8m0jchu86shekt5zu87q32fsx7"
+      },
+      "leaves": {
+        "drip": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac050f31c0091abbdd0381c489608acc3e948ab53e12529b0b321d4a23ed524d7cc094542866397b045dd9829891c8b2e070f0fa19e44bf6237bbdb99b480b3aa7f",
+          "hash": "a93aa3cd7b669c95bd232f56877add8a92ced5b956e996766ade6cc1b4f8c5d6"
+        },
+        "params": {
+          "data": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5000100000000000186a0002386f26fc100000000048c2739500000038d7ea4c68000000001d1a94a200000005af3107a40000000002e90edd00000000004a817c800",
+          "hash": "50f31c0091abbdd0381c489608acc3e948ab53e12529b0b321d4a23ed524d7cc"
+        },
+        "recover": {
+          "control_block": "c450929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0284f702fc6a1a50a6627819eeb897ab9b1f515062b1042f8b203fccd6385cc14",
+          "hash": "094542866397b045dd9829891c8b2e070f0fa19e44bf6237bbdb99b480b3aa7f",
+          "script": "03c71340b2752079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac"
+        }
+      },
+      "merkle_root": "9e1a00f1f27ecac4c0a15e34e4cbe13521cf11b93dec691354452d550d27f262",
+      "name": "testnet tSEQ tiers, faucet key 2, treasury key 1",
+      "output_key": "2354c35e7e927d780f919241181568c74810b5443edf2c5f87d42f9b2e82e1fc",
+      "output_key_parity": 0,
+      "params": {
+        "ASSET": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8",
+        "FAUCET_KEY": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "FEE_CAP": "00000000000186a0",
+        "INTERVAL": "0001",
+        "RECOVERY_DELAY": "004013c7",
+        "TIER1_FLOOR": "002386f26fc10000",
+        "TIER1_MAX": "0000048c27395000",
+        "TIER2_FLOOR": "00038d7ea4c68000",
+        "TIER2_MAX": "000001d1a94a2000",
+        "TIER3_FLOOR": "00005af3107a4000",
+        "TIER3_MAX": "0000002e90edd000",
+        "TIER4_MAX": "00000004a817c800",
+        "TREASURY_KEY": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "script_pubkey": "51202354c35e7e927d780f919241181568c74810b5443edf2c5f87d42f9b2e82e1fc",
+      "slots": {},
+      "tweak": "aaf5eb3bef638b9e026307767fb926d6fc71ac07c23cb88241c5eef661dcba59"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pyd9w4cnxhp70k8c6un749wejkkvvus5lh9m090pkjx6nfzez6qjssl6vyc",
+        "sequentia-testnet": "tb1pyd9w4cnxhp70k8c6un749wejkkvvus5lh9m090pkjx6nfzez6qjsv4c5cx"
+      },
+      "leaves": {
+        "drip": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac050f31c0091abbdd0381c489608acc3e948ab53e12529b0b321d4a23ed524d7cccae56fd6de092973e83e0a2ba964f5c0fd8b9ba422069171d2f1492423fcb42f",
+          "hash": "a93aa3cd7b669c95bd232f56877add8a92ced5b956e996766ade6cc1b4f8c5d6"
+        },
+        "params": {
+          "data": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5000100000000000186a0002386f26fc100000000048c2739500000038d7ea4c68000000001d1a94a200000005af3107a40000000002e90edd00000000004a817c800",
+          "hash": "50f31c0091abbdd0381c489608acc3e948ab53e12529b0b321d4a23ed524d7cc"
+        },
+        "recover": {
+          "control_block": "c550929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0284f702fc6a1a50a6627819eeb897ab9b1f515062b1042f8b203fccd6385cc14",
+          "hash": "cae56fd6de092973e83e0a2ba964f5c0fd8b9ba422069171d2f1492423fcb42f",
+          "script": "03c71340b27520f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9ac"
+        }
+      },
+      "merkle_root": "d0b273e2cbfef2810b92b4f69d24c7a30cd7468d6c6c8c38720ddf2c11a199d9",
+      "name": "testnet tSEQ tiers, faucet key 2, treasury key 3",
+      "output_key": "234aeae266b87cfb1f1ae4fd52bb32b598ce429fb976f2bc3691b5348b22d025",
+      "output_key_parity": 1,
+      "params": {
+        "ASSET": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8",
+        "FAUCET_KEY": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "FEE_CAP": "00000000000186a0",
+        "INTERVAL": "0001",
+        "RECOVERY_DELAY": "004013c7",
+        "TIER1_FLOOR": "002386f26fc10000",
+        "TIER1_MAX": "0000048c27395000",
+        "TIER2_FLOOR": "00038d7ea4c68000",
+        "TIER2_MAX": "000001d1a94a2000",
+        "TIER3_FLOOR": "00005af3107a4000",
+        "TIER3_MAX": "0000002e90edd000",
+        "TIER4_MAX": "00000004a817c800",
+        "TREASURY_KEY": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+      },
+      "script_pubkey": "5120234aeae266b87cfb1f1ae4fd52bb32b598ce429fb976f2bc3691b5348b22d025",
+      "slots": {},
+      "tweak": "d02f97bd31bb61dc4b92a704cbd71d4b69e671cec618e1eb4666ef863aeb89b7"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1p646775m9wwyrc6z05ke2mkp7ngc5pxqlyuja4hm87f8f6v8awf9sc5zqa2",
+        "sequentia-testnet": "tb1p646775m9wwyrc6z05ke2mkp7ngc5pxqlyuja4hm87f8f6v8awf9sy7qcp5"
+      },
+      "leaves": {
+        "drip": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac050f31c0091abbdd0381c489608acc3e948ab53e12529b0b321d4a23ed524d7cc7369d6e69d803093ff8de1400ae1a5b20b769c455b194ab64f2caece04a9fe09",
+          "hash": "a93aa3cd7b669c95bd232f56877add8a92ced5b956e996766ade6cc1b4f8c5d6"
+        },
+        "params": {
+          "data": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5000100000000000186a0002386f26fc100000000048c2739500000038d7ea4c68000000001d1a94a200000005af3107a40000000002e90edd00000000004a817c800",
+          "hash": "50f31c0091abbdd0381c489608acc3e948ab53e12529b0b321d4a23ed524d7cc"
+        },
+        "recover": {
+          "control_block": "c450929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0284f702fc6a1a50a6627819eeb897ab9b1f515062b1042f8b203fccd6385cc14",
+          "hash": "7369d6e69d803093ff8de1400ae1a5b20b769c455b194ab64f2caece04a9fe09",
+          "script": "03c71340b27520e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13ac"
+        }
+      },
+      "merkle_root": "90335e6df3eca15b61152fb7749bc3c6da1c72712c795ed31f3d00ff30d9710e",
+      "name": "testnet tSEQ tiers, faucet key 2, treasury key 4",
+      "output_key": "d575ef536573883c684fa5b2add83e9a3140981f2725dadf67f24e9d30fd724b",
+      "output_key_parity": 0,
+      "params": {
+        "ASSET": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8",
+        "FAUCET_KEY": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "FEE_CAP": "00000000000186a0",
+        "INTERVAL": "0001",
+        "RECOVERY_DELAY": "004013c7",
+        "TIER1_FLOOR": "002386f26fc10000",
+        "TIER1_MAX": "0000048c27395000",
+        "TIER2_FLOOR": "00038d7ea4c68000",
+        "TIER2_MAX": "000001d1a94a2000",
+        "TIER3_FLOOR": "00005af3107a4000",
+        "TIER3_MAX": "0000002e90edd000",
+        "TIER4_MAX": "00000004a817c800",
+        "TREASURY_KEY": "e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13"
+      },
+      "script_pubkey": "5120d575ef536573883c684fa5b2add83e9a3140981f2725dadf67f24e9d30fd724b",
+      "slots": {},
+      "tweak": "eb6b389f3570dd3d6031904d577f193112cfc65f16cfbc2cdc87abba21634ebf"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pzepmkwrr0vys0udzs2y4cwg50ea7me6lctwt8uk570wqffarr2ssfaxjz6",
+        "sequentia-testnet": "tb1pzepmkwrr0vys0udzs2y4cwg50ea7me6lctwt8uk570wqffarr2ss4hy27y"
+      },
+      "leaves": {
+        "drip": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac050f31c0091abbdd0381c489608acc3e948ab53e12529b0b321d4a23ed524d7cc1cc4ee4a021e496376f8b3eab6eb6ff62e5a7851348d772ba4b1da75a4e6d069",
+          "hash": "a93aa3cd7b669c95bd232f56877add8a92ced5b956e996766ade6cc1b4f8c5d6"
+        },
+        "params": {
+          "data": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5000100000000000186a0002386f26fc100000000048c2739500000038d7ea4c68000000001d1a94a200000005af3107a40000000002e90edd00000000004a817c800",
+          "hash": "50f31c0091abbdd0381c489608acc3e948ab53e12529b0b321d4a23ed524d7cc"
+        },
+        "recover": {
+          "control_block": "c550929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0284f702fc6a1a50a6627819eeb897ab9b1f515062b1042f8b203fccd6385cc14",
+          "hash": "1cc4ee4a021e496376f8b3eab6eb6ff62e5a7851348d772ba4b1da75a4e6d069",
+          "script": "03c71340b275207635ca72d7e8432c338ec53cd12220bc01c48685e24f7dc8c602a7746998e435ac"
+        }
+      },
+      "merkle_root": "ccf79612f6bcf27669262fa5aab759b6ea93cf280f3a79b49ebd412d6a2c7214",
+      "name": "testnet tSEQ tiers, faucet key 2, treasury key 59",
+      "output_key": "1643bb38637b0907f1a282895c39147e7bede75fc2dcb3f2d4f3dc04a7a31aa1",
+      "output_key_parity": 1,
+      "params": {
+        "ASSET": "403eae2f5587864d10e2b0386c6ec31c1019834d431ed31c93e15309cfcaecc8",
+        "FAUCET_KEY": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "FEE_CAP": "00000000000186a0",
+        "INTERVAL": "0001",
+        "RECOVERY_DELAY": "004013c7",
+        "TIER1_FLOOR": "002386f26fc10000",
+        "TIER1_MAX": "0000048c27395000",
+        "TIER2_FLOOR": "00038d7ea4c68000",
+        "TIER2_MAX": "000001d1a94a2000",
+        "TIER3_FLOOR": "00005af3107a4000",
+        "TIER3_MAX": "0000002e90edd000",
+        "TIER4_MAX": "00000004a817c800",
+        "TREASURY_KEY": "7635ca72d7e8432c338ec53cd12220bc01c48685e24f7dc8c602a7746998e435"
+      },
+      "script_pubkey": "51201643bb38637b0907f1a282895c39147e7bede75fc2dcb3f2d4f3dc04a7a31aa1",
+      "slots": {},
+      "tweak": "e076270c3ba7784b2072cc21303516a26bec1c5ea4298bc9ee8a69669c4b2d06"
+    }
+  ],
+  "template_hash": "12986f202fbfb850f7699c5d5188f261f276de6c7038142f0a28bbb672b5af34",
+  "vectors": 2
+}
