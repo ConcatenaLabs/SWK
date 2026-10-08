@@ -39,6 +39,23 @@ jobs:
       - run: "cargo test -p lwk_wollet --lib --no-default-features --features ark ark::"
       - run: cargo test -p lwk_wollet --no-default-features --features ark --test ark_regtest --no-run
 
+  # The contract engine: every golden vector and refusal of the templates it
+  # carries, and the budget rule. The regtest drip needs a sequentiad binary,
+  # so it is built here, not run; the wasm bindings are checked for wasm32.
+  contracts:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          targets: wasm32-unknown-unknown
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev clang llvm
+      - run: cargo test -p lwk_contracts
+      - run: cargo check -p lwk_wasm --target wasm32-unknown-unknown
+        env:
+          CC_wasm32_unknown_unknown: clang
+          AR_wasm32_unknown_unknown: llvm-ar
+
   nix:
     runs-on: ubuntu-22.04
     steps:

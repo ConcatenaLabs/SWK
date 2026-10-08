@@ -1,0 +1,31 @@
+/* One key spends at any time; an exit key spends after a relative delay.
+ *
+ * The output is
+ *
+ *     P2TR(NUMS, TapBranch(TapBranch(TapLeaf_0xbe(CMR), H_TapData(PK)),
+ *                          TapLeaf_0xc4(<EXIT_DELAY> CSV DROP <EXIT_KEY> CHECKSIG)))
+ *
+ * This program is the Simplicity leaf. Its parameter, the owner's 32-byte
+ * x-only key PK, sits in the data leaf beside it, so the program takes no
+ * compile-time parameter and its commitment root is one constant for every
+ * instance. The spender supplies PK in the witness; the program checks it
+ * against the data leaf, which consensus has already bound to the output key
+ * through the control block (jet::tappath(0) is that sibling's hash, wherever
+ * else the branch sits), then checks a BIP340 signature by PK over the
+ * transaction's sig_all_hash. That hash commits to this leaf and its path, so
+ * the signature authorises no spend by the exit leaf, even when EXIT_KEY is PK.
+ *
+ * The exit leaf is a tapscript the descriptor builds from EXIT_DELAY and
+ * EXIT_KEY.
+ */
+fn tapdata(pk: Pubkey) -> u256 {
+    let ctx: Ctx8 = jet::tapdata_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, pk);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+fn main() {
+    let pk: Pubkey = witness::PK;
+    assert!(jet::eq_256(tapdata(pk), unwrap(jet::tappath(0))));
+    jet::bip_0340_verify((pk, jet::sig_all_hash()), witness::SIG);
+}

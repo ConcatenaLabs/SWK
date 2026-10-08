@@ -1,0 +1,14 @@
+[package]
+name = "lwk_contracts"
+version = "0.18.1"
+edition = "2021"
+description = "Sequentia Wallet Kit - the contract engine: descriptors, addresses, paths and spends of contract templates"
+license = "MIT OR BSD-2-Clause"
+
+[dependencies]
+lwk_signer = { version = "0.18.1", default-features = false }
+sequentia-contracts = { git = "https://github.com/ConcatenaLabs/sequentia-contracts", rev = "ad8ed18" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+simplicityhl = "=0.7.2"

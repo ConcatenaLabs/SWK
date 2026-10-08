@@ -16,6 +16,7 @@ mod btc_wallet;
 mod xchain;
 mod coinjoin;
 mod contract;
+mod contract_engine;
 mod ark;
 mod ark_spend;
 mod csfs;
@@ -120,6 +121,7 @@ pub use blockdata::wallet_tx_out::{OptionWalletTxOut, WalletTxOut};
 pub use boltz::LightningPayment;
 pub use boltz::{BoltzSession, BoltzSessionBuilder, Invoice};
 pub use contract::Contract;
+pub use contract_engine::{ContractInstance, ContractSpend, ContractTemplate};
 pub use csfs::{csfs_describe, csfs_digest};
 #[cfg(feature = "simplicity")]
 pub use control_block::ControlBlock;

@@ -1,0 +1,136 @@
+{
+  "descriptor": 2,
+  "template": {
+    "budget": {
+      "max": 4000050,
+      "offset": 50,
+      "per_witness_byte": 4
+    },
+    "internal_key": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "name": "sequentia/one-key-exit",
+    "params": [
+      {
+        "label": "Owner key",
+        "name": "PK",
+        "role": "pubkey",
+        "type": "Pubkey"
+      },
+      {
+        "label": "Exit key",
+        "name": "EXIT_KEY",
+        "role": "pubkey",
+        "type": "Pubkey"
+      },
+      {
+        "label": "Exit delay",
+        "name": "EXIT_DELAY",
+        "role": "sequence",
+        "type": "u32"
+      }
+    ],
+    "paths": [
+      {
+        "effect": "Spends the output into any transaction PK signs, the signature covering the whole transaction, this leaf and the chain.",
+        "leaf": "spend",
+        "name": "spend",
+        "who": "the holder of PK"
+      },
+      {
+        "effect": "Spends the output into any transaction EXIT_KEY signs once the coin has waited EXIT_DELAY since it confirmed: a BIP68 relative lock, in blocks, or in units of 512 seconds when bit 22 is set.",
+        "leaf": "exit",
+        "name": "exit",
+        "who": "the holder of EXIT_KEY"
+      }
+    ],
+    "slots": [],
+    "summary": "One key spends at any time; an exit key spends once the coin has waited out a relative delay.",
+    "tree": {
+      "branch": [
+        {
+          "branch": [
+            {
+              "leaf": "spend",
+              "simplicity": {
+                "cmr": "c1a71ea2b1ccb88c315419a16ab142eab3864976863ee3c23ccb6bcaeee546fa",
+                "compiler": {
+                  "name": "simplicityhl",
+                  "version": "0.7.2"
+                },
+                "max_cost_wu": 72,
+                "source": "one_key_exit.simf",
+                "source_sha256": "fc2b570db1d96b243c86d5aee1e2b6838fb6c10971b07ac34771ba2e7a423771",
+                "witness": [
+                  {
+                    "name": "PK",
+                    "source": "param:PK",
+                    "type": "Pubkey"
+                  },
+                  {
+                    "name": "SIG",
+                    "source": "signature:sig_all_hash:PK",
+                    "type": "Signature"
+                  }
+                ]
+              }
+            },
+            {
+              "data": [
+                "PK"
+              ],
+              "leaf": "params"
+            }
+          ]
+        },
+        {
+          "leaf": "exit",
+          "tapscript": [
+            {
+              "num": "EXIT_DELAY"
+            },
+            "b275",
+            {
+              "push": "EXIT_KEY"
+            },
+            "ac"
+          ]
+        }
+      ]
+    },
+    "version": 1
+  },
+  "template_hash": "c8c53a337fd5f6af1c0ae6ccb30690adf3850265a3c135384082b63133d83c42",
+  "chains": [
+    {
+      "name": "sequentia-testnet",
+      "genesis": "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e",
+      "bech32_hrp": "tb"
+    },
+    {
+      "name": "elementsregtest",
+      "genesis": null,
+      "bech32_hrp": "ert"
+    }
+  ],
+  "measured": {
+    "source": "harness/records/d2.json",
+    "spend": {
+      "transaction": "one input, one output and a fee output, all explicit, by the Simplicity leaf",
+      "vsize": 247,
+      "weight": 987,
+      "program_bytes": 102,
+      "witness_bytes": 96,
+      "cost_bound_wu": 72,
+      "budget_wu": 1378
+    },
+    "exit": {
+      "transaction": "the same, by the tapscript leaf once the delay has passed",
+      "vsize": 207,
+      "weight": 828,
+      "witness_stack_items_bytes": [
+        64,
+        40,
+        65
+      ]
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "descriptor": 2,
+  "template": {
+    "budget": {
+      "max": 4000050,
+      "offset": 50,
+      "per_witness_byte": 4
+    },
+    "internal_key": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "name": "sequentia/one-key",
+    "params": [
+      {
+        "label": "Owner key",
+        "name": "PK",
+        "role": "pubkey",
+        "type": "Pubkey"
+      }
+    ],
+    "paths": [
+      {
+        "effect": "Spends the output into any transaction PK signs, the signature covering the whole transaction and the chain.",
+        "leaf": "program",
+        "name": "spend",
+        "who": "the holder of PK"
+      }
+    ],
+    "slots": [],
+    "summary": "One key, held as a parameter in the data leaf: the fixed-root form of a one-key spend.",
+    "tree": {
+      "branch": [
+        {
+          "leaf": "program",
+          "simplicity": {
+            "cmr": "c1a71ea2b1ccb88c315419a16ab142eab3864976863ee3c23ccb6bcaeee546fa",
+            "compiler": {
+              "name": "simplicityhl",
+              "version": "0.7.2"
+            },
+            "max_cost_wu": 72,
+            "source": "one_key.simf",
+            "source_sha256": "6941f7907d842a31254802cf3d2238fdb6baeb0b80d1d561aad4f2b89182f417",
+            "witness": [
+              {
+                "name": "PK",
+                "source": "param:PK",
+                "type": "Pubkey"
+              },
+              {
+                "name": "SIG",
+                "source": "signature:sig_all_hash:PK",
+                "type": "Signature"
+              }
+            ]
+          }
+        },
+        {
+          "data": [
+            "PK"
+          ],
+          "leaf": "params"
+        }
+      ]
+    },
+    "version": 1
+  },
+  "template_hash": "abdc46957f18c4fbe81b89e468fa6300c2b9f862ece4fffe67bc4c699df81768",
+  "chains": [
+    {
+      "name": "sequentia-testnet",
+      "genesis": "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e",
+      "bech32_hrp": "tb"
+    },
+    {
+      "name": "elementsregtest",
+      "genesis": null,
+      "bech32_hrp": "ert"
+    }
+  ]
+}

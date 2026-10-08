@@ -12,10 +12,12 @@
 > `buildDelegationCreateTx()` / `buildDelegationSpendTx()` (staking pools),
 > `buildCovenantFillTx()` / `buildCovenantRefundTx()` (SeqOB covenant orders),
 > `coinjoinSignInputs()` / `coinjoinUnblindOutputs()` (CoinJoin), the `Openamp`
-> client and `adaptor*` functions. See
+> client, `adaptor*` functions, and the contract engine (`ContractTemplate`,
+> `ContractInstance`, `ContractSpend`). See
 > [SEQUENTIA.md](../SEQUENTIA.md). This fork is NOT published to npm (the
 > `lwk_wasm` npm package is upstream LWK): build `pkg/` yourself with
-> `wasm-pack build --target web --release` (needs clang). The main consumer is
+> `./build-web.sh` (`wasm-pack build --target web --release` with the build
+> machine's paths remapped; needs clang). The main consumer is
 > [sequentia-web-wallet](https://github.com/ConcatenaLabs/sequentia-web-wallet),
 > live at https://sequentiatestnet.com/wallet/; the demo formerly in
 > `lwk_wasm/www/` moved to that repository.

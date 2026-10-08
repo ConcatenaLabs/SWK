@@ -1,0 +1,206 @@
+/* The faucet drip covenant: a reserve that pays out at most one tier per
+ * interval, to whatever the faucet key signs for.
+ *
+ * The output is
+ *
+ *     P2TR(NUMS, TapBranch(TapBranch(TapLeaf_0xbe(CMR), H_TapData(params)),
+ *                          TapLeaf_0xc4(<RECOVERY_DELAY> CSV DROP <TREASURY_KEY> CHECKSIG)))
+ *
+ * This program is the Simplicity leaf, the drip. Its parameters sit in the
+ * data leaf beside it, in this order: the asset, the faucet key, the interval
+ * (in units of 512 seconds), the fee cap, and the tier table: three floors,
+ * each with the most a drip may pay while the reserve holds at least that
+ * floor, and the most below the last floor. The spender gives them in the
+ * witness and the program checks them against the data leaf, which consensus
+ * has bound to the output through the control block.
+ *
+ * A drip spends the reserve, input 0, and pays:
+ *   output 1  the drip: at most the tier for the reserve's amount, in the asset,
+ *             to any script but this one;
+ *   fees      at most the fee cap in the asset;
+ *   output 0  the successor: this same script, the same asset, and exactly the
+ *             reserve less the drip and the fee, explicitly and with no nonce.
+ * The reserve's input must have waited the interval since its coin confirmed,
+ * by its own sequence, so each successor waits again; and the faucet key signs
+ * the whole transaction. Only input 0 can be a reserve, so two reserve coins
+ * cannot share one successor. Whatever the faucet key signs, the reserve loses
+ * at most one tier and one fee cap per interval.
+ *
+ * The recovery leaf is a tapscript the descriptor builds: the treasury key
+ * takes everything once the reserve has gone RECOVERY_DELAY without a drip.
+ */
+/* Output reader.
+ *
+ * The asset, amount and script of an output, refusing an output that does not
+ * exist or whose asset or amount is confidential: a covenant can only police
+ * what it can read. Asset ids are in internal byte order, the reverse of the
+ * hex an RPC prints. Include with `// include output_reader`.
+ */
+
+/* (asset id, amount, SHA256 of the scriptPubKey) of output i. */
+fn out_explicit(i: u32) -> (u256, u64, u256) {
+    let (asset, amount): (Asset1, Amount1) = unwrap(jet::output_amount(i));
+    let id: u256 = match asset {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u256) => explicit,
+    };
+    let value: u64 = match amount {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u64) => explicit,
+    };
+    (id, value, unwrap(jet::output_script_hash(i)))
+}
+
+/* Output i carries no nonce. An explicit output's nonce field is empty unless
+ * someone put data there, such as a blinding key; a covenant that pins an
+ * output pins this field too. */
+fn out_no_nonce(i: u32) {
+    assert!(is_none::<Nonce>(unwrap(jet::output_nonce(i))));
+}
+
+/* Output i pays exactly `amount` of `asset` to the script whose hash is
+ * `script_hash`, explicitly and with no nonce. */
+fn out_require(i: u32, asset: u256, amount: u64, script_hash: u256) {
+    let (id, value, script): (u256, u64, u256) = out_explicit(i);
+    assert!(jet::eq_256(id, asset));
+    assert!(jet::eq_64(value, amount));
+    assert!(jet::eq_256(script, script_hash));
+    out_no_nonce(i);
+}
+
+/* (asset id, amount) of the input being spent, refusing a confidential one. */
+fn in_explicit_current() -> (u256, u64) {
+    let (asset, amount): (Asset1, Amount1) = jet::current_amount();
+    let id: u256 = match asset {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u256) => explicit,
+    };
+    let value: u64 = match amount {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u64) => explicit,
+    };
+    (id, value)
+}
+/* Relative lock, in the safe form.
+ *
+ * Reads the sequence of the input being spent. The four relative-timelock jets
+ * read the largest lock over every input instead, so a spender defeats them by
+ * adding an old coin of their own; the lints refuse them. BIP68 makes
+ * consensus enforce an input's own sequence only when the transaction version
+ * is at least 2 and the sequence's disable bit is clear, so these check
+ * exactly that, then compare the lock with the minimum.
+ * Include with `// include relative_lock`.
+ */
+
+/* This input has waited at least `blocks` blocks since its coin confirmed. */
+fn rel_lock_blocks(blocks: u16) {
+    assert!(jet::le_32(2, jet::version()));
+    let d: u16 = match unwrap(jet::parse_sequence(jet::current_sequence())) {
+        Left(distance: u16) => distance,
+        Right(duration: u16) => panic!(),
+    };
+    assert!(jet::le_16(blocks, d));
+}
+
+/* This input has waited at least `units` units of 512 seconds of median time. */
+fn rel_lock_time(units: u16) {
+    assert!(jet::le_32(2, jet::version()));
+    let d: u16 = match unwrap(jet::parse_sequence(jet::current_sequence())) {
+        Left(distance: u16) => panic!(),
+        Right(duration: u16) => duration,
+    };
+    assert!(jet::le_16(units, d));
+}
+/* Fee cap.
+ *
+ * A keyless path can pay its own fee from the asset it holds, in any asset the
+ * network accepts, so the template must bound what the spender can burn as fee.
+ * jet::total_fee(asset) is the sum of the transaction's explicit fee outputs in
+ * that asset. Include with `// include fee_cap`.
+ */
+
+/* The transaction pays at most `cap` of `asset` in fees. */
+fn fee_cap_require(asset: u256, cap: u64) {
+    assert!(jet::le_64(jet::total_fee(asset), cap));
+}
+
+/* The data leaf's hash over the parameters, in the template's order. */
+fn params_tapdata(asset: u256, key: Pubkey, interval: u16, cap: u64, floors: (u64, u64, u64), maxes: (u64, u64, u64, u64)) -> u256 {
+    let (f1, f2, f3): (u64, u64, u64) = floors;
+    let (m1, m2, m3, m4): (u64, u64, u64, u64) = maxes;
+    let ctx: Ctx8 = jet::tapdata_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, asset);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, key);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_2(ctx, interval);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, cap);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, f1);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, m1);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, f2);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, m2);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, f3);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, m3);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, m4);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+/* The most a drip may pay from a reserve of `reserve`. */
+fn tier(reserve: u64, floors: (u64, u64, u64), maxes: (u64, u64, u64, u64)) -> u64 {
+    let (f1, f2, f3): (u64, u64, u64) = floors;
+    let (m1, m2, m3, m4): (u64, u64, u64, u64) = maxes;
+    match jet::le_64(f1, reserve) {
+        true => m1,
+        false => match jet::le_64(f2, reserve) {
+            true => m2,
+            false => match jet::le_64(f3, reserve) {
+                true => m3,
+                false => m4,
+            },
+        },
+    }
+}
+
+/* a - b; refuses a difference below zero. */
+fn minus(a: u64, b: u64) -> u64 {
+    let (borrow, d): (bool, u64) = jet::subtract_64(a, b);
+    assert!(jet::eq_1(<bool>::into(borrow), 0));
+    d
+}
+
+fn main() {
+    let asset: u256 = witness::ASSET;
+    let key: Pubkey = witness::FAUCET_KEY;
+    let interval: u16 = witness::INTERVAL;
+    let cap: u64 = witness::FEE_CAP;
+    let floors: (u64, u64, u64) = (witness::TIER1_FLOOR, witness::TIER2_FLOOR, witness::TIER3_FLOOR);
+    let maxes: (u64, u64, u64, u64) = (witness::TIER1_MAX, witness::TIER2_MAX, witness::TIER3_MAX, witness::TIER4_MAX);
+
+    // The parameters are the data leaf's.
+    assert!(jet::eq_256(params_tapdata(asset, key, interval, cap, floors, maxes), unwrap(jet::tappath(0))));
+
+    // One reserve per transaction: this input is input 0, and its successor output 0.
+    assert!(jet::eq_32(jet::current_index(), 0));
+
+    // The reserve holds the template's asset, explicitly.
+    let (held, reserve): (u256, u64) = in_explicit_current();
+    assert!(jet::eq_256(held, asset));
+
+    // One drip per interval, by this input's own sequence.
+    rel_lock_time(interval);
+
+    // The drip: output 1, in the asset, at most the tier, and not back into this script.
+    let (drip_asset, drip, drip_script): (u256, u64, u256) = out_explicit(1);
+    assert!(jet::eq_256(drip_asset, asset));
+    assert!(jet::le_64(drip, tier(reserve, floors, maxes)));
+    let here: u256 = jet::current_script_hash();
+    assert!(jet::eq_1(<bool>::into(jet::eq_256(drip_script, here)), 0));
+
+    // The fee, in the asset, at most the cap.
+    fee_cap_require(asset, cap);
+
+    // The successor: this script, the asset, and exactly what is left.
+    let left: u64 = minus(minus(reserve, drip), jet::total_fee(asset));
+    out_require(0, asset, left, here);
+
+    // The faucet key signs the whole transaction.
+    jet::bip_0340_verify((key, jet::sig_all_hash()), witness::SIG);
+}

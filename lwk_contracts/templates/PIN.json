@@ -1,0 +1,20 @@
+{
+  "repository": "https://github.com/ConcatenaLabs/sequentia-contracts",
+  "revision": "ad8ed18",
+  "copied": "templates/<t>/descriptor.json and vectors.json as they are; each templates/<t>/*.simf is `seqc expand` of that source (its includes resolved, the text source_sha256 hashes); fixtures/ is mirrors/fixtures/one_key_as_v2 and mirrors/fixtures/refusals.json",
+  "sha256": {
+    "faucet_drip/descriptor.json": "6a8b16a60eaa94c8aa29908719417a15390af8f89da032af4e6bde4761a6cdb7",
+    "faucet_drip/faucet_drip.simf": "f6b1bc9cf01ed7c69a832e9bfd3b99a68f92058ca6f14e6f388c1cc5608a6082",
+    "faucet_drip/vectors.json": "58478440ef752a305399241331cb6924b7b37fe1587dea1d795ea98dc2cdb317",
+    "fixtures/one_key_as_v2/descriptor.json": "e9a004504265ebc1a1b811b8b3f492dff2f8e8baac54c70a555d98cc9c336583",
+    "fixtures/one_key_as_v2/one_key.simf": "6941f7907d842a31254802cf3d2238fdb6baeb0b80d1d561aad4f2b89182f417",
+    "fixtures/one_key_as_v2/vectors.json": "f73e7297d5f4d9e2ddc6dafa9c673ef28b41fb13498988c9711a0a2c7efa7faf",
+    "fixtures/refusals.json": "4bbce7877179dd560e474feaa2c6eaa3a25214bc267db7723f847dcc1a0048ed",
+    "one_key/descriptor.json": "9521e0f797656334caaa54261ab0865d27e00a05f66b6d91a9db9b3e73d43104",
+    "one_key/one_key.simf": "6941f7907d842a31254802cf3d2238fdb6baeb0b80d1d561aad4f2b89182f417",
+    "one_key/vectors.json": "9bc6aa0dc88001680aa54900849fdc703d3ef9d75160c31d087785ad8f284653",
+    "one_key_exit/descriptor.json": "6aeaf3b543582d1bb507de3fcb2ea96c39f517c2237d6819cf6bd1f405464a18",
+    "one_key_exit/one_key_exit.simf": "fc2b570db1d96b243c86d5aee1e2b6838fb6c10971b07ac34771ba2e7a423771",
+    "one_key_exit/vectors.json": "985059db3905b6139594dd78a08554af2ce4c4e34aae48409474d43b3a4c88dd"
+  }
+}

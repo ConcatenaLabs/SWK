@@ -1,0 +1,162 @@
+{
+  "addresses": [
+    {
+      "address": {
+        "elementsregtest": "ert1p3tp27nn7p37xpdschrzagculzvx56akdfcjdw7z47zzt2js99els78xdmy",
+        "sequentia-testnet": "tb1p3tp27nn7p37xpdschrzagculzvx56akdfcjdw7z47zzt2js99elszdy486"
+      },
+      "leaves": {
+        "params": {
+          "data": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "hash": "2726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc2"
+        },
+        "program": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac02726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc2",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "65656a0ddf19a83489d0dbe7dca27942c40b157fe58d2aa5d38f842dd3c070d3",
+      "name": "secret key 1",
+      "output_key": "8ac2af4e7e0c7c60b618b8c5d4639f130d4d76cd4e24d77855f084b54a052e7f",
+      "output_key_parity": 0,
+      "params": {
+        "PK": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "script_pubkey": "51208ac2af4e7e0c7c60b618b8c5d4639f130d4d76cd4e24d77855f084b54a052e7f",
+      "slots": {},
+      "tweak": "263279b982bc611f971e44d92ada07782c5faf167f2e17384793818e524c399d"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pev8e5w0thevttvd54a2602l9n343adqg0wfn5nh9ksqkwx7yltasf55wdw",
+        "sequentia-testnet": "tb1pev8e5w0thevttvd54a2602l9n343adqg0wfn5nh9ksqkwx7yltas47kk3s"
+      },
+      "leaves": {
+        "params": {
+          "data": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+          "hash": "48f68b8b3d6d44a91afcfabe614ff7db55155757accf558ea1b4bba091e79ee0"
+        },
+        "program": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac048f68b8b3d6d44a91afcfabe614ff7db55155757accf558ea1b4bba091e79ee0",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "6b941d35cafd4910100fee18a939646d565c7860c3b4d1e81b27eb2b2b153141",
+      "name": "secret key 2",
+      "output_key": "cb0f9a39ebbe58b5b1b4af55a7abe59c6b1eb4087b933a4ee5b401671bc4fafb",
+      "output_key_parity": 1,
+      "params": {
+        "PK": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+      },
+      "script_pubkey": "5120cb0f9a39ebbe58b5b1b4af55a7abe59c6b1eb4087b933a4ee5b401671bc4fafb",
+      "slots": {},
+      "tweak": "f267f3a93b3cdbf9109cb4d701b067c95a1ad8aaa40261d2b90747312bdbb894"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pc4pzdd8dz09w3mdw8hnva050usdt337yjm7zvemzmcm3nd2ml5wq50rvjk",
+        "sequentia-testnet": "tb1pc4pzdd8dz09w3mdw8hnva050usdt337yjm7zvemzmcm3nd2ml5wqg9p5wg"
+      },
+      "leaves": {
+        "params": {
+          "data": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+          "hash": "1269fb481d29ed30172e299d21b1e5bf3566c7e9356ae77d4d8f2ad08c489d9c"
+        },
+        "program": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac01269fb481d29ed30172e299d21b1e5bf3566c7e9356ae77d4d8f2ad08c489d9c",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "85802dc9740884d4e4d3c81d708b37517234305a6a1079efc5b6330296daf240",
+      "name": "secret key 3",
+      "output_key": "c54226b4ed13cae8edae3de6cebe8fe41ab8c7c496fc266762de3719b55bfd1c",
+      "output_key_parity": 0,
+      "params": {
+        "PK": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+      },
+      "script_pubkey": "5120c54226b4ed13cae8edae3de6cebe8fe41ab8c7c496fc266762de3719b55bfd1c",
+      "slots": {},
+      "tweak": "e57b17a8bf2edae693abf38451c3ff8d058c16b3b5c10aac04b93dd4db97f395"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pxfkrtldcucuajvw3tjva0lqx3kye52hfry5pjw7ugp8az7x0n5jq4twg4x",
+        "sequentia-testnet": "tb1pxfkrtldcucuajvw3tjva0lqx3kye52hfry5pjw7ugp8az7x0n5jqfpvsfc"
+      },
+      "leaves": {
+        "params": {
+          "data": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+          "hash": "729c9cb7f3006352432e9ad0c4dcaf4ecb9a74cdf3b9304e9fac1fde2464a3e4"
+        },
+        "program": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0729c9cb7f3006352432e9ad0c4dcaf4ecb9a74cdf3b9304e9fac1fde2464a3e4",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "889339f8dc0f9672b1e60e1eaba2a5c4496a7e0c8ea32282a4aa082fb1163292",
+      "name": "the NUMS point as a key",
+      "output_key": "326c35fdb8e639d931d15c99d7fc068d899a2ae91928193bdc404fd178cf9d24",
+      "output_key_parity": 1,
+      "params": {
+        "PK": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
+      },
+      "script_pubkey": "5120326c35fdb8e639d931d15c99d7fc068d899a2ae91928193bdc404fd178cf9d24",
+      "slots": {},
+      "tweak": "c4206b1e48b48ea5f9164ffc370983d6611b39892345c5271fb6d0bebb44c909"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1ps46qn22y7ayq7syrln3xhhj3jqew9uk70q899s6z4aplxv9rattq3l548k",
+        "sequentia-testnet": "tb1ps46qn22y7ayq7syrln3xhhj3jqew9uk70q899s6z4aplxv9rattqd4kdmg"
+      },
+      "leaves": {
+        "params": {
+          "data": "e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a",
+          "hash": "f86dad55285f37668861168982d395b1af87414bb17e1c110a0c9fb1727c90f6"
+        },
+        "program": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0f86dad55285f37668861168982d395b1af87414bb17e1c110a0c9fb1727c90f6",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "301d080c14673711d5f46df1f27f1cd56633c12bc20deb25c9d173c48f3781dd",
+      "name": "secret key 16",
+      "output_key": "857409a944f7480f4083fce26bde519032e2f2de780e52c342af43f330a3ead6",
+      "output_key_parity": 1,
+      "params": {
+        "PK": "e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a"
+      },
+      "script_pubkey": "5120857409a944f7480f4083fce26bde519032e2f2de780e52c342af43f330a3ead6",
+      "slots": {},
+      "tweak": "c63c4f617967e05a3bc2e93c02fda0c9c371d358e2c1476509d93cc4360a470c"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1p6v04kqw55azr8gk87rslg60azsskeel7hddmn7esk5xn76yysrfqcch2hr",
+        "sequentia-testnet": "tb1p6v04kqw55azr8gk87rslg60azsskeel7hddmn7esk5xn76yysrfqyj4jta"
+      },
+      "leaves": {
+        "params": {
+          "data": "f2dac991cc4ce4b9ea44887e5c7c0bce58c80074ab9d4dbaeb28531b7739f530",
+          "hash": "f358cae4c8bdf4758dd2fd073f30e328115609728d5d37d678b4a9af4a090eaf"
+        },
+        "program": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0f358cae4c8bdf4758dd2fd073f30e328115609728d5d37d678b4a9af4a090eaf",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "b4d4ee3ac51ad6855c823b9f27b0b5776182f43579786279b980e92e1c712081",
+      "name": "secret key 49",
+      "output_key": "d31f5b01d4a74433a2c7f0e1f469fd14216ce7febb5bb9fb30b50d3f688480d2",
+      "output_key_parity": 0,
+      "params": {
+        "PK": "f2dac991cc4ce4b9ea44887e5c7c0bce58c80074ab9d4dbaeb28531b7739f530"
+      },
+      "script_pubkey": "5120d31f5b01d4a74433a2c7f0e1f469fd14216ce7febb5bb9fb30b50d3f688480d2",
+      "slots": {},
+      "tweak": "fda74ce71e2a3ec50d82371c7f9e27b96bf39d3f6f8ec09722c85e987629567c"
+    }
+  ],
+  "template_hash": "abdc46957f18c4fbe81b89e468fa6300c2b9f862ece4fffe67bc4c699df81768",
+  "vectors": 2
+}

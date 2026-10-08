@@ -1,0 +1,336 @@
+{
+  "addresses": [
+    {
+      "address": {
+        "elementsregtest": "ert1peyh3c5yzcxf00chnssuklph5yxadauw3vf9crx96l94xyl8sle8qtmpfm2",
+        "sequentia-testnet": "tb1peyh3c5yzcxf00chnssuklph5yxadauw3vf9crx96l94xyl8sle8qh3r385"
+      },
+      "leaves": {
+        "exit": {
+          "control_block": "c550929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac065656a0ddf19a83489d0dbe7dca27942c40b157fe58d2aa5d38f842dd3c070d3",
+          "hash": "0ebbfc6b623afb053b99f1b14384d2d63f46d9165475673aaeecd72bca606c95",
+          "script": "03020040b27520c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5ac"
+        },
+        "params": {
+          "data": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "hash": "2726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc2"
+        },
+        "spend": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac02726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc20ebbfc6b623afb053b99f1b14384d2d63f46d9165475673aaeecd72bca606c95",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "0c9aed3c8b94b8a2fc8c1518bedbb06cec85c3b527ffa94d3b32be6a77c203d1",
+      "name": "secret keys 1 and 2, exit after 1,024 seconds",
+      "output_key": "c92f1c5082c192f7e2f384396f86f421badef1d1624b8198baf96a627cf0fe4e",
+      "output_key_parity": 1,
+      "params": {
+        "EXIT_DELAY": "00400002",
+        "EXIT_KEY": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "PK": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "script_pubkey": "5120c92f1c5082c192f7e2f384396f86f421badef1d1624b8198baf96a627cf0fe4e",
+      "slots": {},
+      "tweak": "249b90357c8360df17d979a815a833504e02192074a7228c4dc10437eeb3a5ed"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pq06ucpwu573z4yeq8xphtkdpcxlfpj4c53gkavypmcqp7aqze85sfvwl33",
+        "sequentia-testnet": "tb1pq06ucpwu573z4yeq8xphtkdpcxlfpj4c53gkavypmcqp7aqze85s4xv8d0"
+      },
+      "leaves": {
+        "exit": {
+          "control_block": "c550929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac065656a0ddf19a83489d0dbe7dca27942c40b157fe58d2aa5d38f842dd3c070d3",
+          "hash": "e40963258aaf5cabd5d3f94e0d67fcf097cde29052b97a1f7abb195092126c03",
+          "script": "03020040b27520f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9ac"
+        },
+        "params": {
+          "data": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "hash": "2726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc2"
+        },
+        "spend": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac02726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc2e40963258aaf5cabd5d3f94e0d67fcf097cde29052b97a1f7abb195092126c03",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "0457e453079e9c6e7aca8ee42e38f03905494ecbef01f90ea2159582f37a5f45",
+      "name": "secret keys 1 and 3, exit after 1,024 seconds",
+      "output_key": "03f5cc05dca7a22a9320398375d9a1c1be90cab8a4516eb081de001f7402c9e9",
+      "output_key_parity": 1,
+      "params": {
+        "EXIT_DELAY": "00400002",
+        "EXIT_KEY": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+        "PK": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "script_pubkey": "512003f5cc05dca7a22a9320398375d9a1c1be90cab8a4516eb081de001f7402c9e9",
+      "slots": {},
+      "tweak": "c41a11df2c5fd349ba855fe26103b76288384e6052a814b60827aa4d38e2a4a7"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1p6gwqwd3j24e4hfy9tcmqgjvschh5lw6jkeksy42cfsautdfnhcqqt6e4cy",
+        "sequentia-testnet": "tb1p6gwqwd3j24e4hfy9tcmqgjvschh5lw6jkeksy42cfsautdfnhcqqhsmdy6"
+      },
+      "leaves": {
+        "exit": {
+          "control_block": "c450929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac065656a0ddf19a83489d0dbe7dca27942c40b157fe58d2aa5d38f842dd3c070d3",
+          "hash": "eae282720d407fb2a50ceb1ff6b9d2bac49298ebc519dde4ae9b6122eeb8d9dc",
+          "script": "03020040b27520e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13ac"
+        },
+        "params": {
+          "data": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "hash": "2726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc2"
+        },
+        "spend": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac02726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc2eae282720d407fb2a50ceb1ff6b9d2bac49298ebc519dde4ae9b6122eeb8d9dc",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "99e1f6a20b08e92b7debd8881193e629337b7ee5e4db4dba36e42b725d2bc471",
+      "name": "secret keys 1 and 4, exit after 1,024 seconds",
+      "output_key": "d21c07363255735ba4855e36044990c5ef4fbb52b66d0255584c3bc5b533be00",
+      "output_key_parity": 0,
+      "params": {
+        "EXIT_DELAY": "00400002",
+        "EXIT_KEY": "e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13",
+        "PK": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "script_pubkey": "5120d21c07363255735ba4855e36044990c5ef4fbb52b66d0255584c3bc5b533be00",
+      "slots": {},
+      "tweak": "3c1d8e59ab6b1b59d05410815ca71713ba3cbc68458172425a8709b75b51f035"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pgfsek03xuctmy82ts5rj3kvnz6202c6zj0u2tg69d5kpnsgyuves6tp4tr",
+        "sequentia-testnet": "tb1pgfsek03xuctmy82ts5rj3kvnz6202c6zj0u2tg69d5kpnsgyuvesxprdha"
+      },
+      "leaves": {
+        "exit": {
+          "control_block": "c450929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac065656a0ddf19a83489d0dbe7dca27942c40b157fe58d2aa5d38f842dd3c070d3",
+          "hash": "03c38de9e05ffabd266d9cfdb93507540da7bd33931d45f00121295b5237be04",
+          "script": "03020040b27520acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbeac"
+        },
+        "params": {
+          "data": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "hash": "2726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc2"
+        },
+        "spend": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac02726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc203c38de9e05ffabd266d9cfdb93507540da7bd33931d45f00121295b5237be04",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "bca55c2ecced9c02020d9109afd95f7c90daf349f390b7076b1892cfee88233c",
+      "name": "secret keys 1 and 9, exit after 1,024 seconds",
+      "output_key": "42619b3e26e617b21d4b850728d9931694f5634293f8a5a3456d2c19c104e333",
+      "output_key_parity": 0,
+      "params": {
+        "EXIT_DELAY": "00400002",
+        "EXIT_KEY": "acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe",
+        "PK": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "script_pubkey": "512042619b3e26e617b21d4b850728d9931694f5634293f8a5a3456d2c19c104e333",
+      "slots": {},
+      "tweak": "ec4ee18d8265e9ec70094bbb97c6d041494aa71c0984ecc278ec013a2efc3188"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1p8s0pyw7p8d6ydzcmar8f7fh56rtrxjqfxa0spfc0rud9yn0nu4uswtayql",
+        "sequentia-testnet": "tb1p8s0pyw7p8d6ydzcmar8f7fh56rtrxjqfxa0spfc0rud9yn0nu4usjpluup"
+      },
+      "leaves": {
+        "exit": {
+          "control_block": "c550929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0301d080c14673711d5f46df1f27f1cd56633c12bc20deb25c9d173c48f3781dd",
+          "hash": "5ba218fe67ad9f51ce7ddee56dbeb7ab038e6632ce9e48a01a19ab0adde4cf41",
+          "script": "03020040b2752079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac"
+        },
+        "params": {
+          "data": "e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a",
+          "hash": "f86dad55285f37668861168982d395b1af87414bb17e1c110a0c9fb1727c90f6"
+        },
+        "spend": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0f86dad55285f37668861168982d395b1af87414bb17e1c110a0c9fb1727c90f65ba218fe67ad9f51ce7ddee56dbeb7ab038e6632ce9e48a01a19ab0adde4cf41",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "ca49e378b32bd2209c32ebe1c5974a8b11bdcbe0af55d62e1a2d0e6f46c9f6e2",
+      "name": "secret keys 16 and 1, exit after 1,024 seconds",
+      "output_key": "3c1e123bc13b74468b1be8ce9f26f4d0d6334809375f00a70f1f1a524df3e579",
+      "output_key_parity": 1,
+      "params": {
+        "EXIT_DELAY": "00400002",
+        "EXIT_KEY": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "PK": "e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a"
+      },
+      "script_pubkey": "51203c1e123bc13b74468b1be8ce9f26f4d0d6334809375f00a70f1f1a524df3e579",
+      "slots": {},
+      "tweak": "d03ba2b6f54ffdb054b80c8e259e48189d0e6b5f5453cfd11605317bdfd2e1c3"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1p3amnvyvxw65ycevf5zg7jr4rlzkj53e6ej2gwfg9d06ywxlreyxq8mpukx",
+        "sequentia-testnet": "tb1p3amnvyvxw65ycevf5zg7jr4rlzkj53e6ej2gwfg9d06ywxlreyxqm3ry2c"
+      },
+      "leaves": {
+        "exit": {
+          "control_block": "c450929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0301d080c14673711d5f46df1f27f1cd56633c12bc20deb25c9d173c48f3781dd",
+          "hash": "0ebbfc6b623afb053b99f1b14384d2d63f46d9165475673aaeecd72bca606c95",
+          "script": "03020040b27520c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5ac"
+        },
+        "params": {
+          "data": "e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a",
+          "hash": "f86dad55285f37668861168982d395b1af87414bb17e1c110a0c9fb1727c90f6"
+        },
+        "spend": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0f86dad55285f37668861168982d395b1af87414bb17e1c110a0c9fb1727c90f60ebbfc6b623afb053b99f1b14384d2d63f46d9165475673aaeecd72bca606c95",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "e4cd1db0ddafb4b9ba8dee1a3e671674255e8771e44fb4c7945ea30cd0486471",
+      "name": "secret keys 16 and 2, exit after 1,024 seconds",
+      "output_key": "8f7736118676a84c6589a091e90ea3f8ad2a473acc948725056bf4471be3c90c",
+      "output_key_parity": 0,
+      "params": {
+        "EXIT_DELAY": "00400002",
+        "EXIT_KEY": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "PK": "e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a"
+      },
+      "script_pubkey": "51208f7736118676a84c6589a091e90ea3f8ad2a473acc948725056bf4471be3c90c",
+      "slots": {},
+      "tweak": "06eed40bae965e104ab19b3515e89bbfe288377f0cf94b265a31158e5dc253ae"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1px7a3cs432x5zqkss6x2s8vrf9hupjm3732j3ynpwqtktlluwh7rqttlt5r",
+        "sequentia-testnet": "tb1px7a3cs432x5zqkss6x2s8vrf9hupjm3732j3ynpwqtktlluwh7rqhpanga"
+      },
+      "leaves": {
+        "exit": {
+          "control_block": "c450929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0301d080c14673711d5f46df1f27f1cd56633c12bc20deb25c9d173c48f3781dd",
+          "hash": "e40963258aaf5cabd5d3f94e0d67fcf097cde29052b97a1f7abb195092126c03",
+          "script": "03020040b27520f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9ac"
+        },
+        "params": {
+          "data": "e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a",
+          "hash": "f86dad55285f37668861168982d395b1af87414bb17e1c110a0c9fb1727c90f6"
+        },
+        "spend": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0f86dad55285f37668861168982d395b1af87414bb17e1c110a0c9fb1727c90f6e40963258aaf5cabd5d3f94e0d67fcf097cde29052b97a1f7abb195092126c03",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "d348f5299af0ed5e3f7bffdfc172f8e372801f52e2138cf90ef019f5f05c3d33",
+      "name": "secret keys 16 and 3, exit after 1,024 seconds",
+      "output_key": "37bb1c42b151a8205a10d19503b0692df8196e3e8aa5124c2e02ecbfff8ebf86",
+      "output_key_parity": 0,
+      "params": {
+        "EXIT_DELAY": "00400002",
+        "EXIT_KEY": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+        "PK": "e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a"
+      },
+      "script_pubkey": "512037bb1c42b151a8205a10d19503b0692df8196e3e8aa5124c2e02ecbfff8ebf86",
+      "slots": {},
+      "tweak": "a9c24ac54cecac2f9796117f7027ca64e99068f9055866bc18023a42bd4e4040"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1p7xltteanec0xh6hex4asft2g0sty0w3zquak64c7ryyvzxh024fq8djx3k",
+        "sequentia-testnet": "tb1p7xltteanec0xh6hex4asft2g0sty0w3zquak64c7ryyvzxh024fqm8s7dg"
+      },
+      "leaves": {
+        "exit": {
+          "control_block": "c550929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0301d080c14673711d5f46df1f27f1cd56633c12bc20deb25c9d173c48f3781dd",
+          "hash": "0c6f49d7e4d091092a04f829e8cb6e199a9085dc472bd8475a6d66f7b9d8e600",
+          "script": "03020040b275202f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01ac"
+        },
+        "params": {
+          "data": "e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a",
+          "hash": "f86dad55285f37668861168982d395b1af87414bb17e1c110a0c9fb1727c90f6"
+        },
+        "spend": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0f86dad55285f37668861168982d395b1af87414bb17e1c110a0c9fb1727c90f60c6f49d7e4d091092a04f829e8cb6e199a9085dc472bd8475a6d66f7b9d8e600",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "d61c53c1f71455418563b10b94c3902345129662dcadd226b3341ebf8ef94d32",
+      "name": "secret keys 16 and 8, exit after 1,024 seconds",
+      "output_key": "f1beb5e7b3ce1e6beaf9357b04ad487c1647ba22073b6d571e1908c11aef5552",
+      "output_key_parity": 1,
+      "params": {
+        "EXIT_DELAY": "00400002",
+        "EXIT_KEY": "2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
+        "PK": "e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a"
+      },
+      "script_pubkey": "5120f1beb5e7b3ce1e6beaf9357b04ad487c1647ba22073b6d571e1908c11aef5552",
+      "slots": {},
+      "tweak": "a231340c6526c6d7e54296509896ed37755f20c6d53ac996eebf0cee1cdb27b8"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1pzxdmw5mh6grk45qv8u6f0g4x5hgjs4ejnce8tsgfke6w3yxg9sysfj5wzj",
+        "sequentia-testnet": "tb1pzxdmw5mh6grk45qv8u6f0g4x5hgjs4ejnce8tsgfke6w3yxg9sys4ckk7v"
+      },
+      "leaves": {
+        "exit": {
+          "control_block": "c550929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac085802dc9740884d4e4d3c81d708b37517234305a6a1079efc5b6330296daf240",
+          "hash": "e40963258aaf5cabd5d3f94e0d67fcf097cde29052b97a1f7abb195092126c03",
+          "script": "03020040b27520f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9ac"
+        },
+        "params": {
+          "data": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+          "hash": "1269fb481d29ed30172e299d21b1e5bf3566c7e9356ae77d4d8f2ad08c489d9c"
+        },
+        "spend": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac01269fb481d29ed30172e299d21b1e5bf3566c7e9356ae77d4d8f2ad08c489d9ce40963258aaf5cabd5d3f94e0d67fcf097cde29052b97a1f7abb195092126c03",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "76ec91158aa8a7eecd48969c943095b03bfe1e7541b2b94947766c6b8a833d97",
+      "name": "secret key 3 for both paths, exit after 1,024 seconds",
+      "output_key": "119bb75377d2076ad00c3f3497a2a6a5d12857329e3275c109b674e890c82c09",
+      "output_key_parity": 1,
+      "params": {
+        "EXIT_DELAY": "00400002",
+        "EXIT_KEY": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+        "PK": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+      },
+      "script_pubkey": "5120119bb75377d2076ad00c3f3497a2a6a5d12857329e3275c109b674e890c82c09",
+      "slots": {},
+      "tweak": "7552b44fc17c7042dca5262bd262bfe3a02efcf54240a1dbdca7b6946e1c575b"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1paxanmzmh4txj9guk9yaayss8m0ttvxtg7tahmxne8xt4gc4cmv8qku6d8s",
+        "sequentia-testnet": "tb1paxanmzmh4txj9guk9yaayss8m0ttvxtg7tahmxne8xt4gc4cmv8q2kc4mw"
+      },
+      "leaves": {
+        "exit": {
+          "control_block": "c550929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac065656a0ddf19a83489d0dbe7dca27942c40b157fe58d2aa5d38f842dd3c070d3",
+          "hash": "186b4df67c122c344df201b7ace04820b3956f46ca11e5aabc38dbcf990f7fc9",
+          "script": "029000b27520c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5ac"
+        },
+        "params": {
+          "data": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "hash": "2726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc2"
+        },
+        "spend": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac02726c3e2df291658a30abbf145b775c0403192b7bf16a6ee3c6243b00f445bc2186b4df67c122c344df201b7ace04820b3956f46ca11e5aabc38dbcf990f7fc9",
+          "hash": "d84b61417f4e9b0bd4ad43f8c51dcf1cef8471b9fad06279527320f474e0a0c4"
+        }
+      },
+      "merkle_root": "90350197b93db84d36d3827a2a3952df99b25e8444b1e18d094d406543bde383",
+      "name": "secret keys 1 and 2, exit after 144 blocks",
+      "output_key": "e9bb3d8b77aacd22a396293bd24207dbd6b61968f2fb7d9a7939975462b8db0e",
+      "output_key_parity": 1,
+      "params": {
+        "EXIT_DELAY": "00000090",
+        "EXIT_KEY": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "PK": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      },
+      "script_pubkey": "5120e9bb3d8b77aacd22a396293bd24207dbd6b61968f2fb7d9a7939975462b8db0e",
+      "slots": {},
+      "tweak": "cc40b05a5064a22ec5f70099c4a32840edb06db618ae00ca5396f1c343e7b19b"
+    }
+  ],
+  "template_hash": "c8c53a337fd5f6af1c0ae6ccb30690adf3850265a3c135384082b63133d83c42",
+  "vectors": 2
+}
