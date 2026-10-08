@@ -1,6 +1,6 @@
-//! The engine drips from a faucet drip covenant on a local chain, and refuses
-//! three bad drips before signing: one before the interval, one above the
-//! tier, one whose successor is not the covenant. Each
+//! The engine drips from a faucet drip covenant on a local chain, under the
+//! five-point rule, and refuses three bad drips before signing: one before the
+//! interval, one above the tier, one whose successor is not the covenant. Each
 //! bad drip is then forced on the chain as an adversary would build it (the
 //! control's pruned program, re-signed for the bad transaction, as the
 //! contracts harness does) and refused by the mempool and in a block made with
@@ -18,9 +18,8 @@ use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use lwk_contracts::spend::{
-    default_contract_key_path, Chain, ChainFacts, CoinRequest, Finalized, Spend,
-};
+use lwk_contracts::approval::{Approval, AssetLabel, WalletView};
+use lwk_contracts::spend::{default_contract_key_path, Chain, ChainFacts, CoinRequest, Spend};
 use lwk_contracts::{drip, known, Contract, Instance};
 use lwk_signer::SwSigner;
 use serde_json::{json, Value};
@@ -273,7 +272,7 @@ fn rec(log: &mut Vec<Value>, label: &str, v: Value) {
 }
 
 #[test]
-fn a_drip_built_and_signed_by_the_engine() {
+fn a_drip_under_the_five_point_rule() {
     let Some(bin) = std::env::var_os("SEQUENTIA_BIN").map(PathBuf::from) else {
         println!("skipped: set SEQUENTIA_BIN to a directory holding sequentiad and sequentia-cli");
         return;
@@ -395,22 +394,32 @@ fn a_drip_built_and_signed_by_the_engine() {
         }
     };
     let dest = node.ok(&["getnewaddress", "", "bech32"]);
+    let view = WalletView {
+        known: vec![known::FAUCET_DRIP.into()],
+        registry: None,
+        assets: BTreeMap::from([(
+            policy.clone(),
+            AssetLabel {
+                ticker: "tSEQ".into(),
+                precision: 8,
+            },
+        )]),
+        key_path: None,
+    };
     let rate = 1000; // atoms per 1,000 vB, in the dripped asset
-                     // A drip as a wallet makes it: planned, its locks checked, signed and run
-                     // against its final transaction, then planned again at its real size.
+                     // A drip as the wallet makes it: planned, measured, planned again at its real size.
     let prepare = |coin: &CoinRequest,
                    amount: u64,
                    facts: ChainFacts|
-     -> Result<(Spend, Finalized), lwk_contracts::Error> {
+     -> Result<Approval, lwk_contracts::Error> {
         let mut fee = drip::fee_for(581, rate);
         for _ in 0..2 {
             let req = drip::plan(&contract, coin, &dest, amount, fee)?;
             let spend = Spend::build(contract.clone(), chain, &req, &[], Some(facts.clone()))?;
-            spend.check_locks()?;
-            let f = spend.finalize(&faucet, &key_path)?;
-            let need = drip::fee_for(u64::try_from(f.tx.weight().div_ceil(4)).unwrap(), rate);
+            let a = Approval::prepare(spend, view.clone(), &faucet)?;
+            let need = drip::fee_for(a.summary()["vsize"].as_u64().unwrap(), rate);
             if need == fee {
-                return Ok((spend, f));
+                return Ok(a);
             }
             fee = need;
         }
@@ -431,42 +440,18 @@ fn a_drip_built_and_signed_by_the_engine() {
 
     // The first drip.
     node.advance(INTERVAL * 512);
-    let (_, f1) = prepare(&coin, 500 * COIN, node.facts(&coin.txid)).unwrap();
-    rec(
-        &mut log,
-        "drip 1 built",
-        json!({"cost_mwu": f1.cost_mwu, "budget_wu": f1.budget_wu, "annex_bytes": f1.annex_bytes}),
-    );
-    // Another wallet's contract key is not the faucet key.
-    let other = SwSigner::new(TREASURY, false).unwrap();
-    let req = drip::plan(&contract, &coin, &dest, 500 * COIN, 581).unwrap();
-    let e = Spend::build(
-        contract.clone(),
-        chain,
-        &req,
-        &[],
-        Some(node.facts(&coin.txid)),
-    )
-    .unwrap()
-    .finalize(&other, &key_path)
-    .unwrap_err()
-    .to_string();
-    assert!(e.contains("is signed by FAUCET_KEY"), "{e}");
-    rec(&mut log, "another wallet's key", json!(e));
-    let e = Spend::build(
-        contract.clone(),
-        chain,
-        &req,
-        &[],
-        Some(node.facts(&coin.txid)),
-    )
-    .unwrap()
-    .finalize(&faucet, "m/84h/1h/0h/0/0")
-    .unwrap_err()
-    .to_string();
-    assert!(e.contains("is not a contract key"), "{e}");
-    rec(&mut log, "a key outside the contract account", json!(e));
-    let tx1 = f1.tx;
+    let a = prepare(&coin, 500 * COIN, node.facts(&coin.txid)).unwrap();
+    let summary = a.summary();
+    rec(&mut log, "approval shown for drip 1", summary.clone());
+    assert_eq!(summary["template"]["shown"], json!("an unregistered template, root 5251ec00d9799dbcdb31da4534f25ef9960321f195e2e24ef7125c46f24b972a"));
+    assert_eq!(summary["path"]["name"], json!("drip"));
+    // A signature over any other digest is refused.
+    let e = a.sign(&"00".repeat(32), &faucet).unwrap_err().to_string();
+    assert!(e.contains("is not what was shown"), "{e}");
+    rec(&mut log, "a digest other than the one shown", json!(e));
+    let tx1 = a
+        .sign(summary["digest"].as_str().unwrap(), &faucet)
+        .unwrap();
     let hex1 = serialize_hex(&tx1);
     let txid1 = node.ok(&["sendrawtransaction", &hex1]);
     node.mine(1);
@@ -475,7 +460,7 @@ fn a_drip_built_and_signed_by_the_engine() {
     rec(
         &mut log,
         "drip 1 confirmed",
-        json!({"txid": txid1, "vsize": conf["vsize"], "weight": conf["weight"], "fee_atoms": tx1.output[2].value.explicit()}),
+        json!({"txid": txid1, "vsize": conf["vsize"], "weight": conf["weight"], "fee_atoms": summary["fee"][0]["amount"]}),
     );
 
     // The second drip, too early: refused by the engine before signing...
@@ -492,8 +477,10 @@ fn a_drip_built_and_signed_by_the_engine() {
     // ...and by the chain when an engine is told the interval has passed.
     let mut lie = node.facts(&coin.txid);
     lie.tip_median_time += 10_000;
-    let (_, f) = prepare(&coin, 500 * COIN, lie).unwrap();
-    let early = f.tx;
+    let a = prepare(&coin, 500 * COIN, lie).unwrap();
+    let early = a
+        .sign(a.summary()["digest"].as_str().unwrap(), &faucet)
+        .unwrap();
     let early_hex = serialize_hex(&early);
     let (m, b) = (node.mempool(&early_hex), node.force(&early_hex));
     assert_eq!(m, "non-BIP68-final");
@@ -507,15 +494,20 @@ fn a_drip_built_and_signed_by_the_engine() {
     node.advance(INTERVAL * 512);
     let facts = node.facts(&coin.txid);
     // The control: a good drip for this coin, which the node accepts.
-    let (control_spend, control_f) = prepare(&coin, 500 * COIN, facts.clone()).unwrap();
-    let control = control_f.tx;
+    let control_a = prepare(&coin, 500 * COIN, facts.clone()).unwrap();
+    let control = control_a
+        .sign(control_a.summary()["digest"].as_str().unwrap(), &faucet)
+        .unwrap();
     assert_eq!(node.mempool(&serialize_hex(&control)), "allowed");
-    let (keypair, _) = control_spend.contract_keypair(&faucet, &key_path).unwrap();
+    let (keypair, _) = control_a
+        .spend()
+        .contract_keypair(&faucet, &key_path)
+        .unwrap();
     let control_sig: [u8; 64] = {
         let cb = ControlBlock::from_slice(&control.input[0].witness.script_witness[3]).unwrap();
         let msg = Message::from_digest(sig_all_hash(
             &control,
-            &control_spend.coin,
+            &control_a.spend().coin,
             "5251ec00d9799dbcdb31da4534f25ef9960321f195e2e24ef7125c46f24b972a",
             &cb,
             genesis,
@@ -543,7 +535,9 @@ fn a_drip_built_and_signed_by_the_engine() {
     req.outputs[1].amount = tier + 1;
     req.outputs[0].amount -= 1;
     let spend = Spend::build(contract.clone(), chain, &req, &[], Some(facts.clone())).unwrap();
-    let e = spend.finalize(&faucet, &key_path).unwrap_err().to_string();
+    let e = Approval::prepare(spend, view.clone(), &faucet)
+        .unwrap_err()
+        .to_string();
     assert!(
         e.contains("the contract's program refuses this transaction"),
         "{e}"
@@ -563,7 +557,7 @@ fn a_drip_built_and_signed_by_the_engine() {
         &control_sig,
         &bad,
         &keypair,
-        &control_spend.coin,
+        &control_a.spend().coin,
         cmr,
         genesis,
     );
@@ -598,7 +592,9 @@ fn a_drip_built_and_signed_by_the_engine() {
     );
     req.outputs[0].to = "pay".into();
     let spend = Spend::build(contract.clone(), chain, &req, &[], Some(facts.clone())).unwrap();
-    let e = spend.finalize(&faucet, &key_path).unwrap_err().to_string();
+    let e = Approval::prepare(spend, view.clone(), &faucet)
+        .unwrap_err()
+        .to_string();
     assert!(
         e.contains("the contract's program refuses this transaction"),
         "{e}"
@@ -619,7 +615,7 @@ fn a_drip_built_and_signed_by_the_engine() {
         &control_sig,
         &bad,
         &keypair,
-        &control_spend.coin,
+        &control_a.spend().coin,
         cmr,
         genesis,
     );

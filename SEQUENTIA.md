@@ -485,8 +485,11 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   `ContractTemplate` (a descriptor and its resolved sources, checked; the
   carried templates by hash, `knownList`), `ContractInstance` (the output,
   address, derivation and paths of an instance; `planDrip` for the faucet
-  drip covenant) and `ContractSpend` (the spend of a path, its outputs'
-  roles, its locks). Values cross as JSON text.
+  drip covenant), `ContractSpend` (the spend of a path, its outputs'
+  roles, its locks) and `ContractApproval` (the spend checked under the
+  five-point signing rule, with the summary a wallet shows and its digest).
+  `Signer.signContractSpend(approval, shownDigest)` signs only that digest's
+  spend. Values cross as JSON text.
 - `build-web.sh`: the browser build (`wasm-pack build --target web
   --release`) with every build-machine path remapped, failing if one remains.
 - `src/seqdex_swap.rs`: `SwapRequest` (same-chain SeqDEX swap proposal).

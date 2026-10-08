@@ -693,8 +693,9 @@ impl Spend {
     /// Signs with the contract key at `key_path`, runs the program against the
     /// final transaction, pads it under the budget rule, and returns it. The
     /// key is checked first: under the contract account, and the one the path
-    /// names.
-    pub fn finalize(&self, signer: &SwSigner, key_path: &str) -> Result<Finalized, Error> {
+    /// names. A wallet reaches it only through the five-point gate,
+    /// [`crate::approval::Approval`], which signs only what it showed.
+    pub(crate) fn finalize(&self, signer: &SwSigner, key_path: &str) -> Result<Finalized, Error> {
         let (keypair, _) = self.contract_keypair(signer, key_path)?;
         let secp = Secp256k1::new();
         match self.path.kind.as_str() {

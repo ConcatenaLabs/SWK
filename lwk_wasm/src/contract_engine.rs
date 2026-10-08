@@ -302,3 +302,59 @@ impl ContractSpend {
         Ok(self.inner.check_locks().map_err(err)?.unwrap_or_default())
     }
 }
+
+/// A contract spend checked under the five-point rule, with the summary the
+/// wallet shows before it signs.
+#[wasm_bindgen]
+pub struct ContractApproval {
+    pub(crate) inner: lwk_contracts::Approval,
+}
+
+#[wasm_bindgen]
+impl ContractApproval {
+    /// Checks `spend` for `signer`: the template is on the wallet's list
+    /// (`viewJson.known`), the output was recomputed and is the coin's, the
+    /// chain's locks have passed, the key is the wallet's contract key the
+    /// path names (`viewJson.key_path`, by default `0/0` under
+    /// `m/8383h/{coin}h/0h`), and the program accepts the final transaction.
+    /// `viewJson` may also carry the registry's name for the template
+    /// (`registry: {name, version}`) and asset labels
+    /// (`assets: {"<id>": {ticker, precision}}`). Throws the first rule that fails.
+    pub fn prepare(
+        spend: &ContractSpend,
+        signer: &crate::Signer,
+        view_json: &str,
+    ) -> Result<ContractApproval, Error> {
+        let view: lwk_contracts::WalletView = serde_json::from_str(view_json)?;
+        if crate::contract_engine::chain_of_signer(signer) != spend.inner.chain {
+            return Err(Error::Generic(
+                "the signer is for another chain than the spend".into(),
+            ));
+        }
+        Ok(ContractApproval {
+            inner: lwk_contracts::Approval::prepare(spend.inner.clone(), view, &signer.inner)
+                .map_err(err)?,
+        })
+    }
+
+    /// What the wallet shows, as JSON: the template (by registry name, else
+    /// its root), the path, the parameters by role, the wallet's balance
+    /// change in every asset, the contract's, payments, the fee, the checks,
+    /// and the `digest` that `Signer.signContractSpend` takes back.
+    pub fn summary(&self) -> Result<String, Error> {
+        json(&self.inner.summary())
+    }
+
+    /// The digest of the summary.
+    pub fn digest(&self) -> String {
+        self.inner.digest().to_string()
+    }
+}
+
+/// The chain a signer was made for.
+pub(crate) fn chain_of_signer(signer: &crate::Signer) -> Chain {
+    Chain {
+        genesis: signer.network.genesis_hash(),
+        mainnet: signer.network.is_mainnet(),
+    }
+}

@@ -11,6 +11,7 @@
 //! `templates/` holds the templates the kit carries, copied from
 //! `sequentia-contracts` at the revision `templates/PIN.json` names.
 
+pub mod approval;
 pub mod budget;
 pub mod drip;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod known;
 pub mod spend;
 pub mod template;
 
+pub use approval::{Approval, AssetLabel, RegistryName, WalletView};
 pub use error::Error;
 pub use known::{known, KnownTemplate, KNOWN};
 pub use spend::{ChainFacts, CoinRequest, OutputRequest, Spend, SpendRequest};
