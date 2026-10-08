@@ -211,25 +211,35 @@ impl EsploraClient {
         &self,
         addresses: &[Address],
     ) -> Result<Vec<Vec<History>>, Error> {
-        let mut result = vec![];
-        for address in addresses.iter() {
-            let url = format!("{}/address/{}/txs", self.base_url, address);
-            // TODO must handle paging -> https://github.com/blockstream/esplora/blob/master/API.md#addresses
-            let response = self.get_with_retry(&url).await?;
+        // SEQUENTIA: up to `concurrency` address histories in flight at once, as get_transactions
+        // and get_headers already do. Upstream walks the batch one request after another, so a
+        // first scan (every used address plus the 20-address gap, per chain) costs one round trip
+        // per address: ~44 sequential requests, about 7 s for a fresh testnet wallet behind a
+        // 120 ms round trip, whatever concurrency the caller asked for. `buffered` (not
+        // `buffer_unordered`) keeps the results in address order, which get_history relies on to
+        // find the last used index.
+        let stream = iter(addresses.iter())
+            .map(|address| async move {
+                let url = format!("{}/address/{}/txs", self.base_url, address);
+                // TODO must handle paging -> https://github.com/blockstream/esplora/blob/master/API.md#addresses
+                let response = self.get_with_retry(&url).await?;
 
-            // TODO going through string and then json is not as efficient as it could be but we prioritize debugging for now
-            let text = response.text().await?;
-            let json: Vec<EsploraTx> = match serde_json::from_str(&text) {
-                Ok(e) => e,
-                Err(e) => {
-                    log::warn!("error {e:?} in converting following text:\n{text}");
-                    return Err(e.into());
-                }
-            };
-            let history: Vec<History> = json.into_iter().map(Into::into).collect();
-            result.push(history)
-        }
-        Ok(result)
+                // TODO going through string and then json is not as efficient as it could be but we prioritize debugging for now
+                let text = response.text().await?;
+                let json: Vec<EsploraTx> = match serde_json::from_str(&text) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        log::warn!("error {e:?} in converting following text:\n{text}");
+                        return Err(e.into());
+                    }
+                };
+                let history: Vec<History> = json.into_iter().map(Into::into).collect();
+                Ok::<Vec<History>, Error>(history)
+            })
+            .buffered(self.concurrency);
+
+        let results: Vec<Result<Vec<History>, Error>> = stream.collect().await;
+        results.into_iter().collect()
     }
 
     async fn get_scripts_history_waterfalls(
