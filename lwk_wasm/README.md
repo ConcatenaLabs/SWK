@@ -13,7 +13,8 @@
 > `buildCovenantFillTx()` / `buildCovenantRefundTx()` (SeqOB covenant orders),
 > `coinjoinSignInputs()` / `coinjoinUnblindOutputs()` (CoinJoin), the `Openamp`
 > client, `adaptor*` functions, and the contract engine (`ContractTemplate`,
-> `ContractInstance`, `ContractSpend`). See
+> `ContractInstance`, `ContractSpend`, `ContractApproval`,
+> `Signer.signContractSpend`). See
 > [SEQUENTIA.md](../SEQUENTIA.md). This fork is NOT published to npm (the
 > `lwk_wasm` npm package is upstream LWK): build `pkg/` yourself with
 > `./build-web.sh` (`wasm-pack build --target web --release` with the build
