@@ -207,29 +207,64 @@ impl EsploraClient {
         }
     }
 
+    /// Sequentia: the histories of `addresses`, in the same order, fetched `concurrency` at a time.
+    ///
+    /// A scan asks for one batch of addresses per call and each address is one round trip, so
+    /// walking them one after another made every sync cost a round trip per address in sequence:
+    /// about nine seconds for a small wallet against the public testnet. `buffered` keeps the
+    /// results in input order, which the caller pairs back to its scripts by position.
     async fn get_scripts_history_esplora(
         &self,
         addresses: &[Address],
     ) -> Result<Vec<Vec<History>>, Error> {
-        let mut result = vec![];
-        for address in addresses.iter() {
-            let url = format!("{}/address/{}/txs", self.base_url, address);
-            // TODO must handle paging -> https://github.com/blockstream/esplora/blob/master/API.md#addresses
-            let response = self.get_with_retry(&url).await?;
+        let results: Vec<Result<Vec<History>, Error>> = iter(addresses.iter())
+            .map(|address| self.get_address_history_esplora(address))
+            .buffered(self.concurrency.max(1))
+            .collect()
+            .await;
+        results.into_iter().collect()
+    }
 
-            // TODO going through string and then json is not as efficient as it could be but we prioritize debugging for now
-            let text = response.text().await?;
-            let json: Vec<EsploraTx> = match serde_json::from_str(&text) {
-                Ok(e) => e,
-                Err(e) => {
-                    log::warn!("error {e:?} in converting following text:\n{text}");
-                    return Err(e.into());
-                }
+    /// Sequentia: one address's whole history, following esplora's paging.
+    ///
+    /// `/address/:address/txs` answers the mempool transactions and the newest
+    /// `ESPLORA_CHAIN_PAGE` confirmed ones; older confirmed ones come from
+    /// `/address/:address/txs/chain/:last_seen_txid`, a page at a time. Reading only the first
+    /// page left an address with a longer history short of its older transactions, and the wallet
+    /// short of the coins they paid.
+    async fn get_address_history_esplora(&self, address: &Address) -> Result<Vec<History>, Error> {
+        let url = format!("{}/address/{}/txs", self.base_url, address);
+        let mut txs = self.get_esplora_txs(&url).await?;
+        let mut page_confirmed = txs
+            .iter()
+            .filter(|t| t.status.block_height.is_some())
+            .count();
+        while page_confirmed >= ESPLORA_CHAIN_PAGE {
+            let Some(last_seen) = txs.iter().rev().find(|t| t.status.block_height.is_some()) else {
+                break;
             };
-            let history: Vec<History> = json.into_iter().map(Into::into).collect();
-            result.push(history)
+            let url = format!(
+                "{}/address/{}/txs/chain/{}",
+                self.base_url, address, last_seen.txid
+            );
+            let page = self.get_esplora_txs(&url).await?;
+            page_confirmed = page.len();
+            txs.extend(page);
         }
-        Ok(result)
+        Ok(txs.into_iter().map(Into::into).collect())
+    }
+
+    async fn get_esplora_txs(&self, url: &str) -> Result<Vec<EsploraTx>, Error> {
+        let response = self.get_with_retry(url).await?;
+        // TODO going through string and then json is not as efficient as it could be but we prioritize debugging for now
+        let text = response.text().await?;
+        match serde_json::from_str(&text) {
+            Ok(e) => Ok(e),
+            Err(e) => {
+                log::warn!("error {e:?} in converting following text:\n{text}");
+                Err(e.into())
+            }
+        }
     }
 
     async fn get_scripts_history_waterfalls(
@@ -1137,6 +1172,9 @@ impl From<EsploraTx> for History {
     }
 }
 
+/// Confirmed transactions esplora returns per page of an address history.
+const ESPLORA_CHAIN_PAGE: usize = 25;
+
 #[derive(Deserialize)]
 struct EsploraTx {
     txid: elements::Txid,
@@ -1507,6 +1545,102 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    // A local esplora that answers by request path, from `pages` (path -> JSON body); 404 otherwise.
+    async fn serve_paths(pages: std::collections::HashMap<String, String>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let pages = pages.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let (status, body) = match pages.get(&path) {
+                        Some(b) => ("200 OK", b.clone()),
+                        None => ("404 Not Found", String::new()),
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    // An esplora `/address/.../txs` body: confirmed transactions with txids `range`, newest first.
+    fn esplora_txs(range: std::ops::Range<u32>) -> String {
+        let txs: Vec<String> = range
+            .map(|i| {
+                format!(
+                    r#"{{"txid":"{:064x}","status":{{"confirmed":true,"block_height":{}}}}}"#,
+                    i,
+                    1000 - i
+                )
+            })
+            .collect();
+        format!("[{}]", txs.join(","))
+    }
+
+    /// Esplora answers an address history 25 confirmed transactions at a time; the older ones come
+    /// from `/txs/chain/:last_seen_txid`. Reading only the first page lost them.
+    #[tokio::test]
+    async fn address_history_follows_esplora_paging() {
+        let script =
+            elements::Script::from_str("001414fe45f2c2a2b7c00d0940d694a3b6af6c9bf165").unwrap();
+        let address =
+            elements::Address::from_script(&script, None, Network::Liquid.address_params())
+                .unwrap();
+        let mut pages = std::collections::HashMap::new();
+        pages.insert(format!("/address/{address}/txs"), esplora_txs(0..25));
+        pages.insert(
+            format!("/address/{address}/txs/chain/{:064x}", 24),
+            esplora_txs(25..28),
+        );
+        let base = serve_paths(pages).await;
+        let client = EsploraClient::new(Network::Liquid, &base);
+
+        let histories = client.get_scripts_history(&[&script]).await.unwrap();
+        assert_eq!(histories.len(), 1);
+        assert_eq!(histories[0].len(), 28);
+    }
+
+    /// Histories are fetched several addresses at a time, and still come back in the order the
+    /// scripts were given: the caller pairs them back to its scripts by position.
+    #[tokio::test]
+    async fn scripts_history_keeps_order_when_concurrent() {
+        let s1 =
+            elements::Script::from_str("001414fe45f2c2a2b7c00d0940d694a3b6af6c9bf165").unwrap();
+        let s2 =
+            elements::Script::from_str("00140000000000000000000000000000000000000001").unwrap();
+        let a1 =
+            elements::Address::from_script(&s1, None, Network::Liquid.address_params()).unwrap();
+        let a2 =
+            elements::Address::from_script(&s2, None, Network::Liquid.address_params()).unwrap();
+        let mut pages = std::collections::HashMap::new();
+        pages.insert(format!("/address/{a1}/txs"), esplora_txs(0..1));
+        pages.insert(format!("/address/{a2}/txs"), esplora_txs(10..12));
+        let base = serve_paths(pages).await;
+        let client = crate::asyncr::EsploraClientBuilder::new(&base, Network::Liquid)
+            .concurrency(4)
+            .build()
+            .unwrap();
+
+        let histories = client.get_scripts_history(&[&s1, &s2]).await.unwrap();
+        assert_eq!(
+            histories.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 
     /// Regression test for the 422 carve-out in `get_with_retry`.
