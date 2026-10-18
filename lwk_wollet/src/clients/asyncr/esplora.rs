@@ -217,8 +217,10 @@ impl EsploraClient {
         &self,
         addresses: &[Address],
     ) -> Result<Vec<Vec<History>>, Error> {
-        let results: Vec<Result<Vec<History>, Error>> = iter(addresses.iter())
-            .map(|address| self.get_address_history_esplora(address))
+        // Addresses are moved into each future: a closure handing out a borrowed address cannot
+        // satisfy the higher-ranked bound a `Send` caller puts on it (lwk_boltz is one).
+        let results: Vec<Result<Vec<History>, Error>> = iter(addresses.iter().cloned())
+            .map(|address| async move { self.get_address_history_esplora(&address).await })
             .buffered(self.concurrency.max(1))
             .collect()
             .await;
