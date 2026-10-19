@@ -1026,6 +1026,8 @@ impl TxBuilder {
         set_genesis_hash(&mut pset, &self.network());
         let mut inp_txout_sec = HashMap::new();
         let mut last_unused_internal = wollet.last_unused_internal();
+        #[cfg(feature = "sequentia")]
+        let first_unused_internal = last_unused_internal;
         let mut last_unused_external = wollet.last_unused_external();
 
         let mut inp_weight = 0;
@@ -1217,16 +1219,31 @@ impl TxBuilder {
                 satoshi_in += utxo.unblinded.value;
             }
         } else {
+            // Sequentia: with the fee paid in another asset and nothing to send in the policy
+            // asset, no policy coin belongs in the transaction. Adding them all anyway (the
+            // FIXME below) spent every policy coin the wallet holds in every send, made the
+            // transaction larger and its fee higher, linked those coins together, and, when
+            // one of them was confidential, made the change confidential too. An issuance
+            // keeps them: it needs an input at index 0 to carry the issuance.
+            #[cfg(feature = "sequentia")]
+            let skip_policy = fee_in_asset.is_some()
+                && satoshi_out == 0
+                && matches!(self.issuance_request, IssuanceRequest::None)
+                && pset.n_inputs() > 0;
+            #[cfg(not(feature = "sequentia"))]
+            let skip_policy = false;
             // FIXME: For implementation simplicity now we always add all L-BTC inputs
-            for utxo in utxos.values().filter(|u| u.unblinded.asset == policy_asset) {
-                wollet.add_input(
-                    &mut pset,
-                    &mut inp_txout_sec,
-                    &mut inp_weight,
-                    utxo,
-                    self.add_input_rangeproofs,
-                )?;
-                satoshi_in += utxo.unblinded.value;
+            if !skip_policy {
+                for utxo in utxos.values().filter(|u| u.unblinded.asset == policy_asset) {
+                    wollet.add_input(
+                        &mut pset,
+                        &mut inp_txout_sec,
+                        &mut inp_weight,
+                        utxo,
+                        self.add_input_rangeproofs,
+                    )?;
+                    satoshi_in += utxo.unblinded.value;
+                }
             }
         }
 
@@ -1398,6 +1415,34 @@ impl TxBuilder {
             Output::new_explicit(Script::default(), temp_fee, fee_output_asset, None);
         pset.add_output(fee_output);
         let fee_output_idx = pset.n_outputs() - 1;
+
+        // Sequentia: change goes back in the clear when nothing this transaction spends is
+        // confidential. addressee_change blinds it as soon as the wallet holds any confidential
+        // coin, of any asset, because it runs before coin selection: one blinded coin received
+        // made every later change confidential, and an on-chain covenant fill cannot spend a
+        // confidential coin. A change output to this wallet's own internal address is made
+        // explicit again when every input is explicit; a recipient the caller asked to blind is
+        // left alone, and Elements needs no blinded output when no input is blinded.
+        #[cfg(feature = "sequentia")]
+        {
+            let any_confidential_input = inp_txout_sec.values().any(|s| {
+                s.asset_bf != AssetBlindingFactor::zero() || s.value_bf != ValueBlindingFactor::zero()
+            });
+            if !any_confidential_input {
+                let mut change_spks = HashSet::new();
+                for i in first_unused_internal..last_unused_internal {
+                    if let Ok(a) = wollet.change(Some(i)) {
+                        change_spks.insert(a.address().script_pubkey());
+                    }
+                }
+                for out in pset.outputs_mut() {
+                    if out.blinding_key.is_some() && change_spks.contains(&out.script_pubkey) {
+                        out.blinding_key = None;
+                        out.blinder_index = None;
+                    }
+                }
+            }
+        }
 
         let weight = {
             let mut rng = thread_rng();
