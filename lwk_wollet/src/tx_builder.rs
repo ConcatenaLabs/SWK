@@ -111,11 +111,17 @@ pub(crate) fn add_input_inner(
 
     let mut input = elements::pset::Input::from_prevout(outpoint);
 
-    input.asset = Some(unblinded.asset);
-    input.amount = Some(unblinded.value);
     if let (Some(value_comm), Some(asset_gen)) =
         (txout.value.commitment(), txout.asset.commitment())
     {
+        // The asset and amount fields of a confidential input, with the proofs that tie them to
+        // its commitments. An explicit input carries neither: its asset and value are in the
+        // clear in witness_utxo, and Elements refuses a PSET that states an input amount
+        // without a proof ("Input explicit value and value proof must be provided together"),
+        // which is how a node checking a channel funding PSET (decodepsbt) refused every one
+        // a wallet built from explicit coins.
+        input.asset = Some(unblinded.asset);
+        input.amount = Some(unblinded.value);
         // Add the blind proofs
         // These are used to prove that the asset and amount field commit to
         // the asset and value/amount commitment of the output that is being
