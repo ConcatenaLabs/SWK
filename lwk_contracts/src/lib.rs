@@ -32,4 +32,4 @@ pub use spend::{
 pub use template::{Contract, Instance, PathInfo, Template};
 
 /// The `sequentia-contracts` revision the reader and the known templates come from.
-pub const CONTRACTS_REVISION: &str = "e94ab98";
+pub const CONTRACTS_REVISION: &str = "f785065";

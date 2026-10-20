@@ -1,0 +1,325 @@
+{
+  "chains": [
+    {
+      "bech32_hrp": "tb",
+      "genesis": "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e",
+      "name": "sequentia-testnet"
+    },
+    {
+      "bech32_hrp": "ert",
+      "genesis": null,
+      "name": "elementsregtest"
+    }
+  ],
+  "descriptor": 2,
+  "measured": {
+    "source": "harness/records/l2.json",
+    "take": {
+      "budget_wu": 8326,
+      "cost_bound_wu": 1733,
+      "program_bytes": 1592,
+      "transaction": "the offer and a collateral coin; the vault, the offer's rest, the principal",
+      "vsize": 907,
+      "weight": 3626,
+      "witness_bytes": 371
+    }
+  },
+  "template": {
+    "budget": {
+      "max": 4000050,
+      "offset": 50,
+      "per_witness_byte": 4
+    },
+    "internal_key": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "name": "pignus/offer-threshold",
+    "params": [
+      {
+        "label": "Collateral asset",
+        "name": "COLL",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Debt asset",
+        "name": "DEBT_ASSET",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Oracle key 1 of three, distinct from the others; a key nobody holds fills a slot the loan does not use",
+        "name": "ORACLE_1",
+        "role": "pubkey",
+        "type": "Pubkey"
+      },
+      {
+        "label": "Oracle key 2 of three, distinct from the others; a key nobody holds fills a slot the loan does not use",
+        "name": "ORACLE_2",
+        "role": "pubkey",
+        "type": "Pubkey"
+      },
+      {
+        "label": "Oracle key 3 of three, distinct from the others; a key nobody holds fills a slot the loan does not use",
+        "name": "ORACLE_3",
+        "role": "pubkey",
+        "type": "Pubkey"
+      },
+      {
+        "label": "Oracle 1's beacon asset",
+        "name": "BEACON_ASSET_1",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Oracle 2's beacon asset",
+        "name": "BEACON_ASSET_2",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Oracle 3's beacon asset",
+        "name": "BEACON_ASSET_3",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "How many of the three oracles must attest a price, 1 to 3",
+        "name": "THRESHOLD",
+        "role": "number",
+        "type": "u8"
+      },
+      {
+        "label": "Precision of the oracle's price: price / 10^PRECISION debt atoms per collateral atom",
+        "name": "PRECISION",
+        "role": "number",
+        "type": "u8"
+      },
+      {
+        "label": "Liquidation threshold: the vault is unhealthy below this collateral ratio, in basis points",
+        "name": "LIQ_BP",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "Liquidation target: a liquidation restores the vault at most to this collateral ratio, in basis points",
+        "name": "TARGET_BP",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "Liquidation bonus: a liquidator seizes collateral worth at most this share of what it repays, in basis points",
+        "name": "BONUS_BP",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "Maturity: from this Unix time anyone may call the loan at an attested price",
+        "name": "MATURITY",
+        "role": "time",
+        "type": "u32"
+      },
+      {
+        "label": "Recovery: from this Unix time anyone may pay the whole collateral to the lender",
+        "name": "RECOVER_AFTER",
+        "role": "time",
+        "type": "u32"
+      },
+      {
+        "label": "Lender's payout script",
+        "name": "LENDER",
+        "role": "script_hash",
+        "type": "u256"
+      },
+      {
+        "label": "Principal a take draws, in the debt asset",
+        "name": "LOT",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "What a vault opened for one lot owes, in the debt asset",
+        "name": "DEBT",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Least collateral a vault opened for one lot holds",
+        "name": "COLLATERAL",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "From this Unix time anyone may return the offer to the lender",
+        "name": "EXPIRY",
+        "role": "time",
+        "type": "u32"
+      }
+    ],
+    "paths": [
+      {
+        "effect": "Output 2k is a pignus/vault-threshold version 1 on these terms, the borrower's payout script hash given in the witness, owing DEBT, its LAST_TIME the transaction's lock time, holding at least COLLATERAL of COLL; exactly LOT of DEBT_ASSET leaves this coin and the rest is paid to this script at output 2k+1. This coin is input k.",
+        "leaf": "offer",
+        "name": "take",
+        "who": "anyone"
+      },
+      {
+        "effect": "Once the lock time reaches EXPIRY, pays the lender at output 2k at least the whole coin. This coin is input k.",
+        "leaf": "offer",
+        "name": "refund",
+        "who": "anyone"
+      }
+    ],
+    "slots": [],
+    "summary": "A lender's principal at rest: anyone takes one lot by opening a Pignus vault under a threshold of three oracles on the offer's terms with enough collateral, the rest resting again; after expiry anyone returns it to the lender.",
+    "tree": {
+      "branch": [
+        {
+          "leaf": "offer",
+          "simplicity": {
+            "cmr": "1d31ebc5104f93e3c514059cdd1150c539d5ad03d805c4c285d5e650c066c88d",
+            "compiler": {
+              "name": "simplicityhl",
+              "version": "0.7.2"
+            },
+            "max_cost_wu": 1733,
+            "source": "pignus_offer_threshold.simf",
+            "source_sha256": "8eb5ca758439cadba1210e8582397ebb3f7b0148dffdcc834cd9cad77ee034ec",
+            "witness": [
+              {
+                "name": "COLL",
+                "source": "param:COLL",
+                "type": "u256"
+              },
+              {
+                "name": "DEBT_ASSET",
+                "source": "param:DEBT_ASSET",
+                "type": "u256"
+              },
+              {
+                "name": "ORACLE_1",
+                "source": "param:ORACLE_1",
+                "type": "Pubkey"
+              },
+              {
+                "name": "ORACLE_2",
+                "source": "param:ORACLE_2",
+                "type": "Pubkey"
+              },
+              {
+                "name": "ORACLE_3",
+                "source": "param:ORACLE_3",
+                "type": "Pubkey"
+              },
+              {
+                "name": "BEACON_ASSET_1",
+                "source": "param:BEACON_ASSET_1",
+                "type": "u256"
+              },
+              {
+                "name": "BEACON_ASSET_2",
+                "source": "param:BEACON_ASSET_2",
+                "type": "u256"
+              },
+              {
+                "name": "BEACON_ASSET_3",
+                "source": "param:BEACON_ASSET_3",
+                "type": "u256"
+              },
+              {
+                "name": "THRESHOLD",
+                "source": "param:THRESHOLD",
+                "type": "u8"
+              },
+              {
+                "name": "PRECISION",
+                "source": "param:PRECISION",
+                "type": "u8"
+              },
+              {
+                "name": "LIQ_BP",
+                "source": "param:LIQ_BP",
+                "type": "u32"
+              },
+              {
+                "name": "TARGET_BP",
+                "source": "param:TARGET_BP",
+                "type": "u32"
+              },
+              {
+                "name": "BONUS_BP",
+                "source": "param:BONUS_BP",
+                "type": "u32"
+              },
+              {
+                "name": "MATURITY",
+                "source": "param:MATURITY",
+                "type": "u32"
+              },
+              {
+                "name": "RECOVER_AFTER",
+                "source": "param:RECOVER_AFTER",
+                "type": "u32"
+              },
+              {
+                "name": "LENDER",
+                "source": "param:LENDER",
+                "type": "u256"
+              },
+              {
+                "name": "LOT",
+                "source": "param:LOT",
+                "type": "u64"
+              },
+              {
+                "name": "DEBT",
+                "source": "param:DEBT",
+                "type": "u64"
+              },
+              {
+                "name": "COLLATERAL",
+                "source": "param:COLLATERAL",
+                "type": "u64"
+              },
+              {
+                "name": "EXPIRY",
+                "source": "param:EXPIRY",
+                "type": "u32"
+              },
+              {
+                "name": "PATH",
+                "source": "spender",
+                "type": "Either<u256, ()>"
+              }
+            ]
+          }
+        },
+        {
+          "data": [
+            "COLL",
+            "DEBT_ASSET",
+            "ORACLE_1",
+            "ORACLE_2",
+            "ORACLE_3",
+            "BEACON_ASSET_1",
+            "BEACON_ASSET_2",
+            "BEACON_ASSET_3",
+            "THRESHOLD",
+            "PRECISION",
+            "LIQ_BP",
+            "TARGET_BP",
+            "BONUS_BP",
+            "MATURITY",
+            "RECOVER_AFTER",
+            "LENDER",
+            "LOT",
+            "DEBT",
+            "COLLATERAL",
+            "EXPIRY"
+          ],
+          "leaf": "terms"
+        }
+      ]
+    },
+    "version": 1
+  },
+  "template_hash": "c8d981f09b6bd60b52e152a093ed54070e76fe82b305ca02a43c568e81e1e811"
+}

@@ -4071,7 +4071,7 @@ dependencies = [
 [[package]]
 name = "sequentia-contracts"
 version = "0.1.0"
-source = "git+https://github.com/ConcatenaLabs/sequentia-contracts?rev=e94ab98#e94ab989ee1d143a2806a3e0dd1fc59cb795570d"
+source = "git+https://github.com/ConcatenaLabs/sequentia-contracts?rev=f785065#f785065e4b224b7d69af9a1e0d0a8fd3dfcaafd8"
 dependencies = [
  "secp256k1 0.29.1",
  "serde",
