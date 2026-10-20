@@ -1,0 +1,338 @@
+/* The capped sale: a covenant that sells a token at a fixed price, only to the
+ * buyers on an allocation list, each up to the cap the list gives them.
+ *
+ * The output is
+ *
+ *     P2TR(NUMS, TapBranch(TapBranch(TapLeaf_0xbe(CMR), H_TapData(params ‖ state)), reclaim))
+ *
+ * with `reclaim` a tapscript leaf, `<CLOSE> OP_CHECKLOCKTIMEVERIFY OP_DROP
+ * <PROJECT_KEY> OP_CHECKSIG`, by which the project takes what is left after
+ * the close. This program is the purchase. Its parameters and its state sit in
+ * the data leaf beside it, in this order:
+ *
+ *   TOKEN        the asset sold, the coin's own asset
+ *   PAY_ASSET    the asset a purchase is paid in
+ *   PRICE_NUM    the price: PRICE_NUM atoms of PAY_ASSET ...
+ *   PRICE_DEN    ... for every PRICE_DEN atoms of TOKEN
+ *   TREASURY     SHA256 of the scriptPubKey that receives the payments
+ *   MIN_LOT      the least a purchase buys, and the least a remainder holds
+ *   ALLOCATIONS  state: the root of the allocation tree
+ *
+ * The allocation tree is a Merkle tree of 16 levels (helpers/merkle.simf). Leaf
+ * i is merkle_leaf(SHA256(key_i ‖ cap_i ‖ bought_i)): a buyer's x-only key, the
+ * most that buyer may buy, and what the buyer has bought so far, the last two
+ * as 8-byte big-endian atoms of TOKEN. An unused position holds the leaf of a
+ * zero key with a zero cap, which nothing can buy through. The sale starts with
+ * every `bought` at zero, so its first state is the allocation list's root.
+ *
+ * A purchase of AMOUNT by the buyer at one position:
+ *   - the buyer shows their leaf (BUYER_KEY, CAP, BOUGHT) and its proof against
+ *     ALLOCATIONS, and signs the whole transaction with BUYER_KEY;
+ *   - BOUGHT + AMOUNT may not exceed CAP, and AMOUNT is at least MIN_LOT;
+ *   - the coin holds TOKEN, explicitly: anything else at the address is never
+ *     sold;
+ *   - the coin is input k, for any k. Output 2k pays TREASURY at least
+ *     ceil(AMOUNT × PRICE_NUM / PRICE_DEN) of PAY_ASSET, explicitly, the
+ *     product kept at 128 bits so no price or amount overflows;
+ *   - unless AMOUNT is the whole coin, output 2k+1 re-creates the coin: this
+ *     program and parameters with the next state, exactly the rest of the
+ *     token, explicitly and with no nonce, and the rest is at least MIN_LOT.
+ *     The next state is the root of the same tree with only this buyer's
+ *     `bought` raised by AMOUNT: the one proof folds both roots, so no other
+ *     leaf, and no cap, can change.
+ * The buyer's signature is BIP340 over jet::sig_all_hash(), which commits to
+ * the chain, every input and output and this leaf, so it authorises exactly
+ * this purchase. Outputs other than 2k and 2k+1 are the buyer's.
+ */
+/* Output reader.
+ *
+ * The asset, amount and script of an output, refusing an output that does not
+ * exist or whose asset or amount is confidential: a covenant can only police
+ * what it can read. Asset ids are in internal byte order, the reverse of the
+ * hex an RPC prints. Include with `// include output_reader`.
+ */
+
+/* (asset id, amount, SHA256 of the scriptPubKey) of output i. */
+fn out_explicit(i: u32) -> (u256, u64, u256) {
+    let (asset, amount): (Asset1, Amount1) = unwrap(jet::output_amount(i));
+    let id: u256 = match asset {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u256) => explicit,
+    };
+    let value: u64 = match amount {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u64) => explicit,
+    };
+    (id, value, unwrap(jet::output_script_hash(i)))
+}
+
+/* Output i carries no nonce. An explicit output's nonce field is empty unless
+ * someone put data there, such as a blinding key; a covenant that pins an
+ * output pins this field too. */
+fn out_no_nonce(i: u32) {
+    assert!(is_none::<Nonce>(unwrap(jet::output_nonce(i))));
+}
+
+/* Output i pays exactly `amount` of `asset` to the script whose hash is
+ * `script_hash`, explicitly and with no nonce. */
+fn out_require(i: u32, asset: u256, amount: u64, script_hash: u256) {
+    let (id, value, script): (u256, u64, u256) = out_explicit(i);
+    assert!(jet::eq_256(id, asset));
+    assert!(jet::eq_64(value, amount));
+    assert!(jet::eq_256(script, script_hash));
+    out_no_nonce(i);
+}
+
+/* (asset id, amount) of the input being spent, refusing a confidential one. */
+fn in_explicit_current() -> (u256, u64) {
+    let (asset, amount): (Asset1, Amount1) = jet::current_amount();
+    let id: u256 = match asset {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u256) => explicit,
+    };
+    let value: u64 = match amount {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u64) => explicit,
+    };
+    (id, value)
+}
+/* Wide arithmetic: 128-bit products, sums and comparisons from 64-bit jets.
+ *
+ * Signed 64-bit script arithmetic fails on overflow; these helpers keep the
+ * full product and refuse any result that does not fit, so a contract never
+ * wraps silently. Include with `// include wide_arith`.
+ */
+
+/* a * b, all 128 bits. */
+fn wide_mul(a: u64, b: u64) -> u128 {
+    jet::multiply_64(a, b)
+}
+
+/* a + b; refuses a sum that does not fit in 128 bits. */
+fn wide_add(a: u128, b: u128) -> u128 {
+    let (ah, al): (u64, u64) = <u128>::into(a);
+    let (bh, bl): (u64, u64) = <u128>::into(b);
+    let (carry, lo): (bool, u64) = jet::add_64(al, bl);
+    let (overflow, hi): (bool, u64) = jet::full_add_64(carry, ah, bh);
+    match overflow {
+        true => panic!(),
+        false => <(u64, u64)>::into((hi, lo)),
+    }
+}
+
+/* a < b. */
+fn wide_lt(a: u128, b: u128) -> bool {
+    let (ah, al): (u64, u64) = <u128>::into(a);
+    let (bh, bl): (u64, u64) = <u128>::into(b);
+    match jet::eq_64(ah, bh) {
+        true => jet::lt_64(al, bl),
+        false => jet::lt_64(ah, bh),
+    }
+}
+
+/* a <= b. */
+fn wide_le(a: u128, b: u128) -> bool {
+    match wide_lt(b, a) {
+        true => false,
+        false => true,
+    }
+}
+
+/* a - b; refuses a difference below zero. */
+fn wide_sub(a: u128, b: u128) -> u128 {
+    let (ah, al): (u64, u64) = <u128>::into(a);
+    let (bh, bl): (u64, u64) = <u128>::into(b);
+    let (borrow, lo): (bool, u64) = jet::subtract_64(al, bl);
+    let (underflow, hi): (bool, u64) = jet::full_subtract_64(borrow, ah, bh);
+    match underflow {
+        true => panic!(),
+        false => <(u64, u64)>::into((hi, lo)),
+    }
+}
+
+/* Checks that q = floor(a * b / c) and returns it. The spender supplies q;
+ * the helper checks q * c <= a * b < (q + 1) * c with the product kept at 128
+ * bits, which refuses c = 0.
+ *
+ * Division is verified rather than computed because jet::div_mod_128_64 is
+ * defined only for a divisor of at least 2^63 whose quotient fits in 64 bits;
+ * outside that it returns all ones. A division by an ordinary scale, such as
+ * 10^8, therefore cannot use it directly. */
+fn wide_mul_div(a: u64, b: u64, c: u64, q: u64) -> u64 {
+    let remainder: u128 = wide_sub(jet::multiply_64(a, b), jet::multiply_64(q, c));
+    let (rh, rl): (u64, u64) = <u128>::into(remainder);
+    assert!(jet::eq_64(rh, 0));
+    assert!(jet::lt_64(rl, c));
+    q
+}
+/* Merkle fold of a fixed depth.
+ *
+ * A leaf is SHA256(0x00 || data) and an inner node SHA256(0x01 || left || right):
+ * the distinct prefixes keep a leaf from passing for a node. A proof is one
+ * (sibling, sibling_is_left) pair per level, leaf first. The depth is the
+ * array's length, fixed by the template; array_fold unrolls it, so a proof
+ * costs the same at every position. Include with `// include merkle`.
+ */
+
+fn merkle_leaf(data: u256) -> u256 {
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, 0x00);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, data);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+fn merkle_node(left: u256, right: u256) -> u256 {
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, 0x01);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, left);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, right);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+/* One level: hash the running node with its sibling, on the sibling's side. */
+fn merkle_step(step: (u256, bool), node: u256) -> u256 {
+    let (sibling, sibling_is_left): (u256, bool) = step;
+    match sibling_is_left {
+        true => merkle_node(sibling, node),
+        false => merkle_node(node, sibling),
+    }
+}
+
+/* The root over a leaf hash and an 8-level proof. */
+fn merkle_root_8(leaf: u256, proof: [(u256, bool); 8]) -> u256 {
+    array_fold::<merkle_step, 8>(proof, leaf)
+}
+
+/* The root over a leaf hash and a 16-level proof. */
+fn merkle_root_16(leaf: u256, proof: [(u256, bool); 16]) -> u256 {
+    array_fold::<merkle_step, 16>(proof, leaf)
+}
+
+/* One level of an update: the running nodes of the old and the new tree,
+ * hashed with one shared sibling on its side. */
+fn merkle_update_step(step: (u256, bool), nodes: (u256, u256)) -> (u256, u256) {
+    let (sibling, sibling_is_left): (u256, bool) = step;
+    let (old, new): (u256, u256) = nodes;
+    match sibling_is_left {
+        true => (merkle_node(sibling, old), merkle_node(sibling, new)),
+        false => (merkle_node(old, sibling), merkle_node(new, sibling)),
+    }
+}
+
+/* The roots before and after one leaf of a 16-level tree changes: one proof
+ * folds both, so every other leaf is the same in the two trees. */
+fn merkle_update_16(old_leaf: u256, new_leaf: u256, proof: [(u256, bool); 16]) -> (u256, u256) {
+    array_fold::<merkle_update_step, 16>(proof, (old_leaf, new_leaf))
+}
+
+/* The data leaf's hash over the parameters and the state, in the template's order. */
+fn data_leaf(assets: (u256, u256), price: (u64, u64), treasury: u256, min_lot: u64, root: u256) -> u256 {
+    let (token, pay): (u256, u256) = assets;
+    let (num, den): (u64, u64) = price;
+    let ctx: Ctx8 = jet::tapdata_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, token);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, pay);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, num);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, den);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, treasury);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, min_lot);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, root);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+/* SHA256 of the scriptPubKey of this sale holding `root`: the same program
+ * and parameters, the same reclaim leaf, the next state. */
+fn successor_script(assets: (u256, u256), price: (u64, u64), treasury: u256, min_lot: u64, root: u256, reclaim: u256) -> u256 {
+    let inner: u256 = jet::build_tapbranch(jet::tapleaf_hash(), data_leaf(assets, price, treasury, min_lot, root));
+    let key: u256 = jet::build_taptweak(jet::internal_key(), jet::build_tapbranch(inner, reclaim));
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_2(ctx, 0x5120);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, key);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+/* A buyer's leaf: merkle_leaf(SHA256(key ‖ cap ‖ bought)). */
+fn allocation_leaf(key: Pubkey, cap: u64, bought: u64) -> u256 {
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, key);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, cap);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, bought);
+    merkle_leaf(jet::sha_256_ctx_8_finalize(ctx))
+}
+
+/* a + b; refuses a sum that overflows. */
+fn plus(a: u64, b: u64) -> u64 {
+    let (carry, s): (bool, u64) = jet::add_64(a, b);
+    assert!(jet::eq_1(<bool>::into(carry), 0));
+    s
+}
+
+/* a + b for an output index; refuses a sum that overflows. */
+fn plus_32(a: u32, b: u32) -> u32 {
+    let (carry, s): (bool, u32) = jet::add_32(a, b);
+    assert!(jet::eq_1(<bool>::into(carry), 0));
+    s
+}
+
+/* a - b; refuses a difference below zero. */
+fn minus(a: u64, b: u64) -> u64 {
+    let (borrow, d): (bool, u64) = jet::subtract_64(a, b);
+    assert!(jet::eq_1(<bool>::into(borrow), 0));
+    d
+}
+
+fn main() {
+    let assets: (u256, u256) = (witness::TOKEN, witness::PAY_ASSET);
+    let price: (u64, u64) = (witness::PRICE_NUM, witness::PRICE_DEN);
+    let treasury: u256 = witness::TREASURY;
+    let min_lot: u64 = witness::MIN_LOT;
+    let root: u256 = witness::ALLOCATIONS;
+    let (token, pay): (u256, u256) = assets;
+    let (num, den): (u64, u64) = price;
+
+    // The parameters and the state are the data leaf's, and the tree is the
+    // template's: this leaf and the data leaf, under one more leaf.
+    assert!(jet::eq_256(data_leaf(assets, price, treasury, min_lot, root), unwrap(jet::tappath(0))));
+    let reclaim: u256 = unwrap(jet::tappath(1));
+    assert!(is_none::<u256>(jet::tappath(2)));
+
+    // The coin holds the token, explicitly.
+    let (held, value): (u256, u64) = in_explicit_current();
+    assert!(jet::eq_256(held, token));
+
+    // The buyer's allocation, and the cap.
+    let key: Pubkey = witness::BUYER_KEY;
+    let cap: u64 = witness::CAP;
+    let bought: u64 = witness::BOUGHT;
+    let amount: u64 = witness::AMOUNT;
+    assert!(jet::le_64(min_lot, amount));
+    let bought_next: u64 = plus(bought, amount);
+    assert!(jet::le_64(bought_next, cap));
+    let (old_root, new_root): (u256, u256) =
+        merkle_update_16(allocation_leaf(key, cap, bought), allocation_leaf(key, cap, bought_next), witness::PROOF);
+    assert!(jet::eq_256(old_root, root));
+
+    // Covenant input k owns outputs 2k and 2k+1.
+    let k: u32 = jet::current_index();
+    let credit: u32 = plus_32(k, k);
+    let rest_at: u32 = plus_32(credit, 1);
+
+    // The payment: at least ceil(amount × num / den) of PAY_ASSET to TREASURY.
+    let (paid_asset, paid, paid_script): (u256, u64, u256) = out_explicit(credit);
+    assert!(jet::eq_256(paid_asset, pay));
+    assert!(jet::eq_256(paid_script, treasury));
+    out_no_nonce(credit);
+    assert!(wide_le(wide_mul(amount, num), wide_mul(paid, den)));
+
+    // The rest of the token rests again in the next state, unless none is left.
+    let rest: u64 = minus(value, amount);
+    match jet::eq_64(rest, 0) {
+        true => (),
+        false => {
+            assert!(jet::le_64(min_lot, rest));
+            out_require(rest_at, token, rest, successor_script(assets, price, treasury, min_lot, new_root, reclaim));
+        },
+    };
+
+    jet::bip_0340_verify((key, jet::sig_all_hash()), witness::BUYER_SIG);
+}

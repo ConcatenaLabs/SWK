@@ -1,0 +1,247 @@
+{
+  "descriptor": 2,
+  "template": {
+    "budget": {
+      "max": 4000050,
+      "offset": 50,
+      "per_witness_byte": 4
+    },
+    "internal_key": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "name": "sequentia/capped-sale",
+    "params": [
+      {
+        "label": "Token sold, the coin's own asset",
+        "name": "TOKEN",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Asset a purchase is paid in",
+        "name": "PAY_ASSET",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Price: atoms of the payment asset per PRICE_DEN atoms of the token",
+        "name": "PRICE_NUM",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Atoms of the token the price is quoted for",
+        "name": "PRICE_DEN",
+        "role": "number",
+        "type": "u64"
+      },
+      {
+        "label": "SHA256 of the scriptPubKey that receives every payment",
+        "name": "TREASURY",
+        "role": "script_hash",
+        "type": "u256"
+      },
+      {
+        "label": "Least a purchase buys and least a remainder holds, in the token",
+        "name": "MIN_LOT",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Close: a block height below 500,000,000, or a unix time at or above it, after which the project reclaims",
+        "name": "CLOSE",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "Project key, which reclaims what is left after the close",
+        "name": "PROJECT_KEY",
+        "role": "pubkey",
+        "type": "Pubkey"
+      }
+    ],
+    "paths": [
+      {
+        "effect": "Buys AMOUNT of TOKEN, at least MIN_LOT, for a buyer on the allocation list, who shows their leaf (key, cap, amount bought) and its 16-level proof against ALLOCATIONS and signs the whole transaction with that key (BUYER_SIG, BIP340 over sig_all_hash). The amount bought plus AMOUNT may not exceed the cap. The coin must hold TOKEN explicitly. With the coin at input k, output 2k pays TREASURY at least ceil(AMOUNT x PRICE_NUM / PRICE_DEN) of PAY_ASSET explicitly, and unless AMOUNT is the whole coin, output 2k+1 re-creates the sale with exactly the rest, at least MIN_LOT, in the state whose tree differs only in this buyer's amount bought, raised by AMOUNT.",
+        "leaf": "sale",
+        "name": "purchase",
+        "who": "a buyer on the allocation list"
+      },
+      {
+        "effect": "Spends the coin into any transaction PROJECT_KEY signs once CLOSE has passed: an absolute lock (OP_CHECKLOCKTIMEVERIFY), a height or a time as CLOSE is one. The close does not stop purchases; until the project reclaims, a buyer within their cap can still buy.",
+        "leaf": "reclaim",
+        "name": "reclaim",
+        "who": "the holder of PROJECT_KEY"
+      }
+    ],
+    "slots": [
+      {
+        "label": "Root of the allocation tree: each buyer's key, cap and amount bought",
+        "name": "ALLOCATIONS",
+        "role": "hash",
+        "type": "u256"
+      }
+    ],
+    "summary": "Sells a token at a fixed price to the buyers on an allocation list, each up to their cap, with every buyer's running total carried in the coin's state; the project takes what is left after the close.",
+    "tree": {
+      "branch": [
+        {
+          "branch": [
+            {
+              "leaf": "sale",
+              "simplicity": {
+                "cmr": "f0f4d36070868cddd059d538f188c27a79a0ce83e908ada7bf2b0be89d64532e",
+                "compiler": {
+                  "name": "simplicityhl",
+                  "version": "0.7.2"
+                },
+                "max_cost_wu": 2225,
+                "source": "capped_sale.simf",
+                "source_sha256": "e1ced324833b41a53117002c1fd6093c6a0cb1e9d7bedf058da5243b20da4dca",
+                "witness": [
+                  {
+                    "name": "TOKEN",
+                    "source": "param:TOKEN",
+                    "type": "u256"
+                  },
+                  {
+                    "name": "PAY_ASSET",
+                    "source": "param:PAY_ASSET",
+                    "type": "u256"
+                  },
+                  {
+                    "name": "PRICE_NUM",
+                    "source": "param:PRICE_NUM",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "PRICE_DEN",
+                    "source": "param:PRICE_DEN",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "TREASURY",
+                    "source": "param:TREASURY",
+                    "type": "u256"
+                  },
+                  {
+                    "name": "MIN_LOT",
+                    "source": "param:MIN_LOT",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "ALLOCATIONS",
+                    "source": "slot:ALLOCATIONS",
+                    "type": "u256"
+                  },
+                  {
+                    "name": "BUYER_KEY",
+                    "source": "spender",
+                    "type": "Pubkey"
+                  },
+                  {
+                    "name": "CAP",
+                    "source": "spender",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "BOUGHT",
+                    "source": "spender",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "AMOUNT",
+                    "source": "spender",
+                    "type": "u64"
+                  },
+                  {
+                    "name": "PROOF",
+                    "source": "spender",
+                    "type": "[(u256, bool); 16]"
+                  },
+                  {
+                    "name": "BUYER_SIG",
+                    "source": "spender",
+                    "type": "Signature"
+                  }
+                ]
+              }
+            },
+            {
+              "data": [
+                "TOKEN",
+                "PAY_ASSET",
+                "PRICE_NUM",
+                "PRICE_DEN",
+                "TREASURY",
+                "MIN_LOT",
+                "ALLOCATIONS"
+              ],
+              "leaf": "state"
+            }
+          ]
+        },
+        {
+          "leaf": "reclaim",
+          "tapscript": [
+            {
+              "num": "CLOSE"
+            },
+            "b175",
+            {
+              "push": "PROJECT_KEY"
+            },
+            "ac"
+          ]
+        }
+      ]
+    },
+    "version": 1
+  },
+  "template_hash": "9406d4247e602c013533c273316c0ab319ed41019aac59d39b102e8710556692",
+  "chains": [
+    {
+      "name": "sequentia-testnet",
+      "genesis": "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e",
+      "bech32_hrp": "tb"
+    },
+    {
+      "name": "elementsregtest",
+      "genesis": null,
+      "bech32_hrp": "ert"
+    }
+  ],
+  "measured": {
+    "source": "harness/records/c1.json",
+    "purchase": {
+      "transaction": "the sale at input 0, the buyer's payment coin and a fee coin in a third asset; the payment, the rest, the buyer's tokens, the payment change, the fee change and the fee",
+      "vsize": 1233,
+      "weight": 4931,
+      "program_bytes": 1692,
+      "witness_bytes": 786,
+      "cost_bound_wu": 2225,
+      "budget_wu": 10514
+    },
+    "purchase_at_input_1": {
+      "transaction": "the same with the sale at input 1, so the payment at output 2 and the rest at output 3",
+      "vsize": 1228,
+      "weight": 4909,
+      "program_bytes": 1670,
+      "witness_bytes": 786,
+      "cost_bound_wu": 2225,
+      "budget_wu": 10426
+    },
+    "full_buy": {
+      "transaction": "a purchase of the whole coin: no rest, output 1 the payment change",
+      "vsize": 1076,
+      "weight": 4303,
+      "program_bytes": 1378,
+      "witness_bytes": 786,
+      "cost_bound_wu": 1896,
+      "budget_wu": 9258
+    },
+    "reclaim": {
+      "transaction": "the reclaim leaf spending one coin after the close, a fee coin; the coin's value, the fee change and the fee",
+      "vsize": 342,
+      "weight": 1367
+    }
+  }
+}

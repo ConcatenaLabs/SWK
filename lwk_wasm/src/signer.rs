@@ -228,6 +228,29 @@ impl Signer {
         Ok(lwk_wollet::elements::encode::serialize_hex(&tx))
     }
 
+    /// A statement signed with this wallet's contract key
+    /// (`m/8383h/{coin}h/0h/0/0`): BIP340 over the tagged hash
+    /// `sha256(sha256(tag) || sha256(tag) || message)`, as `{signature,
+    /// xonly}` JSON. It proves the key to a platform that names it in a
+    /// contract. Reserved tags (`tap…`, `bip340…`, `sequentia/…`, anything
+    /// with `sighash`) are refused, so the signature cannot stand for a spend.
+    #[wasm_bindgen(js_name = contractSignTagged)]
+    pub fn contract_sign_tagged(&self, tag: &str, message_hex: &str) -> Result<String, Error> {
+        use lwk_wollet::elements::hex::FromHex;
+        let message = Vec::<u8>::from_hex(message_hex)
+            .map_err(|e| Error::Generic(format!("invalid message hex: {e}")))?;
+        let mainnet = self.network.is_mainnet();
+        let (signature, xonly) = lwk_contracts::statement::sign(
+            &self.inner,
+            mainnet,
+            &lwk_contracts::spend::default_contract_key_path(mainnet),
+            tag,
+            &message,
+        )
+        .map_err(|e| Error::Generic(e.to_string()))?;
+        Ok(serde_json::json!({ "signature": signature, "xonly": xonly }).to_string())
+    }
+
     /// The genesis hash (display hex) of the network this signer was made for.
     #[wasm_bindgen(js_name = genesisHash)]
     pub fn genesis_hash(&self) -> String {

@@ -289,6 +289,15 @@ fn summarize(
             "the coin is not the contract's output".into(),
         ));
     }
+    for (i, c) in &spend.siblings {
+        if c.template.hash() != template.hash()
+            || spend.prevouts[*i].script_pubkey != c.script_pubkey()
+        {
+            return Err(Error::Signing(format!(
+                "input {i} is not an output of its instance of this template"
+            )));
+        }
+    }
     for o in &spend.opened {
         if spend.tx.output[o.output].script_pubkey != o.contract.script_pubkey() {
             return Err(Error::Signing(format!(
@@ -332,6 +341,30 @@ fn summarize(
                 inputs.push(json!({"index": r.index, "is": "contract", "coin": r.coin, "asset": r.asset, "amount": r.amount,
                     "shown": format!("the contract's coin, {held}"), "sequence": format!("{:#010x}", r.sequence),
                     "checked_against_chain": spend.chain_checked.contains(&r.index)}));
+            }
+            "sibling" => {
+                *contract_change.entry(r.asset.clone()).or_default() -= a;
+                let c = &spend
+                    .siblings
+                    .iter()
+                    .find(|(i, _)| *i == r.index)
+                    .expect("a sibling input")
+                    .1;
+                let differs: Vec<String> = c
+                    .instance
+                    .params
+                    .iter()
+                    .filter(|(k, v)| contract.instance.params.get(*k) != Some(*v))
+                    .map(|(k, v)| format!("{k} = {v}"))
+                    .collect();
+                inputs.push(json!({"index": r.index, "is": "sibling", "coin": r.coin, "asset": r.asset, "amount": r.amount,
+                    "script_pubkey": r.script_pubkey, "sequence": format!("{:#010x}", r.sequence),
+                    "checked_against_chain": spend.chain_checked.contains(&r.index),
+                    "differs": differs,
+                    "shown": format!("another coin of this template, {held}, at {} (derived by the engine from its instance, which differs from the contract's only in {}), spent by the same path {} and signed with the same key",
+                        r.script_pubkey,
+                        if differs.is_empty() { "nothing: the same instance".to_string() } else { differs.join(", ") },
+                        spend.path.name)}));
             }
             "wallet" => {
                 *wallet.entry(r.asset.clone()).or_default() -= a;
@@ -439,9 +472,26 @@ fn summarize(
             )
         })
         .collect();
+    let signed_inputs: Vec<usize> = std::iter::once(spend.k)
+        .chain(spend.siblings.iter().map(|(i, _)| *i))
+        .collect();
+    let spender_key = crate::known::spender_key(template.hash(), &spend.path.name);
     let five = match &key {
         Some((_, param)) => format!(
-            "{param} is this wallet's contract key at {key_path}{}",
+            "{param} is this wallet's contract key at {key_path}{}{}{}",
+            match spender_key {
+                Some((sig, k)) => format!(
+                    ", named by the spender as {k}: {sig} is this wallet's BIP340 signature over the program's sig_all_hash, which commits to the chain, this leaf, every input and every output, so it is the buyer's signature over this purchase and no other"
+                ),
+                None => String::new(),
+            },
+            if signed_inputs.len() > 1 {
+                format!(
+                    "; it signs inputs {signed_inputs:?}, each coin of this template its own signature over this whole transaction"
+                )
+            } else {
+                String::new()
+            },
             if wallet_inputs.is_empty() {
                 String::new()
             } else {
@@ -468,6 +518,9 @@ fn summarize(
     } else {
         format!("the contract's input {} is a tapscript leaf: no program to run; its script is recomputed from the template", spend.k)
     }];
+    for (i, _) in &spend.siblings {
+        ran.push(format!("input {i} is a tapscript leaf of the same template, its script recomputed from its own instance"));
+    }
     for (j, c, b) in &finalized.foreign_runs {
         ran.push(format!("input {j}'s program, as its witness gives it, ran against the final transaction: cost {c} milli-WU of a {b} WU budget"));
     }
@@ -519,6 +572,7 @@ fn summarize(
             "change": contract_shown,
         },
         "inputs": inputs,
+        "reading": reading(spend, view, our_key.as_deref())?,
         "wallet_change": wallet_change,
         "payments": payments,
         "opens": opens,
@@ -534,7 +588,8 @@ fn summarize(
                 format!("{} is on this wallet's list, and so is every template an output opens ({})", template.hash(),
                     spend.opened.iter().map(|o| o.contract.template.hash().to_string()).collect::<Vec<_>>().join(", "))
             },
-            "2_output_recomputed": format!("the engine derived {} from the template and the instance; the coin pays it{}", contract.derived.script_pubkey,
+            "2_output_recomputed": format!("the engine derived {} from the template and the instance; the coin pays it{}{}", contract.derived.script_pubkey,
+                spend.siblings.iter().map(|(i, c)| format!("; input {i} pays {}, derived from its own instance", c.derived.script_pubkey)).collect::<Vec<_>>().join(""),
                 spend.opened.iter().map(|o| format!("; output {} pays {}, derived from the instance it opens", o.output, o.contract.derived.script_pubkey)).collect::<Vec<_>>().join("")),
             "3_program_run": ran.join("; "),
             "4_shown": "this summary",
@@ -561,4 +616,60 @@ fn template_asset_of(contract: &crate::template::Contract) -> Option<String> {
         [one] => Some(show_value("asset", &contract.instance.params[&one.name])),
         _ => None,
     }
+}
+
+/// The spend in the terms of the template it spends, for the templates whose
+/// meaning the kit knows: a capped sale's purchase says what is bought, at
+/// what price, against which cap. `null` for any other.
+fn reading(spend: &Spend, view: &WalletView, our_key: Option<&str>) -> Result<Value, Error> {
+    let contract = &spend.contract;
+    if contract.template.hash() != crate::known::CAPPED_SALE || spend.path.name != "purchase" {
+        return Ok(Value::Null);
+    }
+    let p = crate::known::CappedPurchase::read(&spend.spender)?;
+    let token = show_value("asset", &contract.instance.params["TOKEN"]);
+    let pay = show_value("asset", &contract.instance.params["PAY_ASSET"]);
+    let num = u128::from(contract.value_u64("PRICE_NUM")?);
+    let den = u128::from(contract.value_u64("PRICE_DEN")?).max(1);
+    let due = (u128::from(p.amount) * num).div_ceil(den);
+    let credit = 2 * spend.k;
+    let paid = spend
+        .outputs
+        .get(credit)
+        .filter(|o| o.asset == pay)
+        .map(|o| u128::from(o.amount));
+    let key = spend.spender.get("BUYER_KEY").cloned().unwrap_or_default();
+    let ours = our_key == Some(key.trim_start_matches("0x"));
+    let rest = spend
+        .coin
+        .value
+        .explicit()
+        .unwrap_or(0)
+        .saturating_sub(p.amount);
+    let show = |asset: &str, n: u128| amount(view, asset, i128::try_from(n).unwrap_or(i128::MAX));
+    Ok(json!({
+        "kind": "capped purchase",
+        "buyer_key": key,
+        "buyer_key_is_this_wallets": ours,
+        "amount": p.amount,
+        "bought_before": p.bought,
+        "bought_after": p.bought + p.amount,
+        "cap": p.cap,
+        "price_due": due.to_string(),
+        "paid": paid.map(|n| n.to_string()),
+        "shown": [
+            format!("buys {} as the buyer with key {key}{}", show(&token, p.amount.into()),
+                if ours { " (this wallet's contract key)" } else { " (not this wallet's key)" }),
+            format!("this key has bought {} of its cap of {}; after this purchase {}, leaving {}",
+                show(&token, p.bought.into()), show(&token, p.cap.into()),
+                show(&token, (p.bought + p.amount).into()), show(&token, (p.cap - p.bought - p.amount).into())),
+            format!("pays {} to the sale's treasury at output {credit}, where the price is at least {}",
+                paid.map_or_else(|| "nothing".to_string(), |n| show(&pay, n)), show(&pay, due)),
+            if rest > 0 {
+                format!("the sale keeps {} at output {}, in the state where only this key's total has grown", show(&token, rest.into()), credit + 1)
+            } else {
+                "the purchase takes the whole coin, so the sale ends".to_string()
+            },
+        ],
+    }))
 }

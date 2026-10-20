@@ -1,0 +1,200 @@
+{
+  "descriptor": 2,
+  "template": {
+    "budget": {
+      "max": 4000050,
+      "offset": 50,
+      "per_witness_byte": 4
+    },
+    "internal_key": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "name": "sequentia/subscription-escrow",
+    "params": [
+      {
+        "label": "Asset the subscription is paid in",
+        "name": "PAY_ASSET",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Issuer key, which releases the raise or cancels the subscription",
+        "name": "ISSUER_KEY",
+        "role": "pubkey",
+        "type": "Pubkey"
+      },
+      {
+        "label": "SHA256 of the scriptPubKey the raise is released to",
+        "name": "ISSUER_SCRIPT",
+        "role": "script_hash",
+        "type": "u256"
+      },
+      {
+        "label": "Least the release pays the issuer, in the payment asset: the offering's minimum",
+        "name": "MINIMUM",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Close: a block height below 500,000,000, or a unix time at or above it, from which the issuer may release",
+        "name": "CLOSE",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "SHA256 of the subscriber's refund scriptPubKey",
+        "name": "REFUND_SCRIPT",
+        "role": "script_hash",
+        "type": "u256"
+      },
+      {
+        "label": "Deadline, a height or a time as CLOSE is, from which anyone may refund the subscriber",
+        "name": "DEADLINE",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "Most a refund may keep back for its fee, in the coin's asset",
+        "name": "FEE_CAP",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "The subscription this coin pays, which gives each one its own address",
+        "name": "SUBSCRIPTION",
+        "role": "hash",
+        "type": "u256"
+      }
+    ],
+    "paths": [
+      {
+        "effect": "Spends the coin into any transaction ISSUER_KEY signs once CLOSE has passed (OP_CHECKLOCKTIMEVERIFY), provided output 0 pays ISSUER_SCRIPT at least MINIMUM of PAY_ASSET, explicitly and with no nonce. Every subscription's coin names the same output 0, so one release spends them all and output 0 carries the raise; the minimum is a floor on that one output.",
+        "leaf": "release",
+        "name": "release",
+        "who": "the holder of ISSUER_KEY"
+      },
+      {
+        "effect": "Spends the coin, at input k, into any transaction ISSUER_KEY signs, provided output k returns the coin's own asset to REFUND_SCRIPT, explicitly and with no nonce, holding at least the coin's value less FEE_CAP. The issuer refunds a subscription early with it.",
+        "leaf": "cancel",
+        "name": "cancel",
+        "who": "the holder of ISSUER_KEY"
+      },
+      {
+        "effect": "Once DEADLINE has passed (OP_CHECKLOCKTIMEVERIFY), anyone spends the coin, at input k, provided output k returns the coin's own asset to REFUND_SCRIPT, explicitly and with no nonce, holding at least the coin's value less FEE_CAP. Needs no signature, so the subscriber is refunded even if nobody else acts.",
+        "leaf": "refund",
+        "name": "refund",
+        "who": "anyone"
+      }
+    ],
+    "slots": [],
+    "summary": "Holds one subscription's payment: the issuer takes it, with every other subscription, once the offering has closed and the release pays at least the minimum; the issuer may refund it at any time, and after a deadline anyone refunds it to the subscriber.",
+    "tree": {
+      "branch": [
+        {
+          "branch": [
+            {
+              "leaf": "release",
+              "tapscript": [
+                {
+                  "num": "CLOSE"
+                },
+                "b17500ce5188",
+                {
+                  "push": "PAY_ASSET"
+                },
+                "8800d1764f8763756776926301509367750100687882777e7c7ea868",
+                {
+                  "push": "ISSUER_SCRIPT"
+                },
+                "8800d0008800cf5188",
+                {
+                  "push": "MINIMUM"
+                },
+                "7657517f7c7656517f7b7c7e7c7655517f7b7c7e7c7654517f7b7c7e7c7653517f7b7c7e7c7652517f7b7c7e7c7651517f7b7c7e7c7600517f7b7c7e7c75df69",
+                {
+                  "push": "ISSUER_KEY"
+                },
+                "ac"
+              ]
+            },
+            {
+              "leaf": "cancel",
+              "tapscript": [
+                "cdce5188cdc8518888cdd1764f8763756776926301509367750100687882777e7c7ea868",
+                {
+                  "push": "REFUND_SCRIPT"
+                },
+                "88cdd00088cdcf5188",
+                {
+                  "push": "FEE_CAP"
+                },
+                "7657517f7c7656517f7b7c7e7c7655517f7b7c7e7c7654517f7b7c7e7c7653517f7b7c7e7c7652517f7b7c7e7c7651517f7b7c7e7c7600517f7b7c7e7c75d769cdc95188df69",
+                {
+                  "push": "ISSUER_KEY"
+                },
+                "ac"
+              ]
+            }
+          ]
+        },
+        {
+          "branch": [
+            {
+              "leaf": "refund",
+              "tapscript": [
+                {
+                  "num": "DEADLINE"
+                },
+                "b175cdce5188cdc8518888cdd1764f8763756776926301509367750100687882777e7c7ea868",
+                {
+                  "push": "REFUND_SCRIPT"
+                },
+                "88cdd00088cdcf5188",
+                {
+                  "push": "FEE_CAP"
+                },
+                "7657517f7c7656517f7b7c7e7c7655517f7b7c7e7c7654517f7b7c7e7c7653517f7b7c7e7c7652517f7b7c7e7c7651517f7b7c7e7c7600517f7b7c7e7c75d769cdc95188df6951"
+              ]
+            },
+            {
+              "data": [
+                "SUBSCRIPTION"
+              ],
+              "leaf": "subscription"
+            }
+          ]
+        }
+      ]
+    },
+    "version": 1
+  },
+  "template_hash": "e602bafffda0dd1f2c19b3725fb4a84aa3106ceee88ada4ff6865b249ca254b4",
+  "chains": [
+    {
+      "name": "sequentia-testnet",
+      "genesis": "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e",
+      "bech32_hrp": "tb"
+    },
+    {
+      "name": "elementsregtest",
+      "genesis": null,
+      "bech32_hrp": "ert"
+    }
+  ],
+  "measured": {
+    "source": "harness/records/e1.json",
+    "release": {
+      "transaction": "two subscriptions' coins released together, a fee coin in another asset; the raise at output 0, the fee change and the fee",
+      "vsize": 533,
+      "weight": 2130
+    },
+    "cancel": {
+      "transaction": "one coin cancelled back to its subscriber, a fee coin; the refund, the fee change and the fee",
+      "vsize": 388,
+      "weight": 1551
+    },
+    "refund": {
+      "transaction": "two coins refunded by anyone after the deadline, each fee kept back from its coin; two refunds and the fee",
+      "vsize": 404,
+      "weight": 1614
+    }
+  }
+}

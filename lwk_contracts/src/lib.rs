@@ -18,6 +18,7 @@ pub mod error;
 pub mod hex;
 pub mod known;
 pub mod spend;
+pub mod statement;
 pub mod template;
 #[cfg(feature = "wollet")]
 pub mod wallet;

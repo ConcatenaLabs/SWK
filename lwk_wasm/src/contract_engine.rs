@@ -254,8 +254,9 @@ impl ContractSpend {
     /// Refuses an output the request mislabels, a confidential output, a
     /// missing or second fee, a wallet input the record does not back, a
     /// foreign input the chain's record does not back or whose leaf its coin
-    /// does not commit to, a second contract input, and inputs and outputs
-    /// that do not balance, each with the reason.
+    /// does not commit to, a coin of the same template whose instance names
+    /// another key or lock, and inputs and outputs that do not balance, each
+    /// with the reason.
     pub fn build(
         instance: &ContractInstance,
         network: &Network,

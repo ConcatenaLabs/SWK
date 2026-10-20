@@ -65,8 +65,35 @@ them exactly once; without the list the contract coin is the only input.
   coin in the asset of the contract's `BEACON_ASSET` parameter, recreated at
   output 2), and the request's `label` only as the request's claim.
 
-A second contract input (a chain of contract spends), the key path and a
-path of several signatures are refused, each with its reason.
+- `{"is": "sibling", "coin", "instance"}` is another coin of the same
+  template spent by the same path, with its own instance record, such as
+  every subscription coin of an offering released in one transaction. Only
+  on a tapscript path, where each input is signed alone. The engine
+  recomputes the coin's output from its instance, spends it only when the
+  chain facts carry the chain's record of it and it agrees, and refuses one
+  whose instance differs from the contract's in the key the path names or in
+  its locks. The same contract key signs every such input, each signature
+  over the whole transaction.
+
+A coin of the contract's next state spent beside it (a chain of contract
+spends), several coins of a Simplicity path, the key path and a path of
+several signatures are refused, each with its reason.
+
+## A key the spender names
+
+On most paths a parameter names the key that signs. On the capped sale's
+purchase the key is the buyer's, on the allocation list, so the purchase
+shows it as a spender value (`BUYER_KEY`) beside the signature
+(`BUYER_SIG`); the descriptor calls both `spender` values, and the kit keeps
+which is which for the templates it carries (`known::SPENDER_KEYS`). The
+engine signs such a path only with this wallet's contract key, and only when
+the request's `BUYER_KEY` is that key; a request that gives `BUYER_SIG` itself
+is refused. The signature is BIP340 over the program's `sig_all_hash`, which
+commits to the chain, the leaf, every input and every output, so it signs
+this purchase and no other. A purchase that would take the key past its cap
+(`BOUGHT + AMOUNT > CAP`) is refused before anything is built, and the
+approval reads the purchase in its own terms (`reading`): what is bought, the
+cap, the total before and after, and what the treasury is paid.
 
 A path that takes no signature (the Pignus vault's and offer's) is signed by
 no contract key; the wallet's keys sign only its own inputs. Where several
@@ -74,6 +101,20 @@ paths share one Simplicity leaf, the kit keeps, for the templates it carries,
 which spender value selects each (`known::PATH_SELECTORS`), and refuses a
 request whose value selects another path than the one it names. For any
 other template the approval says that the descriptor does not tell.
+
+## A statement signed with the contract key
+
+A platform that names the wallet's contract key in a contract (an escrow's
+release key) may ask the wallet to prove it holds the key. `statement::sign`
+signs a BIP340 signature over the tagged hash
+`sha256(sha256(tag) || sha256(tag) || message)` with the contract key, and
+refuses every tag a spend's signature could share: `tap…` (a tapscript
+signature signs a tagged hash under `TapSighash`), `bip0340…`, `bip340…`,
+`bip322…`, `elements…`, `sequentia/…` and any tag containing `sighash`. A
+Simplicity spend signs `sig_all_hash`, which is
+`sha256(genesis || genesis || …)`, so a statement could only stand for one
+under a tag whose SHA-256 is the chain's genesis hash. The wallet still shows
+the statement before it signs.
 
 ## Signing under the five-point rule
 
@@ -116,7 +157,8 @@ them.
 ## The templates the kit carries
 
 `templates/` holds `sequentia/one-key`, `sequentia/one-key-exit`,
-`sequentia/faucet-drip`, `pignus/vault` and `pignus/offer` with their vectors, the version 2 fixture and the
+`sequentia/faucet-drip`, `pignus/vault`, `pignus/offer`, `sequentia/capped-sale`
+and `sequentia/subscription-escrow` with their vectors, the version 2 fixture and the
 shared refusal corpus, copied from `sequentia-contracts` at the revision
 `templates/PIN.json` names (with each file's SHA-256). The `.simf` files there
 are the resolved texts. To move the pin, copy the files again from that
@@ -130,6 +172,7 @@ run the tests.
 cargo test -p lwk_contracts                       # vectors, refusals, budget, the gate
 SEQUENTIA_BIN=/path/to/Sequentia/src cargo test -p lwk_contracts --test drip_regtest -- --nocapture
 SEQUENTIA_BIN=/path/to/Sequentia/src cargo test -p lwk_contracts --test vault_regtest -- --nocapture
+SEQUENTIA_BIN=/path/to/Sequentia/src cargo test -p lwk_contracts --features wollet --test sale_escrow_regtest -- --nocapture
 ```
 
 `tests/vectors.rs` reproduces every golden vector and makes every refusal of
@@ -146,4 +189,13 @@ oracle's beacon coin, and the full repayment, each confirmed; it asserts the
 refusals for a digest not shown, a foreign input changed after the summary
 and a wallet input in another asset than shown, and forces the signed
 liquidation moved onto another beacon coin into a block, which refuses it for
-the wallet input's signature.
+the wallet input's signature. `tests/sale_escrow_regtest.rs` signs a capped
+sale's purchase with this wallet's contract key as the buyer's, paid from the
+wallet's own coins, then the purchase that fills the cap, and a subscription
+escrow's release of three coins in one transaction. It asserts the refusals
+for a purchase past the cap, a key that is not the wallet's, a request that
+gives the signature, a release before the close, a coin of another issuer key
+and a coin the chain's record does not back; and forces into blocks the
+over-cap purchase made from the real purchase's pruned program, the purchase
+with its payment changed under the buyer's signature, and the release with one
+coin taken out under the issuer's signatures, each beside an accepted control.
