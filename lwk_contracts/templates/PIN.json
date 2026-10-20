@@ -3,6 +3,10 @@
   "revision": "e94ab98",
   "copied": "templates/<t>/descriptor.json and vectors.json as they are; each templates/<t>/*.simf is `seqc expand` of that source (its includes resolved, the text source_sha256 hashes); fixtures/ is mirrors/fixtures/one_key_as_v2 and mirrors/fixtures/refusals.json",
   "sha256": {
+    "capped_sale/allocations.json": "2a40ecdaa92d1c4e24dc15ccdad7a9bf5a62e194c0fe4cb3027e31e4468d9f1a",
+    "capped_sale/capped_sale.simf": "e1ced324833b41a53117002c1fd6093c6a0cb1e9d7bedf058da5243b20da4dca",
+    "capped_sale/descriptor.json": "d1b2d0497d701185073ec4f9493d3e6602fc86c7385f95622b919c5c93277fa1",
+    "capped_sale/vectors.json": "64e8fce3414ab55532182569ba51c35733ccabea7675d50279e2a5e470de76cf",
     "faucet_drip/descriptor.json": "6a8b16a60eaa94c8aa29908719417a15390af8f89da032af4e6bde4761a6cdb7",
     "faucet_drip/faucet_drip.simf": "f6b1bc9cf01ed7c69a832e9bfd3b99a68f92058ca6f14e6f388c1cc5608a6082",
     "faucet_drip/vectors.json": "58478440ef752a305399241331cb6924b7b37fe1587dea1d795ea98dc2cdb317",
@@ -22,6 +26,8 @@
     "pignus_vault/descriptor.json": "c823db9be6968f630c382a0a5401c79579af3fd02a9784ec04e5d57b9874c4ef",
     "pignus_vault/pignus_vault.simf": "1278cf68cb29ba89a5f95e64c5552ddc5be35cd6755053f021653dc2a7e84ffd",
     "pignus_vault/rules.json": "c1d1de264c478b0dbf0a0dc9fbc5bfee8ae2a1b492d9ab12946f4f0a091ad55a",
-    "pignus_vault/vectors.json": "5d3fc79d0131681b0e0505a8dd05410d06562d3448def7a3b839b24d22f4ec5e"
+    "pignus_vault/vectors.json": "5d3fc79d0131681b0e0505a8dd05410d06562d3448def7a3b839b24d22f4ec5e",
+    "subscription_escrow/descriptor.json": "f7c210dacee5e2584173a779115786281c30277ae97a1e1224f3d82babfc3b36",
+    "subscription_escrow/vectors.json": "d9c1aebb91325ca208130fd52eeb203cb6aca7e221a36680c626c469e87fb219"
   }
 }

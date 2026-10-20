@@ -1,0 +1,798 @@
+{
+ "allocation_vectors": 1,
+ "depth": 16,
+ "trees": [
+  {
+   "name": "no buyer",
+   "entries": [],
+   "root": "6dcad4c2dd7abcd2aef47f541cc9b9b433fd4f900700e49f11ae70effbd7c5de",
+   "proofs": []
+  },
+  {
+   "name": "one buyer, nothing bought",
+   "entries": [
+    {
+     "key": "0101010101010101010101010101010101010101010101010101010101010101",
+     "cap": "1000",
+     "bought": "0"
+    }
+   ],
+   "root": "25313d7896c2017f05ef24f449dbf7b7939b2e9f8e67aab488e6b84f47bf524d",
+   "proofs": [
+    {
+     "index": 0,
+     "leaf": "dd3d612d0c0f3163f2ab190a213eb9ff30b0cfc25c3314af6e46a1eb8f4951c7",
+     "proof": [
+      {
+       "sibling": "ebdcf834e7e25524ca34f980577b7389c27c43faf18c6ca6a036456727d1dc30",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "9b5078cde3fc77c7a8b96ab7cb1387233fbb54acd69139c6223d6f6c390a18ba",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f24901837bd44e338415d34a2e0be9776e12bad5d4c3640b184a32aa8692963a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ead258d82744c1348737e9e90777cd80ac09b3a3dd5dd5982fda26d8b4086e6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4c38618457b980b97c9e0c1e8fd849c66c274069bebb59e335d2c1e3c2c39be2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "dc0fdafbd2ba7a1277ae0c8ac35cd921518e29e8b2bc2706bd27f1a925f960a0",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "442ec7d749ed722f5d81de8bdfef044d2f19e72ef0c95c29bbaf282ee358bd49",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b6dbe997a7c5b7850d1b89688870d92ca82e799b939c3eb4aee487375266b936",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ef8f36d036046f761ddf44aef8447962ad1010f8ea21aa6190e6bec5cc12c78b",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "a2f621cd89c2d13c4aea18df243de4c3096782b57f74fe22e670db50c6d708c2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "28675026fe37b56097311cb5d2e6f0761f566000d7bc89de44b67e0dd53d1a6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f8cd01b1b6f362fe62f44d21d2bfe0f2aa210b6ff6ad349f4b9a0400276f6cda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "bbdaf462853fc9ba9760b6ea25012ffcdb50655cb9e3f7d7531b634609ff1eda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b0104ca2c94d091a0f41616ef201e1b31cc902347d60b55e8c2517c1b13c23fd",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4f68c20c19fb34881da2c0287b088188b1a55301f58a20f92f00cae87eb7e39c",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "57d2cfa35f0142df2da3aa59deed2a104a73a679889acd79d7507731e645c0ec",
+       "sibling_is_left": false
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "three buyers, the second has bought 250",
+   "entries": [
+    {
+     "key": "0101010101010101010101010101010101010101010101010101010101010101",
+     "cap": "1000",
+     "bought": "0"
+    },
+    {
+     "key": "0202020202020202020202020202020202020202020202020202020202020202",
+     "cap": "400",
+     "bought": "250"
+    },
+    {
+     "key": "0303030303030303030303030303030303030303030303030303030303030303",
+     "cap": "7",
+     "bought": "7"
+    }
+   ],
+   "root": "383c7f52421a6b8ca6f985f9de28a4c6e4a76396a81286fda352a7b9f9d2ac09",
+   "proofs": [
+    {
+     "index": 0,
+     "leaf": "dd3d612d0c0f3163f2ab190a213eb9ff30b0cfc25c3314af6e46a1eb8f4951c7",
+     "proof": [
+      {
+       "sibling": "dc07936d94900a3ea16d42e0ab227434ed3deaccd20c5fd978361df47835c2f6",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4c84bda6edd4651c0dbe345c8338a571e3642f167a8c67fa8e835af3f77c919b",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f24901837bd44e338415d34a2e0be9776e12bad5d4c3640b184a32aa8692963a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ead258d82744c1348737e9e90777cd80ac09b3a3dd5dd5982fda26d8b4086e6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4c38618457b980b97c9e0c1e8fd849c66c274069bebb59e335d2c1e3c2c39be2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "dc0fdafbd2ba7a1277ae0c8ac35cd921518e29e8b2bc2706bd27f1a925f960a0",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "442ec7d749ed722f5d81de8bdfef044d2f19e72ef0c95c29bbaf282ee358bd49",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b6dbe997a7c5b7850d1b89688870d92ca82e799b939c3eb4aee487375266b936",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ef8f36d036046f761ddf44aef8447962ad1010f8ea21aa6190e6bec5cc12c78b",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "a2f621cd89c2d13c4aea18df243de4c3096782b57f74fe22e670db50c6d708c2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "28675026fe37b56097311cb5d2e6f0761f566000d7bc89de44b67e0dd53d1a6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f8cd01b1b6f362fe62f44d21d2bfe0f2aa210b6ff6ad349f4b9a0400276f6cda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "bbdaf462853fc9ba9760b6ea25012ffcdb50655cb9e3f7d7531b634609ff1eda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b0104ca2c94d091a0f41616ef201e1b31cc902347d60b55e8c2517c1b13c23fd",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4f68c20c19fb34881da2c0287b088188b1a55301f58a20f92f00cae87eb7e39c",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "57d2cfa35f0142df2da3aa59deed2a104a73a679889acd79d7507731e645c0ec",
+       "sibling_is_left": false
+      }
+     ]
+    },
+    {
+     "index": 1,
+     "leaf": "dc07936d94900a3ea16d42e0ab227434ed3deaccd20c5fd978361df47835c2f6",
+     "proof": [
+      {
+       "sibling": "dd3d612d0c0f3163f2ab190a213eb9ff30b0cfc25c3314af6e46a1eb8f4951c7",
+       "sibling_is_left": true
+      },
+      {
+       "sibling": "4c84bda6edd4651c0dbe345c8338a571e3642f167a8c67fa8e835af3f77c919b",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f24901837bd44e338415d34a2e0be9776e12bad5d4c3640b184a32aa8692963a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ead258d82744c1348737e9e90777cd80ac09b3a3dd5dd5982fda26d8b4086e6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4c38618457b980b97c9e0c1e8fd849c66c274069bebb59e335d2c1e3c2c39be2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "dc0fdafbd2ba7a1277ae0c8ac35cd921518e29e8b2bc2706bd27f1a925f960a0",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "442ec7d749ed722f5d81de8bdfef044d2f19e72ef0c95c29bbaf282ee358bd49",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b6dbe997a7c5b7850d1b89688870d92ca82e799b939c3eb4aee487375266b936",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ef8f36d036046f761ddf44aef8447962ad1010f8ea21aa6190e6bec5cc12c78b",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "a2f621cd89c2d13c4aea18df243de4c3096782b57f74fe22e670db50c6d708c2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "28675026fe37b56097311cb5d2e6f0761f566000d7bc89de44b67e0dd53d1a6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f8cd01b1b6f362fe62f44d21d2bfe0f2aa210b6ff6ad349f4b9a0400276f6cda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "bbdaf462853fc9ba9760b6ea25012ffcdb50655cb9e3f7d7531b634609ff1eda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b0104ca2c94d091a0f41616ef201e1b31cc902347d60b55e8c2517c1b13c23fd",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4f68c20c19fb34881da2c0287b088188b1a55301f58a20f92f00cae87eb7e39c",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "57d2cfa35f0142df2da3aa59deed2a104a73a679889acd79d7507731e645c0ec",
+       "sibling_is_left": false
+      }
+     ]
+    },
+    {
+     "index": 2,
+     "leaf": "fba78cd1d46f082ba9ac8970e7e156f2e1319930a462491e0041ff8b66d960fc",
+     "proof": [
+      {
+       "sibling": "ebdcf834e7e25524ca34f980577b7389c27c43faf18c6ca6a036456727d1dc30",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "2d285e1780162802803252d98e3003261b48408e3580b514740f9bb6a57ddd03",
+       "sibling_is_left": true
+      },
+      {
+       "sibling": "f24901837bd44e338415d34a2e0be9776e12bad5d4c3640b184a32aa8692963a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ead258d82744c1348737e9e90777cd80ac09b3a3dd5dd5982fda26d8b4086e6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4c38618457b980b97c9e0c1e8fd849c66c274069bebb59e335d2c1e3c2c39be2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "dc0fdafbd2ba7a1277ae0c8ac35cd921518e29e8b2bc2706bd27f1a925f960a0",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "442ec7d749ed722f5d81de8bdfef044d2f19e72ef0c95c29bbaf282ee358bd49",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b6dbe997a7c5b7850d1b89688870d92ca82e799b939c3eb4aee487375266b936",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ef8f36d036046f761ddf44aef8447962ad1010f8ea21aa6190e6bec5cc12c78b",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "a2f621cd89c2d13c4aea18df243de4c3096782b57f74fe22e670db50c6d708c2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "28675026fe37b56097311cb5d2e6f0761f566000d7bc89de44b67e0dd53d1a6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f8cd01b1b6f362fe62f44d21d2bfe0f2aa210b6ff6ad349f4b9a0400276f6cda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "bbdaf462853fc9ba9760b6ea25012ffcdb50655cb9e3f7d7531b634609ff1eda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b0104ca2c94d091a0f41616ef201e1b31cc902347d60b55e8c2517c1b13c23fd",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4f68c20c19fb34881da2c0287b088188b1a55301f58a20f92f00cae87eb7e39c",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "57d2cfa35f0142df2da3aa59deed2a104a73a679889acd79d7507731e645c0ec",
+       "sibling_is_left": false
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "five buyers, caps at the 64-bit edge",
+   "entries": [
+    {
+     "key": "0909090909090909090909090909090909090909090909090909090909090909",
+     "cap": "18446744073709551615",
+     "bought": "0"
+    },
+    {
+     "key": "0808080808080808080808080808080808080808080808080808080808080808",
+     "cap": "18446744073709551615",
+     "bought": "18446744073709551615"
+    },
+    {
+     "key": "0707070707070707070707070707070707070707070707070707070707070707",
+     "cap": "1",
+     "bought": "0"
+    },
+    {
+     "key": "0606060606060606060606060606060606060606060606060606060606060606",
+     "cap": "0",
+     "bought": "0"
+    },
+    {
+     "key": "0505050505050505050505050505050505050505050505050505050505050505",
+     "cap": "12345678901234",
+     "bought": "1"
+    }
+   ],
+   "root": "76b579e6cabd2b4566ba2b5b451ed3c0d90e71a3c52a487a560dd2f5361e2483",
+   "proofs": [
+    {
+     "index": 0,
+     "leaf": "35533edb0bc7e7622b66bc31d227c1e0c2c8440eea77418ae2425bf72787270f",
+     "proof": [
+      {
+       "sibling": "487ef1e48b60718b9fb58f452cee439bb1df5bf7f1dfb46f6d45cec835c51f81",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b14756e55eae6dbda63cd48a844e3d4a65b2bb81322bd5a7c2fe8e8d0092c496",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "dc612fa1e1101b3e64455a90c9f345a2bddda0bc2cc37a21e405bf75cd4ed7a9",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ead258d82744c1348737e9e90777cd80ac09b3a3dd5dd5982fda26d8b4086e6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4c38618457b980b97c9e0c1e8fd849c66c274069bebb59e335d2c1e3c2c39be2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "dc0fdafbd2ba7a1277ae0c8ac35cd921518e29e8b2bc2706bd27f1a925f960a0",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "442ec7d749ed722f5d81de8bdfef044d2f19e72ef0c95c29bbaf282ee358bd49",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b6dbe997a7c5b7850d1b89688870d92ca82e799b939c3eb4aee487375266b936",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ef8f36d036046f761ddf44aef8447962ad1010f8ea21aa6190e6bec5cc12c78b",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "a2f621cd89c2d13c4aea18df243de4c3096782b57f74fe22e670db50c6d708c2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "28675026fe37b56097311cb5d2e6f0761f566000d7bc89de44b67e0dd53d1a6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f8cd01b1b6f362fe62f44d21d2bfe0f2aa210b6ff6ad349f4b9a0400276f6cda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "bbdaf462853fc9ba9760b6ea25012ffcdb50655cb9e3f7d7531b634609ff1eda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b0104ca2c94d091a0f41616ef201e1b31cc902347d60b55e8c2517c1b13c23fd",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4f68c20c19fb34881da2c0287b088188b1a55301f58a20f92f00cae87eb7e39c",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "57d2cfa35f0142df2da3aa59deed2a104a73a679889acd79d7507731e645c0ec",
+       "sibling_is_left": false
+      }
+     ]
+    },
+    {
+     "index": 1,
+     "leaf": "487ef1e48b60718b9fb58f452cee439bb1df5bf7f1dfb46f6d45cec835c51f81",
+     "proof": [
+      {
+       "sibling": "35533edb0bc7e7622b66bc31d227c1e0c2c8440eea77418ae2425bf72787270f",
+       "sibling_is_left": true
+      },
+      {
+       "sibling": "b14756e55eae6dbda63cd48a844e3d4a65b2bb81322bd5a7c2fe8e8d0092c496",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "dc612fa1e1101b3e64455a90c9f345a2bddda0bc2cc37a21e405bf75cd4ed7a9",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ead258d82744c1348737e9e90777cd80ac09b3a3dd5dd5982fda26d8b4086e6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4c38618457b980b97c9e0c1e8fd849c66c274069bebb59e335d2c1e3c2c39be2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "dc0fdafbd2ba7a1277ae0c8ac35cd921518e29e8b2bc2706bd27f1a925f960a0",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "442ec7d749ed722f5d81de8bdfef044d2f19e72ef0c95c29bbaf282ee358bd49",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b6dbe997a7c5b7850d1b89688870d92ca82e799b939c3eb4aee487375266b936",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ef8f36d036046f761ddf44aef8447962ad1010f8ea21aa6190e6bec5cc12c78b",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "a2f621cd89c2d13c4aea18df243de4c3096782b57f74fe22e670db50c6d708c2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "28675026fe37b56097311cb5d2e6f0761f566000d7bc89de44b67e0dd53d1a6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f8cd01b1b6f362fe62f44d21d2bfe0f2aa210b6ff6ad349f4b9a0400276f6cda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "bbdaf462853fc9ba9760b6ea25012ffcdb50655cb9e3f7d7531b634609ff1eda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b0104ca2c94d091a0f41616ef201e1b31cc902347d60b55e8c2517c1b13c23fd",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4f68c20c19fb34881da2c0287b088188b1a55301f58a20f92f00cae87eb7e39c",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "57d2cfa35f0142df2da3aa59deed2a104a73a679889acd79d7507731e645c0ec",
+       "sibling_is_left": false
+      }
+     ]
+    },
+    {
+     "index": 2,
+     "leaf": "d0d2761cd5f9b3acfd0fd0d6180760ce0357b6e6d7df4a125e6c665abe33dd00",
+     "proof": [
+      {
+       "sibling": "d9154b00001e0fcb5c888fccb738afc041cbb3bcf158fb64aae38a0c8a1ac803",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "485e0bbffcb64b7996864405af7cbbbc4e138d6a698b9931be80b207075cbd7e",
+       "sibling_is_left": true
+      },
+      {
+       "sibling": "dc612fa1e1101b3e64455a90c9f345a2bddda0bc2cc37a21e405bf75cd4ed7a9",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ead258d82744c1348737e9e90777cd80ac09b3a3dd5dd5982fda26d8b4086e6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4c38618457b980b97c9e0c1e8fd849c66c274069bebb59e335d2c1e3c2c39be2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "dc0fdafbd2ba7a1277ae0c8ac35cd921518e29e8b2bc2706bd27f1a925f960a0",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "442ec7d749ed722f5d81de8bdfef044d2f19e72ef0c95c29bbaf282ee358bd49",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b6dbe997a7c5b7850d1b89688870d92ca82e799b939c3eb4aee487375266b936",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ef8f36d036046f761ddf44aef8447962ad1010f8ea21aa6190e6bec5cc12c78b",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "a2f621cd89c2d13c4aea18df243de4c3096782b57f74fe22e670db50c6d708c2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "28675026fe37b56097311cb5d2e6f0761f566000d7bc89de44b67e0dd53d1a6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f8cd01b1b6f362fe62f44d21d2bfe0f2aa210b6ff6ad349f4b9a0400276f6cda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "bbdaf462853fc9ba9760b6ea25012ffcdb50655cb9e3f7d7531b634609ff1eda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b0104ca2c94d091a0f41616ef201e1b31cc902347d60b55e8c2517c1b13c23fd",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4f68c20c19fb34881da2c0287b088188b1a55301f58a20f92f00cae87eb7e39c",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "57d2cfa35f0142df2da3aa59deed2a104a73a679889acd79d7507731e645c0ec",
+       "sibling_is_left": false
+      }
+     ]
+    },
+    {
+     "index": 3,
+     "leaf": "d9154b00001e0fcb5c888fccb738afc041cbb3bcf158fb64aae38a0c8a1ac803",
+     "proof": [
+      {
+       "sibling": "d0d2761cd5f9b3acfd0fd0d6180760ce0357b6e6d7df4a125e6c665abe33dd00",
+       "sibling_is_left": true
+      },
+      {
+       "sibling": "485e0bbffcb64b7996864405af7cbbbc4e138d6a698b9931be80b207075cbd7e",
+       "sibling_is_left": true
+      },
+      {
+       "sibling": "dc612fa1e1101b3e64455a90c9f345a2bddda0bc2cc37a21e405bf75cd4ed7a9",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ead258d82744c1348737e9e90777cd80ac09b3a3dd5dd5982fda26d8b4086e6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4c38618457b980b97c9e0c1e8fd849c66c274069bebb59e335d2c1e3c2c39be2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "dc0fdafbd2ba7a1277ae0c8ac35cd921518e29e8b2bc2706bd27f1a925f960a0",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "442ec7d749ed722f5d81de8bdfef044d2f19e72ef0c95c29bbaf282ee358bd49",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b6dbe997a7c5b7850d1b89688870d92ca82e799b939c3eb4aee487375266b936",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ef8f36d036046f761ddf44aef8447962ad1010f8ea21aa6190e6bec5cc12c78b",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "a2f621cd89c2d13c4aea18df243de4c3096782b57f74fe22e670db50c6d708c2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "28675026fe37b56097311cb5d2e6f0761f566000d7bc89de44b67e0dd53d1a6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f8cd01b1b6f362fe62f44d21d2bfe0f2aa210b6ff6ad349f4b9a0400276f6cda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "bbdaf462853fc9ba9760b6ea25012ffcdb50655cb9e3f7d7531b634609ff1eda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b0104ca2c94d091a0f41616ef201e1b31cc902347d60b55e8c2517c1b13c23fd",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4f68c20c19fb34881da2c0287b088188b1a55301f58a20f92f00cae87eb7e39c",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "57d2cfa35f0142df2da3aa59deed2a104a73a679889acd79d7507731e645c0ec",
+       "sibling_is_left": false
+      }
+     ]
+    },
+    {
+     "index": 4,
+     "leaf": "f9527c474ec0a8e575c79fa96ddcf0b65bfaa00c0a4290e5303c0a9673d4c61d",
+     "proof": [
+      {
+       "sibling": "ebdcf834e7e25524ca34f980577b7389c27c43faf18c6ca6a036456727d1dc30",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "9b5078cde3fc77c7a8b96ab7cb1387233fbb54acd69139c6223d6f6c390a18ba",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "6f2b3e06d569a37ff6496c50e1372f5ced10eda3c7f495a9e538f7555b203f3b",
+       "sibling_is_left": true
+      },
+      {
+       "sibling": "ead258d82744c1348737e9e90777cd80ac09b3a3dd5dd5982fda26d8b4086e6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4c38618457b980b97c9e0c1e8fd849c66c274069bebb59e335d2c1e3c2c39be2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "dc0fdafbd2ba7a1277ae0c8ac35cd921518e29e8b2bc2706bd27f1a925f960a0",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "442ec7d749ed722f5d81de8bdfef044d2f19e72ef0c95c29bbaf282ee358bd49",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b6dbe997a7c5b7850d1b89688870d92ca82e799b939c3eb4aee487375266b936",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "ef8f36d036046f761ddf44aef8447962ad1010f8ea21aa6190e6bec5cc12c78b",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "a2f621cd89c2d13c4aea18df243de4c3096782b57f74fe22e670db50c6d708c2",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "28675026fe37b56097311cb5d2e6f0761f566000d7bc89de44b67e0dd53d1a6a",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "f8cd01b1b6f362fe62f44d21d2bfe0f2aa210b6ff6ad349f4b9a0400276f6cda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "bbdaf462853fc9ba9760b6ea25012ffcdb50655cb9e3f7d7531b634609ff1eda",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "b0104ca2c94d091a0f41616ef201e1b31cc902347d60b55e8c2517c1b13c23fd",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "4f68c20c19fb34881da2c0287b088188b1a55301f58a20f92f00cae87eb7e39c",
+       "sibling_is_left": false
+      },
+      {
+       "sibling": "57d2cfa35f0142df2da3aa59deed2a104a73a679889acd79d7507731e645c0ec",
+       "sibling_is_left": false
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "payments": [
+  {
+   "amount": "1",
+   "num": "1",
+   "den": "1",
+   "payment": "1"
+  },
+  {
+   "amount": "3",
+   "num": "3",
+   "den": "2",
+   "payment": "5"
+  },
+  {
+   "amount": "400000000",
+   "num": "3",
+   "den": "2",
+   "payment": "600000000"
+  },
+  {
+   "amount": "1",
+   "num": "1",
+   "den": "4",
+   "payment": "1"
+  },
+  {
+   "amount": "7",
+   "num": "1",
+   "den": "4",
+   "payment": "2"
+  },
+  {
+   "amount": "18446744073709551615",
+   "num": "18446744073709551615",
+   "den": "1",
+   "payment": "340282366920938463426481119284349108225"
+  },
+  {
+   "amount": "18446744073709551615",
+   "num": "3",
+   "den": "18446744073709551615",
+   "payment": "3"
+  },
+  {
+   "amount": "5",
+   "num": "0",
+   "den": "9",
+   "payment": "0"
+  }
+ ],
+ "refusals": [
+  {
+   "name": "a key on the list twice",
+   "entries": [
+    {
+     "key": "0101010101010101010101010101010101010101010101010101010101010101",
+     "cap": "5",
+     "bought": "0"
+    },
+    {
+     "key": "0101010101010101010101010101010101010101010101010101010101010101",
+     "cap": "9",
+     "bought": "0"
+    }
+   ],
+   "reason": "a key is on the allocation list twice"
+  },
+  {
+   "name": "bought more than the cap",
+   "entries": [
+    {
+     "key": "0101010101010101010101010101010101010101010101010101010101010101",
+     "cap": "5",
+     "bought": "6"
+    }
+   ],
+   "reason": "bought more than the cap"
+  }
+ ],
+ "payment_refusals": [
+  {
+   "amount": "1",
+   "num": "1",
+   "den": "0",
+   "reason": "the price's denominator is zero"
+  }
+ ]
+}

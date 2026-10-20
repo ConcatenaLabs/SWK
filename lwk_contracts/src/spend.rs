@@ -14,8 +14,15 @@
 //!   record, checks the leaf is committed in the coin's output key, and runs
 //!   the program of a Simplicity leaf; it signs nothing for them.
 //!
-//! The key path, a path of several signatures, and a second contract input
-//! (a chain of contract spends) are refused, each with its reason.
+//! - other coins of the same template spent by the same tapscript path
+//!   (`{"is": "sibling"}`), each with its own instance, such as every
+//!   subscription coin of an offering released together. Each is recomputed
+//!   from its instance, checked against the chain's record, and signed by the
+//!   same contract key the path names, which every one of them must name.
+//!
+//! The key path, a path of several signatures, a chain of contract spends
+//! (a coin of the contract's next state spent beside it) and several coins of
+//! a Simplicity path are refused, each with its reason.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -99,6 +106,15 @@ pub enum InputRequest {
         /// The asset id, display hex.
         asset: String,
         amount: u64,
+    },
+    /// Another coin of the same template, spent by the same path in the same
+    /// transaction: its own instance (an instance record), and the coin as
+    /// the chain holds it. Only on a tapscript path; the engine recomputes its
+    /// output, checks the chain's record of it, and signs it with the same
+    /// contract key, which its instance must name as the contract's does.
+    Sibling {
+        coin: CoinRequest,
+        instance: serde_json::Value,
     },
     /// A coin that is neither the contract's nor the wallet's, spent through
     /// a script leaf with the witness given here (hex items, the leaf script
@@ -315,6 +331,18 @@ pub struct Spend {
     /// Whether each foreign input and the contract coin were checked against
     /// the chain's record.
     pub chain_checked: Vec<usize>,
+    /// Other coins of the same template spent by the same path: (input, its contract).
+    pub siblings: Vec<(usize, Arc<Contract>)>,
+}
+
+/// Whose key signs a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyNamed {
+    /// A parameter of the contract names the key.
+    Param(String),
+    /// The spender names the key in the witness value `key`, and the
+    /// signature goes in the witness value `signature`.
+    Spender { signature: String, key: String },
 }
 
 /// A finalized spend.
@@ -563,6 +591,7 @@ impl Spend {
         let mut roles = Vec::new();
         let mut k = 0;
         let mut seen: Vec<OutPoint> = Vec::new();
+        let mut siblings: Vec<(usize, Arc<Contract>)> = Vec::new();
         for (index, i) in wanted.iter().enumerate() {
             let (op, prev, role) = match i {
                 InputRequest::Contract => {
@@ -661,6 +690,87 @@ impl Spend {
                             amount: *amount,
                             sequence: DEFAULT_SEQUENCE,
                             key_path: Some(rec.key_path.clone()),
+                            witness: Vec::new(),
+                            leaf_kind: None,
+                            leaf: None,
+                            label: None,
+                        },
+                    )
+                }
+                InputRequest::Sibling { coin: c, instance } => {
+                    if path.kind != "tapscript" {
+                        return Err(Error::Spend(format!(
+                            "input {index} is another coin of this template; the engine spends several coins of one path only on a tapscript leaf, and path {} is a {} leaf",
+                            path.name, path.kind
+                        )));
+                    }
+                    let inst = Instance::parse(&instance.to_string())?;
+                    let sc = Contract::new(contract.template.clone(), inst)
+                        .map_err(|e| Error::Spend(format!("input {index}'s instance: {e}")))?;
+                    if sc.instance.genesis.as_deref() != Some(&chain.genesis.to_string()) {
+                        return Err(Error::Spend(format!(
+                            "input {index}'s instance is not for this chain ({})",
+                            chain.genesis
+                        )));
+                    }
+                    for p in [path.lock_time_param.clone(), path.sequence_param.clone()]
+                        .into_iter()
+                        .flatten()
+                        .chain(path.witness.iter().filter_map(|w| {
+                            w.source.strip_prefix("signature:").map(str::to_string)
+                        }))
+                    {
+                        let mine = contract.value_bytes(&p)?;
+                        let theirs = sc.value_bytes(&p)?;
+                        if mine != theirs {
+                            return Err(Error::Spend(format!(
+                                "input {index}'s instance has {p} = {}, the contract coin's has {}; coins spent together by one path must agree on its key and its locks",
+                                hex(&theirs),
+                                hex(&mine)
+                            )));
+                        }
+                    }
+                    let s = sc.script_pubkey();
+                    let said = Script::from(
+                        unhex_any(&c.script_pubkey)
+                            .map_err(|e| Error::Spend(format!("input {index} script: {e}")))?,
+                    );
+                    if said != s {
+                        return Err(Error::Spend(format!(
+                            "input {index}'s script {} is not the one the engine recomputes from its instance, {}",
+                            c.script_pubkey,
+                            hex(s.as_bytes())
+                        )));
+                    }
+                    let key = format!("{}:{}", c.txid, c.vout);
+                    let p = facts_ref.and_then(|f| f.prevouts.get(&key)).ok_or_else(|| {
+                        Error::Unaccounted(format!(
+                            "input {index} is a coin of this template, {key}, and the chain's record of it was not given; the engine does not take it on the request's word"
+                        ))
+                    })?;
+                    if p.script_pubkey != c.script_pubkey
+                        || p.asset != c.asset
+                        || p.amount != c.amount
+                    {
+                        return Err(Error::Unaccounted(format!(
+                            "input {index}, {key}, is said to hold {} atoms of {} at {}; the chain's record is {} atoms of {} at {}",
+                            c.amount, c.asset, c.script_pubkey, p.amount, p.asset, p.script_pubkey
+                        )));
+                    }
+                    chain_checked.push(index);
+                    siblings.push((index, Arc::new(sc)));
+                    (
+                        outpoint_of(&c.txid, c.vout)?,
+                        explicit(s, display_asset(&c.asset)?, c.amount),
+                        InputRole {
+                            index,
+                            role: "sibling".into(),
+                            coin: key,
+                            script_pubkey: c.script_pubkey.clone(),
+                            asset: c.asset.clone(),
+                            amount: c.amount,
+                            sequence,
+                            key_path: None,
                             witness: Vec::new(),
                             leaf_kind: None,
                             leaf: None,
@@ -929,6 +1039,27 @@ impl Spend {
                 unhex_any(value).map_err(|e| Error::Spend(format!("{name}: {e}")))?;
             }
         }
+        if let Some((sig, key)) = crate::known::spender_key(template.hash(), &path.name) {
+            if request.spender.contains_key(sig) {
+                return Err(Error::Spend(format!(
+                    "{sig} is the signature this wallet makes over the final transaction; a request does not give it"
+                )));
+            }
+            let k = request.spender.get(key).ok_or_else(|| {
+                Error::Spend(format!(
+                    "path {} is signed by the key {key} names, and the request gives no {key}",
+                    path.name
+                ))
+            })?;
+            if unhex_any(k).map(|b| b.len()) != Ok(32) {
+                return Err(Error::Spend(format!(
+                    "{key} must be an x-only public key, 32 bytes of hex"
+                )));
+            }
+        }
+        if template.hash() == crate::known::CAPPED_SALE && path.name == "purchase" {
+            crate::known::check_capped_purchase(&request.spender, &request.coin)?;
+        }
         if let Some((name, prefix)) = crate::known::path_selector(template.hash(), &path.name) {
             let v: String = request
                 .spender
@@ -959,6 +1090,7 @@ impl Spend {
             facts,
             wallet_scripts: wallet_scripts.to_vec(),
             chain_checked,
+            siblings,
         })
     }
 
@@ -1047,7 +1179,7 @@ impl Spend {
         signer: &SwSigner,
         key_path: &str,
     ) -> Result<Option<(Keypair, String)>, Error> {
-        let Some(named) = self.signing_param()? else {
+        let Some(named) = self.key_named()? else {
             return Ok(None);
         };
         let account = contract_account(self.chain.mainnet);
@@ -1065,7 +1197,18 @@ impl Spend {
         let secp = Secp256k1::new();
         let keypair = Keypair::from_secret_key(&secp, &xprv.private_key);
         let xonly = hex(&keypair.x_only_public_key().0.serialize());
-        let want = hex(&self.contract.value_bytes(&named)?);
+        let (named, want) = match &named {
+            KeyNamed::Param(p) => (p.clone(), hex(&self.contract.value_bytes(p)?)),
+            KeyNamed::Spender { key, .. } => (
+                key.clone(),
+                self.spender
+                    .get(key)
+                    .map(|v| v.trim_start_matches("0x").to_lowercase())
+                    .ok_or_else(|| {
+                        Error::Signing(format!("the spender's value {key} is not given"))
+                    })?,
+            ),
+        };
         if xonly != want {
             return Err(Error::Signing(format!(
                 "path {} is signed by {named} = {want}; this wallet's contract key at {key_path} is {xonly}",
@@ -1073,6 +1216,19 @@ impl Spend {
             )));
         }
         Ok(Some((keypair, named)))
+    }
+
+    /// Who names the key that signs this path; `None` when it takes no signature.
+    pub fn key_named(&self) -> Result<Option<KeyNamed>, Error> {
+        if let Some((signature, key)) =
+            crate::known::spender_key(self.contract.template.hash(), &self.path.name)
+        {
+            return Ok(Some(KeyNamed::Spender {
+                signature: signature.into(),
+                key: key.into(),
+            }));
+        }
+        Ok(self.signing_param()?.map(KeyNamed::Param))
     }
 
     /// The parameter naming the key that signs this path; `None` when the
@@ -1120,7 +1276,10 @@ impl Spend {
                     })?
                     .clone()
             } else {
-                let bytes = if w.source.starts_with("signature:") {
+                let spender_sig =
+                    crate::known::spender_key(self.contract.template.hash(), &self.path.name)
+                        .is_some_and(|(s, _)| s == w.name);
+                let bytes = if w.source.starts_with("signature:") || spender_sig {
                     sig.to_vec()
                 } else if let Some(p) = w
                     .source
@@ -1469,37 +1628,41 @@ impl Spend {
             }
             "tapscript" => {
                 let leaf = self.path.leaf.as_deref().unwrap_or_default();
-                let script = self.contract.leaf_script(leaf)?;
-                let cb = self.control_block()?;
-                let mut stack = Vec::new();
-                if keypair.is_some() {
-                    let spend = ScriptPathSpend {
-                        tx: &self.tx,
-                        input_index: self.k,
-                        prevouts: &self.prevouts,
-                        leaf_script: &script,
-                        control_block: &cb,
-                        sighash_type: SchnorrSighashType::Default,
-                        genesis_hash: self.chain.genesis,
+                let coins = std::iter::once((self.k, self.contract.clone()))
+                    .chain(self.siblings.iter().cloned());
+                for (index, c) in coins {
+                    let script = c.leaf_script(leaf)?;
+                    let cb = c.control_block(leaf)?;
+                    let mut stack = Vec::new();
+                    if keypair.is_some() {
+                        let spend = ScriptPathSpend {
+                            tx: &self.tx,
+                            input_index: index,
+                            prevouts: &self.prevouts,
+                            leaf_script: &script,
+                            control_block: &cb,
+                            sighash_type: SchnorrSighashType::Default,
+                            genesis_hash: self.chain.genesis,
+                        };
+                        let path = DerivationPath::from_str(&key_path.replace('\'', "h"))
+                            .map_err(|e| Error::Signing(e.to_string()))?;
+                        let sig = signer
+                            .sign_tapscript(&path, &spend)
+                            .map_err(|e| Error::Signing(e.to_string()))?;
+                        stack.push(sig.to_vec());
+                    } else if !self.path.witness.is_empty() {
+                        return Err(Error::Spend(format!(
+                            "path {} is a tapscript leaf whose witness the engine cannot supply",
+                            self.path.name
+                        )));
+                    }
+                    stack.push(script.to_bytes());
+                    stack.push(cb.serialize());
+                    tx.input[index].witness = TxInWitness {
+                        script_witness: stack,
+                        ..Default::default()
                     };
-                    let path = DerivationPath::from_str(&key_path.replace('\'', "h"))
-                        .map_err(|e| Error::Signing(e.to_string()))?;
-                    let sig = signer
-                        .sign_tapscript(&path, &spend)
-                        .map_err(|e| Error::Signing(e.to_string()))?;
-                    stack.push(sig.to_vec());
-                } else if !self.path.witness.is_empty() {
-                    return Err(Error::Spend(format!(
-                        "path {} is a tapscript leaf whose witness the engine cannot supply",
-                        self.path.name
-                    )));
                 }
-                stack.push(script.to_bytes());
-                stack.push(cb.serialize());
-                tx.input[self.k].witness = TxInWitness {
-                    script_witness: stack,
-                    ..Default::default()
-                };
                 (0, 0, 0)
             }
             k => {
