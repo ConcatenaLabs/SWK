@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/ConcatenaLabs/sequentia-contracts",
-  "revision": "e94ab98",
+  "revision": "f785065",
   "copied": "templates/<t>/descriptor.json and vectors.json as they are; each templates/<t>/*.simf is `seqc expand` of that source (its includes resolved, the text source_sha256 hashes); fixtures/ is mirrors/fixtures/one_key_as_v2 and mirrors/fixtures/refusals.json",
   "sha256": {
     "capped_sale/allocations.json": "2a40ecdaa92d1c4e24dc15ccdad7a9bf5a62e194c0fe4cb3027e31e4468d9f1a",
@@ -23,10 +23,16 @@
     "pignus_offer/descriptor.json": "2d6195a6497953d70999464e7baaed383768d214b4bb67e351d453535e62130c",
     "pignus_offer/pignus_offer.simf": "38dfaa068ae52eef02997a5b025f7bc262371da3b8feb3e775988e89a7e0df4d",
     "pignus_offer/vectors.json": "97ae5572ec0ebcb673b335b9d4ff5c907ad53fa34f8d9a6b7eaaf14768d0c341",
+    "pignus_offer_threshold/descriptor.json": "09a543aed8f72f2a2891f39c982b088e64bd5b2f6ae39cd027736128c0a94928",
+    "pignus_offer_threshold/pignus_offer_threshold.simf": "8eb5ca758439cadba1210e8582397ebb3f7b0148dffdcc834cd9cad77ee034ec",
+    "pignus_offer_threshold/vectors.json": "dd10f3137754db4b0d514b55a5a0be2484a5fa210ecd09041fd9e312d224da6a",
     "pignus_vault/descriptor.json": "c823db9be6968f630c382a0a5401c79579af3fd02a9784ec04e5d57b9874c4ef",
     "pignus_vault/pignus_vault.simf": "1278cf68cb29ba89a5f95e64c5552ddc5be35cd6755053f021653dc2a7e84ffd",
     "pignus_vault/rules.json": "c1d1de264c478b0dbf0a0dc9fbc5bfee8ae2a1b492d9ab12946f4f0a091ad55a",
     "pignus_vault/vectors.json": "5d3fc79d0131681b0e0505a8dd05410d06562d3448def7a3b839b24d22f4ec5e",
+    "pignus_vault_threshold/descriptor.json": "f0e0f6c809fc845f236ccf95ee733a4b45fa7e3f0937a7210449a7bd11981e78",
+    "pignus_vault_threshold/pignus_vault_threshold.simf": "4c26a520d173a381637768b9d97244e3f3f59e99c5e76a7b73b6bc5b13dec875",
+    "pignus_vault_threshold/vectors.json": "da8c2cdcc7467b57653a818db70bfb61c8128d6ccd4c529713ddcc4a6f6e0d08",
     "subscription_escrow/descriptor.json": "f7c210dacee5e2584173a779115786281c30277ae97a1e1224f3d82babfc3b36",
     "subscription_escrow/vectors.json": "d9c1aebb91325ca208130fd52eeb203cb6aca7e221a36680c626c469e87fb219"
   }

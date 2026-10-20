@@ -30,6 +30,13 @@ pub const FAUCET_DRIP: &str = "12986f202fbfb850f7699c5d5188f261f276de6c7038142f0
 pub const PIGNUS_VAULT: &str = "6b17869c4e2abe782fe3d8a3ece4865b8f0aa483028b1d0a815e6bcb4e8939ac";
 /// `pignus/offer`, version 2.
 pub const PIGNUS_OFFER: &str = "4e999cdc9efa1186c0876ce9ebcc8e6dac60c10885bfb2cb5dce9489840084e7";
+/// `pignus/vault-threshold`, version 1: a version 2 vault priced by a
+/// record that at least THRESHOLD of its two or three oracles attest.
+pub const PIGNUS_VAULT_THRESHOLD: &str =
+    "b7fee3aa3dd5f1078204e91384f14bd7c78d7d8a051fc7ace00e9b3bde0e6f75";
+/// `pignus/offer-threshold`, version 1: the offer that opens one.
+pub const PIGNUS_OFFER_THRESHOLD: &str =
+    "c8d981f09b6bd60b52e152a093ed54070e76fe82b305ca02a43c568e81e1e811";
 
 /// `sequentia/capped-sale`, version 1.
 pub const CAPPED_SALE: &str = "9406d4247e602c013533c273316c0ab319ed41019aac59d39b102e8710556692";
@@ -89,6 +96,26 @@ pub const KNOWN: &[KnownTemplate] = &[
         vectors: include_str!("../templates/pignus_offer/vectors.json"),
     },
     KnownTemplate {
+        dir: "pignus_vault_threshold",
+        hash: PIGNUS_VAULT_THRESHOLD,
+        descriptor: include_str!("../templates/pignus_vault_threshold/descriptor.json"),
+        sources: &[(
+            "pignus_vault_threshold.simf",
+            include_str!("../templates/pignus_vault_threshold/pignus_vault_threshold.simf"),
+        )],
+        vectors: include_str!("../templates/pignus_vault_threshold/vectors.json"),
+    },
+    KnownTemplate {
+        dir: "pignus_offer_threshold",
+        hash: PIGNUS_OFFER_THRESHOLD,
+        descriptor: include_str!("../templates/pignus_offer_threshold/descriptor.json"),
+        sources: &[(
+            "pignus_offer_threshold.simf",
+            include_str!("../templates/pignus_offer_threshold/pignus_offer_threshold.simf"),
+        )],
+        vectors: include_str!("../templates/pignus_offer_threshold/vectors.json"),
+    },
+    KnownTemplate {
         dir: "capped_sale",
         hash: CAPPED_SALE,
         descriptor: include_str!("../templates/capped_sale/descriptor.json"),
@@ -140,6 +167,12 @@ pub const PATH_SELECTORS: &[(&str, &str, &str, &str)] = &[
     (PIGNUS_VAULT, "recover", "PATH", "Right(Right("),
     (PIGNUS_OFFER, "take", "PATH", "Left("),
     (PIGNUS_OFFER, "refund", "PATH", "Right("),
+    (PIGNUS_VAULT_THRESHOLD, "repay", "PATH", "Left(Left("),
+    (PIGNUS_VAULT_THRESHOLD, "top_up", "PATH", "Left(Right("),
+    (PIGNUS_VAULT_THRESHOLD, "liquidate", "PATH", "Right(Left("),
+    (PIGNUS_VAULT_THRESHOLD, "recover", "PATH", "Right(Right("),
+    (PIGNUS_OFFER_THRESHOLD, "take", "PATH", "Left("),
+    (PIGNUS_OFFER_THRESHOLD, "refund", "PATH", "Right("),
 ];
 
 /// The witness and the literal prefix that choose `path` of `template`.

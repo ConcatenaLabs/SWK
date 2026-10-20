@@ -157,7 +157,8 @@ them.
 ## The templates the kit carries
 
 `templates/` holds `sequentia/one-key`, `sequentia/one-key-exit`,
-`sequentia/faucet-drip`, `pignus/vault`, `pignus/offer`, `sequentia/capped-sale`
+`sequentia/faucet-drip`, `pignus/vault`, `pignus/offer`,
+`pignus/vault-threshold`, `pignus/offer-threshold`, `sequentia/capped-sale`
 and `sequentia/subscription-escrow` with their vectors, the version 2 fixture and the
 shared refusal corpus, copied from `sequentia-contracts` at the revision
 `templates/PIN.json` names (with each file's SHA-256). The `.simf` files there
@@ -172,6 +173,7 @@ run the tests.
 cargo test -p lwk_contracts                       # vectors, refusals, budget, the gate
 SEQUENTIA_BIN=/path/to/Sequentia/src cargo test -p lwk_contracts --test drip_regtest -- --nocapture
 SEQUENTIA_BIN=/path/to/Sequentia/src cargo test -p lwk_contracts --test vault_regtest -- --nocapture
+SEQUENTIA_BIN=/path/to/Sequentia/src cargo test -p lwk_contracts --test vault_threshold_regtest -- --nocapture
 SEQUENTIA_BIN=/path/to/Sequentia/src cargo test -p lwk_contracts --features wollet --test sale_escrow_regtest -- --nocapture
 ```
 
@@ -189,7 +191,14 @@ oracle's beacon coin, and the full repayment, each confirmed; it asserts the
 refusals for a digest not shown, a foreign input changed after the summary
 and a wallet input in another asset than shown, and forces the signed
 liquidation moved onto another beacon coin into a block, which refuses it for
-the wallet input's signature. `tests/sale_escrow_regtest.rs` signs a capped
+the wallet input's signature. `tests/vault_threshold_regtest.rs` does the same
+for a loan of three oracles with a threshold of two: the take of a 2-of-3
+offer, and a liquidation under a record two oracles signed alike, each
+signer's beacon coin spent and recreated at its output 2j; it asserts that a
+liquidation with one signature is refused by the program the engine runs,
+that a beacon coin switched after the summary signs nothing, and forces the
+signed liquidation with its second beacon moved into a block, which refuses
+it. `tests/sale_escrow_regtest.rs` signs a capped
 sale's purchase with this wallet's contract key as the buyer's, paid from the
 wallet's own coins, then the purchase that fills the cap, and a subscription
 escrow's release of three coins in one transaction. It asserts the refusals

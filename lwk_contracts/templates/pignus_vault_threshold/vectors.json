@@ -1,0 +1,186 @@
+{
+  "addresses": [
+    {
+      "address": {
+        "elementsregtest": "ert1pjqt0kryyg9er986cq0qgethltrv8judxkmuc85wx6evmytnrsansgskyse",
+        "sequentia-testnet": "tb1pjqt0kryyg9er986cq0qgethltrv8judxkmuc85wx6evmytnrsans565uv8"
+      },
+      "leaves": {
+        "terms": {
+          "data": "8038005026e58a8cec3d28bb9d67e7733beabb2faee42ac558454a780f0298adfaf4732db47da96b9e3b5bce4348aa40986d2fb1ca969a5d6825e2bb7c1e7f1104e735a2a3b97c355b36aaedc221c8e467bacc976684ca694ad130f7630de6ec8dc0e04a85e7859124a4212777053e6c7d0c99d5a11f31811abd2e27ef8107f7f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9cdcd7666e837d684d12a5c7875eafb4e8faceadc3f5009944e332001de3fcb218dcb34f87e9de941491817645e4035f9ea120c9b33891d14be8417d62a9940b13d26eca59becfb8ffbd2e605252ea8ba8055567641a707ed27e576416850a0030205000030d400003a98000029046b49d2006be26880da56c7c8ea87157cf0141777177ccbc129bd92044c15b2916e76235ca99e267a7609134475998bbc61e73f67766fcb9cdcf2fa09dd62f6429fdeab8ce084f4d00000befe6f6720006ab13b80",
+          "hash": "0bd9adbdaf125777650d0ffb372d9d2ab925380ebd897cb8e92127df38562479"
+        },
+        "vault": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac00bd9adbdaf125777650d0ffb372d9d2ab925380ebd897cb8e92127df38562479",
+          "hash": "572ec15a1f3f6f0807b69ae05037147db586c716929feab673aad7c7c941b66e"
+        }
+      },
+      "merkle_root": "eb30d0108849098c6c322c76be8aaf0134b4bfaf2eb59587935771f68acd0640",
+      "name": "instance 0: data leaf first, output key parity 0, 2 of keys A/B/C",
+      "output_key": "9016fb0c844172329f5803c08caeff58d87971a6b6f983d1c6d659b22e638767",
+      "output_key_parity": 0,
+      "params": {
+        "BEACON_ASSET_1": "cdcd7666e837d684d12a5c7875eafb4e8faceadc3f5009944e332001de3fcb21",
+        "BEACON_ASSET_2": "8dcb34f87e9de941491817645e4035f9ea120c9b33891d14be8417d62a9940b1",
+        "BEACON_ASSET_3": "3d26eca59becfb8ffbd2e605252ea8ba8055567641a707ed27e576416850a003",
+        "BONUS_BP": "00002904",
+        "BORROWER": "7609134475998bbc61e73f67766fcb9cdcf2fa09dd62f6429fdeab8ce084f4d0",
+        "COLL": "8038005026e58a8cec3d28bb9d67e7733beabb2faee42ac558454a780f0298ad",
+        "DEBT_ASSET": "faf4732db47da96b9e3b5bce4348aa40986d2fb1ca969a5d6825e2bb7c1e7f11",
+        "LENDER": "da56c7c8ea87157cf0141777177ccbc129bd92044c15b2916e76235ca99e267a",
+        "LIQ_BP": "000030d4",
+        "MATURITY": "6b49d200",
+        "ORACLE_1": "04e735a2a3b97c355b36aaedc221c8e467bacc976684ca694ad130f7630de6ec",
+        "ORACLE_2": "8dc0e04a85e7859124a4212777053e6c7d0c99d5a11f31811abd2e27ef8107f7",
+        "ORACLE_3": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+        "PRECISION": "05",
+        "RECOVER_AFTER": "6be26880",
+        "TARGET_BP": "00003a98",
+        "THRESHOLD": "02"
+      },
+      "script_pubkey": "51209016fb0c844172329f5803c08caeff58d87971a6b6f983d1c6d659b22e638767",
+      "slots": {
+        "DEBT_OUT": "0000befe6f672000",
+        "LAST_TIME": "6ab13b80"
+      },
+      "tweak": "6b09633525b022f4f979de983ded9837bd60c6e3cdaa3579df2e92e5d7fef0af"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1punhuj42m3tv94k2044fqw7y4u2zw8cx6tgzktqwuguzl9g0ak8cqqrn4hv",
+        "sequentia-testnet": "tb1punhuj42m3tv94k2044fqw7y4u2zw8cx6tgzktqwuguzl9g0ak8cquf3dtj"
+      },
+      "leaves": {
+        "terms": {
+          "data": "8038005026e58a8cec3d28bb9d67e7733beabb2faee42ac558454a780f0298adfaf4732db47da96b9e3b5bce4348aa40986d2fb1ca969a5d6825e2bb7c1e7f1104e735a2a3b97c355b36aaedc221c8e467bacc976684ca694ad130f7630de6ec8dc0e04a85e7859124a4212777053e6c7d0c99d5a11f31811abd2e27ef8107f750929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0cdcd7666e837d684d12a5c7875eafb4e8faceadc3f5009944e332001de3fcb218dcb34f87e9de941491817645e4035f9ea120c9b33891d14be8417d62a9940b13d26eca59becfb8ffbd2e605252ea8ba8055567641a707ed27e576416850a0030205000030d400003a98000029046b49d2006be26880a0388c98039314432d356f5f69398d6d4e82527bbe8800b88519c745c6987d68b7b975eb90a7914ac2793b1f785c9d775089a7b5d0dc728a83a3191e297951f60000befe6f6720006ab13b80",
+          "hash": "1d85e79df035c5b4856be1341e0ce990486815a10cafffa24f054ec06c1524bc"
+        },
+        "vault": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac01d85e79df035c5b4856be1341e0ce990486815a10cafffa24f054ec06c1524bc",
+          "hash": "572ec15a1f3f6f0807b69ae05037147db586c716929feab673aad7c7c941b66e"
+        }
+      },
+      "merkle_root": "257d4bd2837b91ced2797987f13ef48b1b40b07b556eb839986541b1b0fb1a28",
+      "name": "instance 1: data leaf first, output key parity 1, 2 of keys A/B/NUMS",
+      "output_key": "e4efc9555b8ad85ad94fad52077895e284e3e0da5a056581dc4705f2a1fdb1f0",
+      "output_key_parity": 1,
+      "params": {
+        "BEACON_ASSET_1": "cdcd7666e837d684d12a5c7875eafb4e8faceadc3f5009944e332001de3fcb21",
+        "BEACON_ASSET_2": "8dcb34f87e9de941491817645e4035f9ea120c9b33891d14be8417d62a9940b1",
+        "BEACON_ASSET_3": "3d26eca59becfb8ffbd2e605252ea8ba8055567641a707ed27e576416850a003",
+        "BONUS_BP": "00002904",
+        "BORROWER": "b7b975eb90a7914ac2793b1f785c9d775089a7b5d0dc728a83a3191e297951f6",
+        "COLL": "8038005026e58a8cec3d28bb9d67e7733beabb2faee42ac558454a780f0298ad",
+        "DEBT_ASSET": "faf4732db47da96b9e3b5bce4348aa40986d2fb1ca969a5d6825e2bb7c1e7f11",
+        "LENDER": "a0388c98039314432d356f5f69398d6d4e82527bbe8800b88519c745c6987d68",
+        "LIQ_BP": "000030d4",
+        "MATURITY": "6b49d200",
+        "ORACLE_1": "04e735a2a3b97c355b36aaedc221c8e467bacc976684ca694ad130f7630de6ec",
+        "ORACLE_2": "8dc0e04a85e7859124a4212777053e6c7d0c99d5a11f31811abd2e27ef8107f7",
+        "ORACLE_3": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+        "PRECISION": "05",
+        "RECOVER_AFTER": "6be26880",
+        "TARGET_BP": "00003a98",
+        "THRESHOLD": "02"
+      },
+      "script_pubkey": "5120e4efc9555b8ad85ad94fad52077895e284e3e0da5a056581dc4705f2a1fdb1f0",
+      "slots": {
+        "DEBT_OUT": "0000befe6f672000",
+        "LAST_TIME": "6ab13b80"
+      },
+      "tweak": "4efbcdcf431de2b08311d55f33492d259500b5642716f05baa9265f18b3145f4"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1p2fdetjxrz0c8ap299ma9n2tu3vhkfgvlnyq8dpv5gw64sua6w0gq3sm36a",
+        "sequentia-testnet": "tb1p2fdetjxrz0c8ap299ma9n2tu3vhkfgvlnyq8dpv5gw64sua6w0gqd6efxr"
+      },
+      "leaves": {
+        "terms": {
+          "data": "8038005026e58a8cec3d28bb9d67e7733beabb2faee42ac558454a780f0298adfaf4732db47da96b9e3b5bce4348aa40986d2fb1ca969a5d6825e2bb7c1e7f11f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f904e735a2a3b97c355b36aaedc221c8e467bacc976684ca694ad130f7630de6ec8dc0e04a85e7859124a4212777053e6c7d0c99d5a11f31811abd2e27ef8107f7cdcd7666e837d684d12a5c7875eafb4e8faceadc3f5009944e332001de3fcb218dcb34f87e9de941491817645e4035f9ea120c9b33891d14be8417d62a9940b13d26eca59becfb8ffbd2e605252ea8ba8055567641a707ed27e576416850a0030305000030d400003a98000029046b49d2006be26880a0388c98039314432d356f5f69398d6d4e82527bbe8800b88519c745c6987d68b7b975eb90a7914ac2793b1f785c9d775089a7b5d0dc728a83a3191e297951f60000befe6f6720006ab13b80",
+          "hash": "a05168b194065038b33030f2b461b089053802cab21e7047b9f1eb5e1168e20f"
+        },
+        "vault": {
+          "control_block": "be50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0a05168b194065038b33030f2b461b089053802cab21e7047b9f1eb5e1168e20f",
+          "hash": "572ec15a1f3f6f0807b69ae05037147db586c716929feab673aad7c7c941b66e"
+        }
+      },
+      "merkle_root": "2a008a8934655f434197592fef154c27e736a59895e11a747c92f641d96c7dfc",
+      "name": "instance 2: program first, output key parity 0, 3 of keys C/A/B",
+      "output_key": "525b95c8c313f07e85452efa59a97c8b2f64a19f990076859443b55873ba73d0",
+      "output_key_parity": 0,
+      "params": {
+        "BEACON_ASSET_1": "cdcd7666e837d684d12a5c7875eafb4e8faceadc3f5009944e332001de3fcb21",
+        "BEACON_ASSET_2": "8dcb34f87e9de941491817645e4035f9ea120c9b33891d14be8417d62a9940b1",
+        "BEACON_ASSET_3": "3d26eca59becfb8ffbd2e605252ea8ba8055567641a707ed27e576416850a003",
+        "BONUS_BP": "00002904",
+        "BORROWER": "b7b975eb90a7914ac2793b1f785c9d775089a7b5d0dc728a83a3191e297951f6",
+        "COLL": "8038005026e58a8cec3d28bb9d67e7733beabb2faee42ac558454a780f0298ad",
+        "DEBT_ASSET": "faf4732db47da96b9e3b5bce4348aa40986d2fb1ca969a5d6825e2bb7c1e7f11",
+        "LENDER": "a0388c98039314432d356f5f69398d6d4e82527bbe8800b88519c745c6987d68",
+        "LIQ_BP": "000030d4",
+        "MATURITY": "6b49d200",
+        "ORACLE_1": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+        "ORACLE_2": "04e735a2a3b97c355b36aaedc221c8e467bacc976684ca694ad130f7630de6ec",
+        "ORACLE_3": "8dc0e04a85e7859124a4212777053e6c7d0c99d5a11f31811abd2e27ef8107f7",
+        "PRECISION": "05",
+        "RECOVER_AFTER": "6be26880",
+        "TARGET_BP": "00003a98",
+        "THRESHOLD": "03"
+      },
+      "script_pubkey": "5120525b95c8c313f07e85452efa59a97c8b2f64a19f990076859443b55873ba73d0",
+      "slots": {
+        "DEBT_OUT": "0000befe6f672000",
+        "LAST_TIME": "6ab13b80"
+      },
+      "tweak": "7a81b4ebe28a7e587f008f9f299f0c41c376ee85ec3d4c34633eb88e25f60684"
+    },
+    {
+      "address": {
+        "elementsregtest": "ert1p0wupfpjsta3cvjtn3n2evts4vp0wa75g4kx90jcm3t8fc96tku9qc2t4tp",
+        "sequentia-testnet": "tb1p0wupfpjsta3cvjtn3n2evts4vp0wa75g4kx90jcm3t8fc96tku9qyqfdhl"
+      },
+      "leaves": {
+        "terms": {
+          "data": "8038005026e58a8cec3d28bb9d67e7733beabb2faee42ac558454a780f0298adfaf4732db47da96b9e3b5bce4348aa40986d2fb1ca969a5d6825e2bb7c1e7f1104e735a2a3b97c355b36aaedc221c8e467bacc976684ca694ad130f7630de6ec8dc0e04a85e7859124a4212777053e6c7d0c99d5a11f31811abd2e27ef8107f7f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9cdcd7666e837d684d12a5c7875eafb4e8faceadc3f5009944e332001de3fcb218dcb34f87e9de941491817645e4035f9ea120c9b33891d14be8417d62a9940b13d26eca59becfb8ffbd2e605252ea8ba8055567641a707ed27e576416850a0030105000030d400003a98000029046b49d2006be26880da56c7c8ea87157cf0141777177ccbc129bd92044c15b2916e76235ca99e267a7609134475998bbc61e73f67766fcb9cdcf2fa09dd62f6429fdeab8ce084f4d00000befe6f6720006ab13b80",
+          "hash": "96a86eef04ff9cfc12a357c20ccc2a91ae734f71b46e24794de1babdf0105ce6"
+        },
+        "vault": {
+          "control_block": "bf50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac096a86eef04ff9cfc12a357c20ccc2a91ae734f71b46e24794de1babdf0105ce6",
+          "hash": "572ec15a1f3f6f0807b69ae05037147db586c716929feab673aad7c7c941b66e"
+        }
+      },
+      "merkle_root": "ac48b6c3c190a756fe28754db173274e3ebc7aea40fc258915fe7905d4906bb6",
+      "name": "instance 3: program first, output key parity 1, 1 of keys A/B/C",
+      "output_key": "7bb81486505f638649738cd5962e15605eeefa88ad8c57cb1b8ace9c174bb70a",
+      "output_key_parity": 1,
+      "params": {
+        "BEACON_ASSET_1": "cdcd7666e837d684d12a5c7875eafb4e8faceadc3f5009944e332001de3fcb21",
+        "BEACON_ASSET_2": "8dcb34f87e9de941491817645e4035f9ea120c9b33891d14be8417d62a9940b1",
+        "BEACON_ASSET_3": "3d26eca59becfb8ffbd2e605252ea8ba8055567641a707ed27e576416850a003",
+        "BONUS_BP": "00002904",
+        "BORROWER": "7609134475998bbc61e73f67766fcb9cdcf2fa09dd62f6429fdeab8ce084f4d0",
+        "COLL": "8038005026e58a8cec3d28bb9d67e7733beabb2faee42ac558454a780f0298ad",
+        "DEBT_ASSET": "faf4732db47da96b9e3b5bce4348aa40986d2fb1ca969a5d6825e2bb7c1e7f11",
+        "LENDER": "da56c7c8ea87157cf0141777177ccbc129bd92044c15b2916e76235ca99e267a",
+        "LIQ_BP": "000030d4",
+        "MATURITY": "6b49d200",
+        "ORACLE_1": "04e735a2a3b97c355b36aaedc221c8e467bacc976684ca694ad130f7630de6ec",
+        "ORACLE_2": "8dc0e04a85e7859124a4212777053e6c7d0c99d5a11f31811abd2e27ef8107f7",
+        "ORACLE_3": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+        "PRECISION": "05",
+        "RECOVER_AFTER": "6be26880",
+        "TARGET_BP": "00003a98",
+        "THRESHOLD": "01"
+      },
+      "script_pubkey": "51207bb81486505f638649738cd5962e15605eeefa88ad8c57cb1b8ace9c174bb70a",
+      "slots": {
+        "DEBT_OUT": "0000befe6f672000",
+        "LAST_TIME": "6ab13b80"
+      },
+      "tweak": "cdecc208129143cab023681709b2a5f770164e2d6d5114ab317b55568eeb7f40"
+    }
+  ],
+  "template_hash": "b7fee3aa3dd5f1078204e91384f14bd7c78d7d8a051fc7ace00e9b3bde0e6f75",
+  "vectors": 2
+}

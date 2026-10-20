@@ -1,0 +1,206 @@
+/* A funded Pignus loan offer for vaults under several oracles: the lender's
+ * principal rests in this coin, and anyone may take a lot of it by locking
+ * collateral in a templates/pignus_vault_threshold vault on the offer's terms
+ * in the same transaction. It is templates/pignus_offer with that vault's terms.
+ *
+ * The output is
+ *
+ *     P2TR(NUMS, TapBranch(TapLeaf_0xbe(CMR), H_TapData(terms)))
+ *
+ * terms  the vault's terms but the borrower's payout (COLL, DEBT_ASSET,
+ *        ORACLE_1..3, BEACON_ASSET_1..3, THRESHOLD, PRECISION, LIQ_BP,
+ *        TARGET_BP, BONUS_BP, MATURITY, RECOVER_AFTER, LENDER), then LOT (the
+ *        principal a take draws), DEBT (what the vault opens owing for one
+ *        lot), COLLATERAL (the least collateral a vault for one lot holds) and
+ *        EXPIRY (a Unix time).
+ *
+ * The coin at input k owns outputs 2k and 2k+1.
+ *
+ *   TAKE    anyone. Output 2k is a vault of the program VAULT_CMR below beside
+ *           a data leaf of the offer's terms, the borrower's payout script hash
+ *           from the witness, DEBT_OUT = DEBT and LAST_TIME = the transaction's
+ *           lock time, with the NUMS key, holding at least COLLATERAL of COLL
+ *           explicitly. The coin gives exactly one LOT: what it holds beyond a
+ *           lot goes to output 2k+1 at this same script.
+ *   REFUND  anyone, once the lock time reaches EXPIRY: output 2k pays the
+ *           lender at least the whole coin.
+ *
+ * The vault's program is named by its commitment root, a constant here, so an
+ * offer of this template opens vaults of exactly one template.
+ */
+/* Output reader.
+ *
+ * The asset, amount and script of an output, refusing an output that does not
+ * exist or whose asset or amount is confidential: a covenant can only police
+ * what it can read. Asset ids are in internal byte order, the reverse of the
+ * hex an RPC prints. Include with `// include output_reader`.
+ */
+
+/* (asset id, amount, SHA256 of the scriptPubKey) of output i. */
+fn out_explicit(i: u32) -> (u256, u64, u256) {
+    let (asset, amount): (Asset1, Amount1) = unwrap(jet::output_amount(i));
+    let id: u256 = match asset {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u256) => explicit,
+    };
+    let value: u64 = match amount {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u64) => explicit,
+    };
+    (id, value, unwrap(jet::output_script_hash(i)))
+}
+
+/* Output i carries no nonce. An explicit output's nonce field is empty unless
+ * someone put data there, such as a blinding key; a covenant that pins an
+ * output pins this field too. */
+fn out_no_nonce(i: u32) {
+    assert!(is_none::<Nonce>(unwrap(jet::output_nonce(i))));
+}
+
+/* Output i pays exactly `amount` of `asset` to the script whose hash is
+ * `script_hash`, explicitly and with no nonce. */
+fn out_require(i: u32, asset: u256, amount: u64, script_hash: u256) {
+    let (id, value, script): (u256, u64, u256) = out_explicit(i);
+    assert!(jet::eq_256(id, asset));
+    assert!(jet::eq_64(value, amount));
+    assert!(jet::eq_256(script, script_hash));
+    out_no_nonce(i);
+}
+
+/* (asset id, amount) of the input being spent, refusing a confidential one. */
+fn in_explicit_current() -> (u256, u64) {
+    let (asset, amount): (Asset1, Amount1) = jet::current_amount();
+    let id: u256 = match asset {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u256) => explicit,
+    };
+    let value: u64 = match amount {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u64) => explicit,
+    };
+    (id, value)
+}
+
+/* The vault template's program: templates/pignus_vault_threshold. */
+fn vault_cmr() -> u256 {
+    0x3cac5bd7c27deeae0b7ce06d0d994f31f14ed466fd8d6a6aca9bf19ede8fb731
+}
+
+fn nums() -> u256 {
+    0x50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0
+}
+
+/* The vault's terms up to the lender's payout, in the vault's data-leaf order. */
+fn terms_to_lender(assets: (u256, u256), oracles: ([Pubkey; 3], [u256; 3], u8), ratios: (u8, u32, u32, u32), times: (u32, u32), lender: u256) -> Ctx8 {
+    let (coll, debt_asset): (u256, u256) = assets;
+    let (keys, beacon_assets, threshold): ([Pubkey; 3], [u256; 3], u8) = oracles;
+    let [k1, k2, k3]: [Pubkey; 3] = keys;
+    let [b1, b2, b3]: [u256; 3] = beacon_assets;
+    let (precision, liq, target, bonus): (u8, u32, u32, u32) = ratios;
+    let (maturity, recover_after): (u32, u32) = times;
+    let ctx: Ctx8 = jet::tapdata_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, coll);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, debt_asset);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, k1);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, k2);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, k3);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, b1);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, b2);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, b3);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, threshold);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, precision);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, liq);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, target);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, bonus);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, maturity);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, recover_after);
+    jet::sha_256_ctx_8_add_32(ctx, lender)
+}
+
+/* SHA256 of the scriptPubKey of the vault with these terms and this state. */
+fn vault_script_hash(terms: Ctx8, debt: u64, last: u32) -> u256 {
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(terms, debt);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, last);
+    let data: u256 = jet::sha_256_ctx_8_finalize(ctx);
+    let root: u256 = jet::build_tapbranch(jet::build_tapleaf_simplicity(vault_cmr()), data);
+    let key: u256 = jet::build_taptweak(nums(), root);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_2(ctx, 0x5120);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, key);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+/* The offer's data leaf over its terms. */
+fn offer_data(vault: Ctx8, lot: (u64, u64, u64), expiry: u32) -> u256 {
+    let (principal, debt, collateral): (u64, u64, u64) = lot;
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(vault, principal);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, debt);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, collateral);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, expiry);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+/* a - b; refuses a difference below zero. */
+fn minus(a: u64, b: u64) -> u64 {
+    let (borrow, d): (bool, u64) = jet::subtract_64(a, b);
+    assert!(jet::eq_1(<bool>::into(borrow), 0));
+    d
+}
+
+fn main() {
+    let assets: (u256, u256) = (witness::COLL, witness::DEBT_ASSET);
+    let keys: [Pubkey; 3] = [witness::ORACLE_1, witness::ORACLE_2, witness::ORACLE_3];
+    let beacon_assets: [u256; 3] = [witness::BEACON_ASSET_1, witness::BEACON_ASSET_2, witness::BEACON_ASSET_3];
+    let oracles: ([Pubkey; 3], [u256; 3], u8) = (keys, beacon_assets, witness::THRESHOLD);
+    let ratios: (u8, u32, u32, u32) = (witness::PRECISION, witness::LIQ_BP, witness::TARGET_BP, witness::BONUS_BP);
+    let times: (u32, u32) = (witness::MATURITY, witness::RECOVER_AFTER);
+    let lender: u256 = witness::LENDER;
+    let lot: (u64, u64, u64) = (witness::LOT, witness::DEBT, witness::COLLATERAL);
+    let expiry: u32 = witness::EXPIRY;
+    let (coll, debt_asset): (u256, u256) = assets;
+    let (principal, debt, collateral): (u64, u64, u64) = lot;
+
+    // The terms are the data leaf's. The offer's leaf hashes the same fields
+    // as a vault's, up to the lender's payout, then its own four.
+    let head: Ctx8 = terms_to_lender(assets, oracles, ratios, times, lender);
+    assert!(jet::eq_256(offer_data(head, lot, expiry), unwrap(jet::tappath(0))));
+
+    // The coin holds the debt asset, explicitly.
+    let (held, a): (u256, u64) = in_explicit_current();
+    assert!(jet::eq_256(held, debt_asset));
+
+    // Input k owns outputs 2k and 2k+1.
+    let k: u32 = jet::current_index();
+    let (carry, main): (bool, u32) = jet::add_32(k, k);
+    assert!(jet::eq_1(<bool>::into(carry), 0));
+    let (carry1, rest): (bool, u32) = jet::increment_32(main);
+
+    match witness::PATH {
+        Left(borrower: u256) => {
+            // The vault: these terms, this borrower, the opening state.
+            let last: u32 = jet::tx_lock_time();
+            assert!(jet::lt_32(0, last));
+            let terms: Ctx8 = jet::sha_256_ctx_8_add_32(terms_to_lender(assets, oracles, ratios, times, lender), borrower);
+            let script: u256 = vault_script_hash(terms, debt, last);
+            let (vasset, vamount, vscript): (u256, u64, u256) = out_explicit(main);
+            assert!(jet::eq_256(vasset, coll));
+            assert!(jet::eq_256(vscript, script));
+            assert!(jet::le_64(collateral, vamount));
+            out_no_nonce(main);
+            // Exactly one lot leaves; the rest rests here again.
+            let left: u64 = minus(a, principal);
+            match jet::is_zero_64(left) {
+                true => (),
+                false => out_require(rest, debt_asset, left, jet::current_script_hash()),
+            };
+        },
+        Right(u: ()) => {
+            jet::check_lock_time(expiry);
+            let (passet, pamount, pscript): (u256, u64, u256) = out_explicit(main);
+            assert!(jet::eq_256(passet, debt_asset));
+            assert!(jet::eq_256(pscript, lender));
+            assert!(jet::le_64(a, pamount));
+            out_no_nonce(main);
+        },
+    };
+}

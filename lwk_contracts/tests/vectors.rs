@@ -108,6 +108,8 @@ fn every_vector_is_reproduced() {
         "faucet_drip",
         "pignus_vault",
         "pignus_offer",
+        "pignus_vault_threshold",
+        "pignus_offer_threshold",
         "fixtures/one_key_as_v2",
     ] {
         counts.insert(t, check_vectors(&dir().join(t)));
@@ -121,7 +123,9 @@ fn every_vector_is_reproduced() {
             ("one_key", 6),
             ("one_key_exit", 10),
             ("pignus_offer", 4),
-            ("pignus_vault", 4)
+            ("pignus_offer_threshold", 4),
+            ("pignus_vault", 4),
+            ("pignus_vault_threshold", 4)
         ])
     );
 }
