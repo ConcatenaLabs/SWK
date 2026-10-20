@@ -12,7 +12,7 @@ use std::sync::Arc;
 use lwk_contracts::spend::{script_from_hex, Chain};
 use lwk_contracts::template::Node;
 use lwk_contracts::{
-    drip, ChainFacts, CoinRequest, Contract, Instance, Spend, SpendRequest, Template,
+    drip, ChainFacts, CoinRequest, Contract, Instance, Spend, SpendRequest, Template, WalletCoin,
 };
 use wasm_bindgen::prelude::*;
 
@@ -245,16 +245,24 @@ impl ContractSpend {
     /// Builds the spend `requestJson` describes (see `SpendRequest`) on
     /// `network`. `walletScriptsJson` lists the wallet's own scripts (hex), so
     /// an output to the wallet is told apart from a payment; `chainJson`
-    /// (`{tip_height, tip_median_time, coin_height, coin_start_median_time}`)
-    /// lets the engine check the spend's locks. Refuses an output the request
-    /// mislabels, a confidential output, a missing or second fee, and outputs
-    /// that do not balance the coin, each with the reason.
+    /// (`{tip_height, tip_median_time, coin_height, coin_start_median_time,
+    /// prevouts}`) lets the engine check the spend's locks and every coin the
+    /// wallet does not hold against the chain's record (`prevouts`, by
+    /// `txid:vout`: `{script_pubkey, asset, amount}`). `walletCoinsJson` is
+    /// the wallet's own record of its coins (`ContractSpend.walletCoins`),
+    /// against which every wallet input the request names is checked.
+    /// Refuses an output the request mislabels, a confidential output, a
+    /// missing or second fee, a wallet input the record does not back, a
+    /// foreign input the chain's record does not back or whose leaf its coin
+    /// does not commit to, a second contract input, and inputs and outputs
+    /// that do not balance, each with the reason.
     pub fn build(
         instance: &ContractInstance,
         network: &Network,
         request_json: &str,
         wallet_scripts_json: &str,
         chain_json: Option<String>,
+        wallet_coins_json: Option<String>,
     ) -> Result<ContractSpend, Error> {
         let request = SpendRequest::parse(request_json).map_err(err)?;
         let scripts: Vec<String> = serde_json::from_str(wallet_scripts_json)?;
@@ -267,16 +275,35 @@ impl ContractSpend {
             Some(c) => Some(serde_json::from_str(&c)?),
             None => None,
         };
+        let coins: Vec<WalletCoin> = match wallet_coins_json {
+            Some(c) => serde_json::from_str(&c)?,
+            None => Vec::new(),
+        };
         Ok(ContractSpend {
-            inner: Spend::build(
+            inner: Spend::build_with_coins(
                 instance.inner.clone(),
                 chain_of(network),
                 &request,
                 &scripts,
+                &coins,
                 facts,
             )
             .map_err(err)?,
         })
+    }
+
+    /// The wallet's own record of its coins, from what `wollet` synced: as
+    /// JSON, `[{txid, vout, script_pubkey, asset, amount, key_path,
+    /// confidential}]`, what `build` takes as `walletCoinsJson`.
+    #[wasm_bindgen(js_name = walletCoins)]
+    pub fn wallet_coins(wollet: &crate::Wollet) -> Result<String, Error> {
+        json(&lwk_contracts::wallet::wallet_coins(wollet.as_ref()).map_err(err)?)
+    }
+
+    /// What each input is: `[{index, role, coin, script_pubkey, asset,
+    /// amount, sequence, ...}]`.
+    pub fn inputs(&self) -> Result<String, Error> {
+        json(&self.inner.inputs)
     }
 
     /// The unsigned transaction, hex.

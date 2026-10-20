@@ -19,12 +19,16 @@ pub mod hex;
 pub mod known;
 pub mod spend;
 pub mod template;
+#[cfg(feature = "wollet")]
+pub mod wallet;
 
 pub use approval::{Approval, AssetLabel, RegistryName, WalletView};
 pub use error::Error;
 pub use known::{known, KnownTemplate, KNOWN};
-pub use spend::{ChainFacts, CoinRequest, OutputRequest, Spend, SpendRequest};
+pub use spend::{
+    ChainFacts, CoinRequest, InputRequest, OutputRequest, Prevout, Spend, SpendRequest, WalletCoin,
+};
 pub use template::{Contract, Instance, PathInfo, Template};
 
 /// The `sequentia-contracts` revision the reader and the known templates come from.
-pub const CONTRACTS_REVISION: &str = "ad8ed18";
+pub const CONTRACTS_REVISION: &str = "e94ab98";

@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/ConcatenaLabs/sequentia-contracts",
-  "revision": "ad8ed18",
+  "revision": "e94ab98",
   "copied": "templates/<t>/descriptor.json and vectors.json as they are; each templates/<t>/*.simf is `seqc expand` of that source (its includes resolved, the text source_sha256 hashes); fixtures/ is mirrors/fixtures/one_key_as_v2 and mirrors/fixtures/refusals.json",
   "sha256": {
     "faucet_drip/descriptor.json": "6a8b16a60eaa94c8aa29908719417a15390af8f89da032af4e6bde4761a6cdb7",
@@ -15,6 +15,13 @@
     "one_key/vectors.json": "9bc6aa0dc88001680aa54900849fdc703d3ef9d75160c31d087785ad8f284653",
     "one_key_exit/descriptor.json": "6aeaf3b543582d1bb507de3fcb2ea96c39f517c2237d6819cf6bd1f405464a18",
     "one_key_exit/one_key_exit.simf": "fc2b570db1d96b243c86d5aee1e2b6838fb6c10971b07ac34771ba2e7a423771",
-    "one_key_exit/vectors.json": "985059db3905b6139594dd78a08554af2ce4c4e34aae48409474d43b3a4c88dd"
+    "one_key_exit/vectors.json": "985059db3905b6139594dd78a08554af2ce4c4e34aae48409474d43b3a4c88dd",
+    "pignus_offer/descriptor.json": "2d6195a6497953d70999464e7baaed383768d214b4bb67e351d453535e62130c",
+    "pignus_offer/pignus_offer.simf": "38dfaa068ae52eef02997a5b025f7bc262371da3b8feb3e775988e89a7e0df4d",
+    "pignus_offer/vectors.json": "97ae5572ec0ebcb673b335b9d4ff5c907ad53fa34f8d9a6b7eaaf14768d0c341",
+    "pignus_vault/descriptor.json": "c823db9be6968f630c382a0a5401c79579af3fd02a9784ec04e5d57b9874c4ef",
+    "pignus_vault/pignus_vault.simf": "1278cf68cb29ba89a5f95e64c5552ddc5be35cd6755053f021653dc2a7e84ffd",
+    "pignus_vault/rules.json": "c1d1de264c478b0dbf0a0dc9fbc5bfee8ae2a1b492d9ab12946f4f0a091ad55a",
+    "pignus_vault/vectors.json": "5d3fc79d0131681b0e0505a8dd05410d06562d3448def7a3b839b24d22f4ec5e"
   }
 }

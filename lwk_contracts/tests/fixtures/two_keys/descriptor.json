@@ -1,0 +1,64 @@
+{
+  "descriptor": 2,
+  "template": {
+    "budget": {
+      "max": 4000050,
+      "offset": 50,
+      "per_witness_byte": 4
+    },
+    "internal_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+    "key_path": "key",
+    "name": "test/two-keys",
+    "params": [
+      {
+        "label": "First key",
+        "name": "A",
+        "role": "pubkey",
+        "type": "Pubkey"
+      },
+      {
+        "label": "Second key",
+        "name": "B",
+        "role": "pubkey",
+        "type": "Pubkey"
+      }
+    ],
+    "paths": [
+      {
+        "effect": "Spends by the internal key.",
+        "name": "key",
+        "who": "the holder of the internal key"
+      },
+      {
+        "effect": "Spends with both A's and B's signatures.",
+        "leaf": "both",
+        "name": "both",
+        "who": "the holders of A and B together"
+      }
+    ],
+    "slots": [],
+    "summary": "A test fixture: a key path and a two-signature leaf, which the engine refuses to spend.",
+    "tree": {
+      "leaf": "both",
+      "tapscript": [
+        {
+          "push": "A"
+        },
+        "ad",
+        {
+          "push": "B"
+        },
+        "ac"
+      ]
+    },
+    "version": 1
+  },
+  "template_hash": "a0feb0b347a437488f19f9efd9d8f56f358c4e6f8b2e26f78feb3959fec6d499",
+  "chains": [
+    {
+      "name": "sequentia-testnet",
+      "genesis": "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e",
+      "bech32_hrp": "tb"
+    }
+  ]
+}
