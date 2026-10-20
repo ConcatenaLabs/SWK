@@ -43,6 +43,7 @@ fn setup() -> (Spend, SwSigner) {
             asset: ASSET.into(),
             amount: 100_000,
         },
+        inputs: None,
         sequence: None,
         lock_time: None,
         outputs: vec![
@@ -52,6 +53,8 @@ fn setup() -> (Spend, SwSigner) {
                 script: Some(format!("0014{}", "22".repeat(20))),
                 asset: ASSET.into(),
                 amount: 99_000,
+                open: None,
+                input: None,
             },
             OutputRequest {
                 to: "fee".into(),
@@ -59,6 +62,8 @@ fn setup() -> (Spend, SwSigner) {
                 script: None,
                 asset: ASSET.into(),
                 amount: 1_000,
+                open: None,
+                input: None,
             },
         ],
         spender: BTreeMap::new(),
@@ -102,7 +107,7 @@ fn the_approval_shows_what_is_signed_and_only_that_is_signed() {
     assert!(s["checks"]["3_program_run"]
         .as_str()
         .unwrap()
-        .starts_with("the program ran against the final transaction"));
+        .starts_with("the contract's program (input 0) ran against the final transaction"));
 
     // Only the digest shown signs.
     let e = a.sign(&"00".repeat(32), &owner).unwrap_err().to_string();

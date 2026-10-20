@@ -457,7 +457,10 @@ A crate of this fork: the contract engine for templates written with
 pinned compiler, `simplicityhl` 0.7.2 (with `simplicity-lang` 0.8.0, whose C
 library carries its own symbol prefix, so it links beside the 0.7.0 that
 `lwk_simplicity` uses). `lwk_contracts/README.md` describes what it does;
-`templates/PIN.json` names the revision of the templates it carries.
+`templates/PIN.json` names the revision of the templates it carries. Its
+`wollet` feature adds `wallet::wallet_coins`, the wallet's own record of its
+coins read from a Wollet, which a spend with wallet inputs is checked against;
+`lwk_wasm` turns it on.
 
 Taking these libraries moved three entries of `Cargo.lock`: `bitcoin_hashes`
 0.14.0 to 0.14.1 and `semver` 1.0.27 to 1.0.28, which they require, and `psm`
@@ -485,8 +488,10 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   `ContractTemplate` (a descriptor and its resolved sources, checked; the
   carried templates by hash, `knownList`), `ContractInstance` (the output,
   address, derivation and paths of an instance; `planDrip` for the faucet
-  drip covenant), `ContractSpend` (the spend of a path, its outputs'
-  roles, its locks) and `ContractApproval` (the spend checked under the
+  drip covenant), `ContractSpend` (the spend of a path with the contract
+  coin, the wallet's own coins and foreign coins as inputs; its inputs' and
+  outputs' roles, its locks; `walletCoins(wollet)`, the wallet's own record of
+  its coins) and `ContractApproval` (the spend checked under the
   five-point signing rule, with the summary a wallet shows and its digest).
   `Signer.signContractSpend(approval, shownDigest)` signs only that digest's
   spend. Values cross as JSON text.

@@ -212,8 +212,9 @@ impl Signer {
     /// Signs a contract spend the wallet has shown: `shownDigest` is the
     /// `digest` of the approval's summary as displayed. Refuses any other
     /// digest, prepares the spend again and refuses if anything differs, then
-    /// signs with the contract key and runs the program against the
-    /// transaction it returns (hex, ready to broadcast).
+    /// signs with the contract key when the path takes one, signs the
+    /// wallet's own inputs with their funding keys, and runs every program
+    /// against the transaction it returns (hex, ready to broadcast).
     #[wasm_bindgen(js_name = signContractSpend)]
     pub fn sign_contract_spend(
         &self,

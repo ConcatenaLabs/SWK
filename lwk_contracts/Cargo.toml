@@ -7,8 +7,13 @@ license = "MIT OR BSD-2-Clause"
 
 [dependencies]
 lwk_signer = { version = "0.18.1", default-features = false }
-sequentia-contracts = { git = "https://github.com/ConcatenaLabs/sequentia-contracts", rev = "ad8ed18" }
+sequentia-contracts = { git = "https://github.com/ConcatenaLabs/sequentia-contracts", rev = "e94ab98" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 simplicityhl = "=0.7.2"
+lwk_wollet = { version = "0.18.1", default-features = false, optional = true }
+
+[features]
+# `wallet::wallet_coins`: the coins a Wollet holds, as the engine takes them.
+wollet = ["dep:lwk_wollet"]

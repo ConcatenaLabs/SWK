@@ -2713,6 +2713,7 @@ name = "lwk_contracts"
 version = "0.18.1"
 dependencies = [
  "lwk_signer",
+ "lwk_wollet",
  "sequentia-contracts",
  "serde",
  "serde_json",
@@ -4070,7 +4071,7 @@ dependencies = [
 [[package]]
 name = "sequentia-contracts"
 version = "0.1.0"
-source = "git+https://github.com/ConcatenaLabs/sequentia-contracts?rev=ad8ed18#ad8ed18ffce61bbc6feeaf19599775848137b745"
+source = "git+https://github.com/ConcatenaLabs/sequentia-contracts?rev=e94ab98#e94ab989ee1d143a2806a3e0dd1fc59cb795570d"
 dependencies = [
  "secp256k1 0.29.1",
  "serde",

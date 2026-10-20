@@ -82,6 +82,7 @@ pub fn plan(
     Ok(SpendRequest {
         path: DRIP_PATH.into(),
         coin: coin.clone(),
+        inputs: None,
         sequence: Some(drip_sequence(contract)?),
         lock_time: None,
         outputs: vec![
@@ -91,6 +92,8 @@ pub fn plan(
                 script: Some(contract.derived.script_pubkey.clone()),
                 asset: asset.clone(),
                 amount: rest,
+                open: None,
+                input: None,
             },
             OutputRequest {
                 to: "pay".into(),
@@ -98,6 +101,8 @@ pub fn plan(
                 script: None,
                 asset: asset.clone(),
                 amount,
+                open: None,
+                input: None,
             },
             OutputRequest {
                 to: "fee".into(),
@@ -105,6 +110,8 @@ pub fn plan(
                 script: None,
                 asset,
                 amount: fee,
+                open: None,
+                input: None,
             },
         ],
         spender: Default::default(),

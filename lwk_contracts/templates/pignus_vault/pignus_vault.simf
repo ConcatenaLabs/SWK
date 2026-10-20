@@ -1,0 +1,471 @@
+/* The Pignus loan vault, version 2: a loan's collateral in one coin, its terms
+ * and its state in the data leaf beside this program.
+ *
+ * The output is
+ *
+ *     P2TR(NUMS, TapBranch(TapLeaf_0xbe(CMR), H_TapData(terms || state)))
+ *
+ * terms  COLL, DEBT_ASSET (asset ids, internal byte order), ORACLE (the key
+ *        whose format-2 attestations price COLL in DEBT_ASSET), BEACON_ASSET
+ *        (that oracle's beacon asset), PRECISION (the attestations' precision),
+ *        LIQ_BP, TARGET_BP, BONUS_BP (collateral ratios in basis points: below
+ *        LIQ_BP the vault is unhealthy, a liquidation restores it at most to
+ *        TARGET_BP, and a liquidator is paid BONUS_BP of what it repays),
+ *        MATURITY, RECOVER_AFTER (Unix times), LENDER, BORROWER (SHA256 of the
+ *        payout scripts);
+ * state  DEBT_OUT (the debt outstanding) and LAST_TIME (the time of the last
+ *        attestation a liquidation used, or the time the loan began).
+ *
+ * The collateral is the coin's own amount, read live; no copy of it is kept.
+ * The spender gives the terms and the state in the witness and the program
+ * checks them against the data leaf, which consensus has bound to the output.
+ *
+ * The coin at input k owns outputs 2k and 2k+1, so two vaults in one
+ * transaction never share an output. Output 2k is the vault's successor, or the
+ * collateral's payout when the vault closes; output 2k+1 pays the lender.
+ *
+ *   REPAY      anyone. Output 2k+1 pays the lender P >= 1 of DEBT_ASSET. Below
+ *              the debt, output 2k is the successor holding the same collateral
+ *              with DEBT_OUT - P; at or above it, output 2k pays the borrower
+ *              at least the whole collateral and the vault closes.
+ *   TOP_UP     anyone. Output 2k is this same script, state unchanged, holding
+ *              more collateral than the coin.
+ *   LIQUIDATE  anyone, with the oracle's attestation of the price, signed over
+ *              a live beacon (input BEACON_AT spends a coin of BEACON_ASSET
+ *              from the script the attestation names) and newer than
+ *              LAST_TIME, its time the transaction's lock time.
+ *              Output 2k+1 pays the lender P >= 1; the debt repaid is
+ *              r = min(P, DEBT_OUT). Before maturity the vault must be
+ *              unhealthy at that price and r no more than takes it to
+ *              TARGET_BP; after MATURITY any r. The liquidator keeps a seizure
+ *              s worth at most r * BONUS_BP / 10,000 at that price. Below the
+ *              debt, output 2k is the successor with the rest of the collateral,
+ *              DEBT_OUT - r, LAST_TIME = the attestation's time, and must be
+ *              healthy at that price; at the debt, the vault closes, output 2k
+ *              must exist and be explicit, and what it pays the borrower in
+ *              COLL counts as the return.
+ *   RECOVER    anyone, once the lock time reaches RECOVER_AFTER: output 2k
+ *              pays the lender at least the whole collateral.
+ *
+ * Health compares products of an amount, a price and a ratio at 192 bits, so
+ * no amount is too large for the vault. Every output the vault reads must be
+ * explicit. A successor's state can be read off the transaction that makes
+ * it: the debt from the lender's payment, LAST_TIME from the lock time.
+ */
+/* Output reader.
+ *
+ * The asset, amount and script of an output, refusing an output that does not
+ * exist or whose asset or amount is confidential: a covenant can only police
+ * what it can read. Asset ids are in internal byte order, the reverse of the
+ * hex an RPC prints. Include with `// include output_reader`.
+ */
+
+/* (asset id, amount, SHA256 of the scriptPubKey) of output i. */
+fn out_explicit(i: u32) -> (u256, u64, u256) {
+    let (asset, amount): (Asset1, Amount1) = unwrap(jet::output_amount(i));
+    let id: u256 = match asset {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u256) => explicit,
+    };
+    let value: u64 = match amount {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u64) => explicit,
+    };
+    (id, value, unwrap(jet::output_script_hash(i)))
+}
+
+/* Output i carries no nonce. An explicit output's nonce field is empty unless
+ * someone put data there, such as a blinding key; a covenant that pins an
+ * output pins this field too. */
+fn out_no_nonce(i: u32) {
+    assert!(is_none::<Nonce>(unwrap(jet::output_nonce(i))));
+}
+
+/* Output i pays exactly `amount` of `asset` to the script whose hash is
+ * `script_hash`, explicitly and with no nonce. */
+fn out_require(i: u32, asset: u256, amount: u64, script_hash: u256) {
+    let (id, value, script): (u256, u64, u256) = out_explicit(i);
+    assert!(jet::eq_256(id, asset));
+    assert!(jet::eq_64(value, amount));
+    assert!(jet::eq_256(script, script_hash));
+    out_no_nonce(i);
+}
+
+/* (asset id, amount) of the input being spent, refusing a confidential one. */
+fn in_explicit_current() -> (u256, u64) {
+    let (asset, amount): (Asset1, Amount1) = jet::current_amount();
+    let id: u256 = match asset {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u256) => explicit,
+    };
+    let value: u64 = match amount {
+        Left(blinded: (u1, u256)) => panic!(),
+        Right(explicit: u64) => explicit,
+    };
+    (id, value)
+}
+/* Price attestation, format 2: the digest a signer signs, rebuilt from the
+ * fields a contract uses, and the signature checked over it.
+ *
+ *   message = version (1) || key (32) || base (32) || quote (32)
+ *             || price (8, LE) || precision (1) || time (4, LE) || beacon (32)
+ *   digest  = SHA256(SHA256(TAG) || SHA256(TAG) || message),
+ *             TAG = "Sequentia/oracle/price"
+ *
+ * The format is owned by sequentia-oracle (doc/format.md there). Integers are
+ * little-endian in the message, the order tapscript's 64-bit opcodes use; a
+ * SimplicityHL integer is big-endian, so the helper reverses the bytes of
+ * `price` and `time` before hashing them, which costs combinators only.
+ * Asset ids are in internal byte order, as jet::current_asset gives them.
+ * Include with `// include attestation`.
+ */
+
+fn att_le16(x: u16) -> u16 {
+    let (a, b): (u8, u8) = <u16>::into(x);
+    <(u8, u8)>::into((b, a))
+}
+
+fn att_le32(x: u32) -> u32 {
+    let (a, b): (u16, u16) = <u32>::into(x);
+    <(u16, u16)>::into((att_le16(b), att_le16(a)))
+}
+
+fn att_le64(x: u64) -> u64 {
+    let (a, b): (u32, u32) = <u64>::into(x);
+    <(u32, u32)>::into((att_le32(b), att_le32(a)))
+}
+
+/* The 32 bytes a format-2 attestation's BIP340 signature is over. */
+fn att_digest(key: u256, base: u256, quote: u256, price: u64, precision: u8, time: u32, beacon: u256) -> u256 {
+    let tag: u256 = 0xc04934780078514d7ab2e52cded2406ac154a043874d7121dadd61942b2ca91c;
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, tag);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, tag);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, 2);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, key);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, base);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, quote);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, att_le64(price));
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, precision);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, att_le32(time));
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, beacon);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+/* `sig` is `key`'s format-2 attestation of exactly these fields. The key
+ * signs its own name into the message, so a contract passes the one key it
+ * pins for both. */
+fn att_verify(key: Pubkey, base: u256, quote: u256, price: u64, precision: u8, time: u32, beacon: u256, sig: Signature) {
+    jet::bip_0340_verify((key, att_digest(key, base, quote, price, precision, time, beacon)), sig);
+}
+
+/* SHA256 of `OP_1 <beacon>`: the output script an attestation's beacon names,
+ * in the form jet::input_script_hash returns. */
+fn att_beacon_script_hash(beacon: u256) -> u256 {
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_2(ctx, 0x5120);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, beacon);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+/* The attestation's beacon is live: input `at` of this transaction spends an
+ * explicit coin of `beacon_asset` (the oracle's beacon asset, internal byte
+ * order) from the output script `beacon` names. The oracle moves every coin of
+ * that asset to a new script when it rotates, and only its key can, so an
+ * attestation naming an old beacon has no coin to point at. A zero beacon
+ * names no script that can hold one. */
+fn att_beacon_check(beacon: u256, beacon_asset: u256, at: u32) {
+    assert!(jet::eq_256(att_beacon_script_hash(beacon), unwrap(jet::input_script_hash(at))));
+    let asset: u256 = unwrap_right::<(u1, u256)>(unwrap(jet::input_asset(at)));
+    assert!(jet::eq_256(asset, beacon_asset));
+}
+
+/* att_verify, and the beacon it names is live at input `at`. */
+fn att_verify_fresh(key: Pubkey, base: u256, quote: u256, price: u64, precision: u8, time: u32, beacon: u256, sig: Signature, beacon_asset: u256, at: u32) {
+    att_verify(key, base, quote, price, precision, time, beacon, sig);
+    att_beacon_check(beacon, beacon_asset, at);
+}
+/* Wide arithmetic at 192 bits: products of three 64-bit numbers, their sums
+ * and comparisons, from 64-bit jets.
+ *
+ * A number is (high, middle, low), three 64-bit limbs, most significant
+ * first. The product of three u64 is below 2^192, so `w192_mul3` cannot fail;
+ * `w192_add` refuses a sum at or above 2^192, which a caller rules out by the
+ * bounds of what it adds. A contract that compares products of an amount, a
+ * price and a ratio then has no amount at which its arithmetic gives out.
+ *
+ * The comparisons take no branch on the values: a program pruned for one
+ * spend follows the same path on any other values, and a comparison that
+ * fails does so at the assertion that uses it.
+ * Include with `// include wide_arith192`.
+ */
+
+/* a * b * c, all 192 bits. */
+fn w192_mul3(a: u64, b: u64, c: u64) -> (u64, u64, u64) {
+    let (h, l): (u64, u64) = <u128>::into(jet::multiply_64(a, b));
+    let (l1, l0): (u64, u64) = <u128>::into(jet::multiply_64(l, c));
+    let (top, mid): (u64, u64) = <u128>::into(jet::full_multiply_64(h, c, l1, 0));
+    (top, mid, l0)
+}
+
+/* a + b; refuses a sum that does not fit in 192 bits. */
+fn w192_add(a: (u64, u64, u64), b: (u64, u64, u64)) -> (u64, u64, u64) {
+    let (a2, a1, a0): (u64, u64, u64) = a;
+    let (b2, b1, b0): (u64, u64, u64) = b;
+    let (c0, s0): (bool, u64) = jet::add_64(a0, b0);
+    let (c1, s1): (bool, u64) = jet::full_add_64(c0, a1, b1);
+    let (c2, s2): (bool, u64) = jet::full_add_64(c1, a2, b2);
+    assert!(jet::eq_1(<bool>::into(c2), 0));
+    (s2, s1, s0)
+}
+
+/* a < b, as a bit. The comparison takes no branch on the values, so a
+ * program pruned for one spend runs the same path on any other values. */
+fn w192_lt_bit(a: (u64, u64, u64), b: (u64, u64, u64)) -> u1 {
+    let (a2, a1, a0): (u64, u64, u64) = a;
+    let (b2, b1, b0): (u64, u64, u64) = b;
+    let low: u1 = jet::or_1(<bool>::into(jet::lt_64(a1, b1)), jet::and_1(<bool>::into(jet::eq_64(a1, b1)), <bool>::into(jet::lt_64(a0, b0))));
+    jet::or_1(<bool>::into(jet::lt_64(a2, b2)), jet::and_1(<bool>::into(jet::eq_64(a2, b2)), low))
+}
+
+/* a < b. */
+fn w192_lt(a: (u64, u64, u64), b: (u64, u64, u64)) -> bool {
+    <u1>::into(w192_lt_bit(a, b))
+}
+
+/* a <= b. */
+fn w192_le(a: (u64, u64, u64), b: (u64, u64, u64)) -> bool {
+    <u1>::into(jet::complement_1(w192_lt_bit(b, a)))
+}
+
+/* a * b; refuses a product that does not fit in 64 bits. */
+fn w192_mul_small(a: u64, b: u64) -> u64 {
+    let (h, l): (u64, u64) = <u128>::into(jet::multiply_64(a, b));
+    assert!(jet::eq_64(h, 0));
+    l
+}
+
+/* One step of 10^p: while p >= k, multiply by f = 10^k and take k off p. */
+fn w192_pow10_step(xp: (u64, u8), k: u8, f: u64) -> (u64, u8) {
+    let (x, p): (u64, u8) = xp;
+    match jet::le_8(k, p) {
+        true => {
+            let (borrow, q): (bool, u8) = jet::subtract_8(p, k);
+            (w192_mul_small(x, f), q)
+        },
+        false => (x, p),
+    }
+}
+
+/* 10^p for p <= 18, the largest power of ten below 2^63; refuses a larger p. */
+fn w192_pow10(p: u8) -> u64 {
+    assert!(jet::le_8(p, 18));
+    let xp: (u64, u8) = w192_pow10_step((1, p), 16, 10000000000000000);
+    let xp: (u64, u8) = w192_pow10_step(xp, 8, 100000000);
+    let xp: (u64, u8) = w192_pow10_step(xp, 4, 10000);
+    let xp: (u64, u8) = w192_pow10_step(xp, 2, 100);
+    let (x, rest): (u64, u8) = w192_pow10_step(xp, 1, 10);
+    assert!(jet::eq_8(rest, 0));
+    x
+}
+
+/* The terms in the data leaf's order, hashed: the state goes after them. */
+fn terms_ctx(assets: (u256, u256, Pubkey, u256), ratios: (u8, u32, u32, u32), times: (u32, u32), payouts: (u256, u256)) -> Ctx8 {
+    let (coll, debt_asset, oracle, beacon_asset): (u256, u256, Pubkey, u256) = assets;
+    let (precision, liq, target, bonus): (u8, u32, u32, u32) = ratios;
+    let (maturity, recover_after): (u32, u32) = times;
+    let (lender, borrower): (u256, u256) = payouts;
+    let ctx: Ctx8 = jet::tapdata_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, coll);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, debt_asset);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, oracle);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, beacon_asset);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, precision);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, liq);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, target);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, bonus);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, maturity);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, recover_after);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, lender);
+    jet::sha_256_ctx_8_add_32(ctx, borrower)
+}
+
+/* The data leaf's hash: the terms, then this state. */
+fn data_leaf(terms: Ctx8, debt: u64, last: u32) -> u256 {
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(terms, debt);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, last);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+/* SHA256 of the scriptPubKey of this program holding this state. */
+fn vault_script_hash(terms: Ctx8, debt: u64, last: u32) -> u256 {
+    let root: u256 = jet::build_tapbranch(jet::tapleaf_hash(), data_leaf(terms, debt, last));
+    let key: u256 = jet::build_taptweak(jet::internal_key(), root);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_2(ctx, 0x5120);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, key);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+/* a - b; refuses a difference below zero. */
+fn minus(a: u64, b: u64) -> u64 {
+    let (borrow, d): (bool, u64) = jet::subtract_64(a, b);
+    assert!(jet::eq_1(<bool>::into(borrow), 0));
+    d
+}
+
+fn widen(x: u32) -> u64 {
+    <(u32, u32)>::into((0, x))
+}
+
+/* Output i pays `script` in `asset`, explicitly and with no nonce; its amount. */
+fn paid_to(i: u32, asset: u256, script: u256) -> u64 {
+    let (id, value, s): (u256, u64, u256) = out_explicit(i);
+    assert!(jet::eq_256(id, asset));
+    assert!(jet::eq_256(s, script));
+    out_no_nonce(i);
+    value
+}
+
+/* What output i, which must exist and be explicit, returns to `script` in
+ * `asset`: its amount when it pays that script in that asset, else nothing.
+ * The choice is a mask, not a branch. */
+fn returned_to(i: u32, asset: u256, script: u256) -> u64 {
+    let (id, value, s): (u256, u64, u256) = out_explicit(i);
+    let hit: u1 = jet::and_1(<bool>::into(jet::eq_256(id, asset)), <bool>::into(jet::eq_256(s, script)));
+    jet::and_64(value, jet::left_extend_1_64(hit))
+}
+
+/* Output 2k+1 pays the lender P >= 1 of the debt asset; P. */
+fn lender_paid(pay: u32, debt_asset: u256, lender: u256) -> u64 {
+    let p: u64 = paid_to(pay, debt_asset, lender);
+    assert!(jet::lt_64(0, p));
+    p
+}
+
+fn repay(terms: Ctx8, state: (u64, u32), c: u64, outs: (u32, u32), assets: (u256, u256), payouts: (u256, u256)) {
+    let (debt, last): (u64, u32) = state;
+    let (main, pay): (u32, u32) = outs;
+    let (coll, debt_asset): (u256, u256) = assets;
+    let (lender, borrower): (u256, u256) = payouts;
+    let p: u64 = lender_paid(pay, debt_asset, lender);
+    match jet::lt_64(p, debt) {
+        // Part of the debt: the vault goes on with the same collateral.
+        true => out_require(main, coll, c, vault_script_hash(terms, minus(debt, p), last)),
+        // All of it: the borrower gets the whole collateral back.
+        false => assert!(jet::le_64(c, paid_to(main, coll, borrower))),
+    };
+}
+
+fn top_up(c: u64, main: u32, coll: u256) {
+    let more: u64 = paid_to(main, coll, jet::current_script_hash());
+    assert!(jet::lt_64(c, more));
+}
+
+fn recover(c: u64, main: u32, coll: u256, lender: u256, recover_after: u32) {
+    jet::check_lock_time(recover_after);
+    assert!(jet::le_64(c, paid_to(main, coll, lender)));
+}
+
+/* The liquidation. `att` is the attestation and where its beacon is spent;
+ * `matured` chooses the maturity rule over the health rule. */
+fn liquidate(terms: Ctx8, state: (u64, u32), c: u64, outs: (u32, u32), assets: (u256, u256, Pubkey, u256), ratios: (u8, u32, u32, u32), times: (u32, u32), payouts: (u256, u256), att: (u64, u32, u256, Signature, u32, bool)) {
+    let (debt, last): (u64, u32) = state;
+    let (main, pay): (u32, u32) = outs;
+    let (coll, debt_asset, oracle, beacon_asset): (u256, u256, Pubkey, u256) = assets;
+    let (precision, liq_bp, target_bp, bonus_bp): (u8, u32, u32, u32) = ratios;
+    let (maturity, recover_after): (u32, u32) = times;
+    let (lender, borrower): (u256, u256) = payouts;
+    let (price, time, beacon, sig, beacon_at, matured): (u64, u32, u256, Signature, u32, bool) = att;
+
+    // A fresh price of this collateral in this debt asset, from this oracle.
+    att_verify_fresh(oracle, coll, debt_asset, price, precision, time, beacon, sig, beacon_asset, beacon_at);
+    // Newer than the last one this vault used, and the transaction's lock
+    // time, which the chain's median time must pass: so the attestation is
+    // judged against the chain's clock, and anyone reading the transaction
+    // reads the successor's LAST_TIME off it.
+    assert!(jet::lt_32(last, time));
+    assert!(jet::eq_32(jet::tx_lock_time(), time));
+
+    let u: u64 = w192_pow10(precision);
+    let liq: u64 = widen(liq_bp);
+    let target: u64 = widen(target_bp);
+    let bonus: u64 = widen(bonus_bp);
+    let p: u64 = lender_paid(pay, debt_asset, lender);
+    let full: bool = jet::le_64(debt, p);
+    let r: u64 = match full {
+        true => debt,
+        false => p,
+    };
+    // The collateral's value, times 10,000 * 10^precision: c * price * 10,000.
+    let value: (u64, u64, u64) = w192_mul3(c, price, 10000);
+    match matured {
+        true => jet::check_lock_time(maturity),
+        false => {
+            // Unhealthy: c * price * 10^4 < LIQ_BP * debt * 10^precision.
+            assert!(w192_lt(value, w192_mul3(debt, u, liq)));
+            // No further than the target: repaying one atom less, at the most
+            // the liquidator may seize for it, leaves the vault below
+            // TARGET_BP. value + (r-1) * T * u < T * debt * u + (r-1) * B * u.
+            let r1: u64 = minus(r, 1);
+            assert!(w192_lt(w192_add(value, w192_mul3(r1, u, target)),
+                            w192_add(w192_mul3(debt, u, target), w192_mul3(r1, u, bonus))));
+        },
+    };
+    match full {
+        // The debt is paid: the vault closes, and what output 2k pays the
+        // borrower in the collateral is the surplus returned. A liquidator
+        // who returns nothing puts its own output there.
+        true => {
+            let s: u64 = minus(c, returned_to(main, coll, borrower));
+            assert!(w192_le(w192_mul3(s, price, 10000), w192_mul3(r, u, bonus)));
+        },
+        // Part of it: the rest of the collateral stays in the successor, which
+        // must be healthy at this price.
+        false => {
+            let left: u64 = minus(debt, r);
+            let kept: u64 = paid_to(main, coll, vault_script_hash(terms, left, time));
+            let s: u64 = minus(c, kept);
+            assert!(w192_le(w192_mul3(s, price, 10000), w192_mul3(r, u, bonus)));
+            assert!(w192_le(w192_mul3(left, u, liq), w192_mul3(kept, price, 10000)));
+        },
+    };
+}
+
+fn main() {
+    let assets: (u256, u256, Pubkey, u256) = (witness::COLL, witness::DEBT_ASSET, witness::ORACLE, witness::BEACON_ASSET);
+    let ratios: (u8, u32, u32, u32) = (witness::PRECISION, witness::LIQ_BP, witness::TARGET_BP, witness::BONUS_BP);
+    let times: (u32, u32) = (witness::MATURITY, witness::RECOVER_AFTER);
+    let payouts: (u256, u256) = (witness::LENDER, witness::BORROWER);
+    let state: (u64, u32) = (witness::DEBT_OUT, witness::LAST_TIME);
+    let (debt, last): (u64, u32) = state;
+    let (coll, debt_asset, oracle, beacon_asset): (u256, u256, Pubkey, u256) = assets;
+    let (lender, borrower): (u256, u256) = payouts;
+    let (maturity, recover_after): (u32, u32) = times;
+
+    // The terms and the state are the data leaf's.
+    let terms: Ctx8 = terms_ctx(assets, ratios, times, payouts);
+    assert!(jet::eq_256(data_leaf(terms, debt, last), unwrap(jet::tappath(0))));
+
+    // The coin holds the collateral asset, explicitly.
+    let (held, c): (u256, u64) = in_explicit_current();
+    assert!(jet::eq_256(held, coll));
+
+    // Input k owns outputs 2k and 2k+1.
+    let k: u32 = jet::current_index();
+    let (carry, main): (bool, u32) = jet::add_32(k, k);
+    assert!(jet::eq_1(<bool>::into(carry), 0));
+    let (carry1, pay): (bool, u32) = jet::increment_32(main);
+    let outs: (u32, u32) = (main, pay);
+
+    match witness::PATH {
+        Left(a: Either<(), ()>) => match a {
+            Left(u: ()) => repay(terms, state, c, outs, (coll, debt_asset), payouts),
+            Right(u: ()) => top_up(c, main, coll),
+        },
+        Right(b: Either<(u64, u32, u256, Signature, u32, bool), ()>) => match b {
+            Left(att: (u64, u32, u256, Signature, u32, bool)) => liquidate(terms, state, c, outs, assets, ratios, times, payouts, att),
+            Right(u: ()) => recover(c, main, coll, lender, recover_after),
+        },
+    };
+}

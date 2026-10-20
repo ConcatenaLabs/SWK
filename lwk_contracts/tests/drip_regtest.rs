@@ -99,6 +99,7 @@ impl Node {
             tip_median_time: tip["mediantime"].as_u64().unwrap(),
             coin_height: Some(height),
             coin_start_median_time: Some(self.mtp_at(height - 1)),
+            prevouts: Default::default(),
         }
     }
     /// The mempool's verdict on a transaction.
@@ -502,7 +503,8 @@ fn a_drip_under_the_five_point_rule() {
     let (keypair, _) = control_a
         .spend()
         .contract_keypair(&faucet, &key_path)
-        .unwrap();
+        .unwrap()
+        .expect("the drip path takes the faucet key");
     let control_sig: [u8; 64] = {
         let cb = ControlBlock::from_slice(&control.input[0].witness.script_witness[3]).unwrap();
         let msg = Message::from_digest(sig_all_hash(

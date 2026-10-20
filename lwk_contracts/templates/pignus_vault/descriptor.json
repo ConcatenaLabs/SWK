@@ -1,0 +1,311 @@
+{
+  "descriptor": 2,
+  "template": {
+    "budget": {
+      "max": 4000050,
+      "offset": 50,
+      "per_witness_byte": 4
+    },
+    "internal_key": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "name": "pignus/vault",
+    "params": [
+      {
+        "label": "Collateral asset",
+        "name": "COLL",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Debt asset",
+        "name": "DEBT_ASSET",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Oracle key, whose format-2 attestations price the collateral in the debt asset",
+        "name": "ORACLE",
+        "role": "pubkey",
+        "type": "Pubkey"
+      },
+      {
+        "label": "The oracle's beacon asset",
+        "name": "BEACON_ASSET",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Precision of the oracle's price: price / 10^PRECISION debt atoms per collateral atom",
+        "name": "PRECISION",
+        "role": "number",
+        "type": "u8"
+      },
+      {
+        "label": "Liquidation threshold: the vault is unhealthy below this collateral ratio, in basis points",
+        "name": "LIQ_BP",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "Liquidation target: a liquidation restores the vault at most to this collateral ratio, in basis points",
+        "name": "TARGET_BP",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "Liquidation bonus: a liquidator seizes collateral worth at most this share of what it repays, in basis points",
+        "name": "BONUS_BP",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "Maturity: from this Unix time anyone may call the loan at an attested price",
+        "name": "MATURITY",
+        "role": "time",
+        "type": "u32"
+      },
+      {
+        "label": "Recovery: from this Unix time anyone may pay the whole collateral to the lender",
+        "name": "RECOVER_AFTER",
+        "role": "time",
+        "type": "u32"
+      },
+      {
+        "label": "Lender's payout script",
+        "name": "LENDER",
+        "role": "script_hash",
+        "type": "u256"
+      },
+      {
+        "label": "Borrower's payout script",
+        "name": "BORROWER",
+        "role": "script_hash",
+        "type": "u256"
+      }
+    ],
+    "paths": [
+      {
+        "effect": "Pays the lender at output 2k+1 at least one atom of DEBT_ASSET. Below DEBT_OUT, output 2k is this vault again, holding the same collateral, owing DEBT_OUT less the payment; at or above it, output 2k pays the borrower at least the whole collateral and the vault closes. This coin is input k.",
+        "leaf": "vault",
+        "name": "repay",
+        "who": "anyone"
+      },
+      {
+        "effect": "Output 2k is this vault again, with its state unchanged, holding more collateral than this coin. This coin is input k.",
+        "leaf": "vault",
+        "name": "top_up",
+        "who": "anyone"
+      },
+      {
+        "effect": "With ORACLE's format-2 attestation of the price of COLL in DEBT_ASSET at PRECISION, newer than LAST_TIME, its time the transaction's lock time, its beacon live at an input of BEACON_ASSET: pays the lender at output 2k+1 and repays r, that payment up to DEBT_OUT. Before MATURITY the vault must be under LIQ_BP at that price and r no more than takes it to TARGET_BP; from MATURITY any r. The liquidator keeps collateral worth at most r * BONUS_BP / 10000 at that price. Below DEBT_OUT, output 2k is this vault again with the rest of the collateral, owing DEBT_OUT less r, LAST_TIME the attestation's time, and at or above LIQ_BP at that price; at DEBT_OUT the vault closes, and output 2k, which must exist and be explicit, counts as returned what it pays the borrower in COLL. This coin is input k.",
+        "leaf": "vault",
+        "name": "liquidate",
+        "who": "anyone"
+      },
+      {
+        "effect": "Once the lock time reaches RECOVER_AFTER, pays the lender at output 2k at least the whole collateral. This coin is input k.",
+        "leaf": "vault",
+        "name": "recover",
+        "who": "anyone"
+      }
+    ],
+    "slots": [
+      {
+        "label": "Debt outstanding, in the debt asset",
+        "name": "DEBT_OUT",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Time of the newest attestation a liquidation used, or of the loan's start",
+        "name": "LAST_TIME",
+        "role": "time",
+        "type": "u32"
+      }
+    ],
+    "summary": "A loan's collateral in one coin, with its terms and its debt beside the program: repaid in part or whole by anyone, topped up by anyone, liquidated in part under a fresh oracle price only while unhealthy, and recoverable by the lender only long after maturity.",
+    "tree": {
+      "branch": [
+        {
+          "leaf": "vault",
+          "simplicity": {
+            "cmr": "5fbca220e82362f0896b29d49812f244ca0ac30209e3d74429700e75b9ed2649",
+            "compiler": {
+              "name": "simplicityhl",
+              "version": "0.7.2"
+            },
+            "max_cost_wu": 1654,
+            "source": "pignus_vault.simf",
+            "source_sha256": "1278cf68cb29ba89a5f95e64c5552ddc5be35cd6755053f021653dc2a7e84ffd",
+            "witness": [
+              {
+                "name": "COLL",
+                "source": "param:COLL",
+                "type": "u256"
+              },
+              {
+                "name": "DEBT_ASSET",
+                "source": "param:DEBT_ASSET",
+                "type": "u256"
+              },
+              {
+                "name": "ORACLE",
+                "source": "param:ORACLE",
+                "type": "Pubkey"
+              },
+              {
+                "name": "BEACON_ASSET",
+                "source": "param:BEACON_ASSET",
+                "type": "u256"
+              },
+              {
+                "name": "PRECISION",
+                "source": "param:PRECISION",
+                "type": "u8"
+              },
+              {
+                "name": "LIQ_BP",
+                "source": "param:LIQ_BP",
+                "type": "u32"
+              },
+              {
+                "name": "TARGET_BP",
+                "source": "param:TARGET_BP",
+                "type": "u32"
+              },
+              {
+                "name": "BONUS_BP",
+                "source": "param:BONUS_BP",
+                "type": "u32"
+              },
+              {
+                "name": "MATURITY",
+                "source": "param:MATURITY",
+                "type": "u32"
+              },
+              {
+                "name": "RECOVER_AFTER",
+                "source": "param:RECOVER_AFTER",
+                "type": "u32"
+              },
+              {
+                "name": "LENDER",
+                "source": "param:LENDER",
+                "type": "u256"
+              },
+              {
+                "name": "BORROWER",
+                "source": "param:BORROWER",
+                "type": "u256"
+              },
+              {
+                "name": "DEBT_OUT",
+                "source": "slot:DEBT_OUT",
+                "type": "u64"
+              },
+              {
+                "name": "LAST_TIME",
+                "source": "slot:LAST_TIME",
+                "type": "u32"
+              },
+              {
+                "name": "PATH",
+                "source": "spender",
+                "type": "Either<Either<(), ()>, Either<(u64, u32, u256, Signature, u32, bool), ()>>"
+              }
+            ]
+          }
+        },
+        {
+          "data": [
+            "COLL",
+            "DEBT_ASSET",
+            "ORACLE",
+            "BEACON_ASSET",
+            "PRECISION",
+            "LIQ_BP",
+            "TARGET_BP",
+            "BONUS_BP",
+            "MATURITY",
+            "RECOVER_AFTER",
+            "LENDER",
+            "BORROWER",
+            "DEBT_OUT",
+            "LAST_TIME"
+          ],
+          "leaf": "terms"
+        }
+      ]
+    },
+    "version": 2
+  },
+  "template_hash": "6b17869c4e2abe782fe3d8a3ece4865b8f0aa483028b1d0a815e6bcb4e8939ac",
+  "chains": [
+    {
+      "name": "sequentia-testnet",
+      "genesis": "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e",
+      "bech32_hrp": "tb"
+    },
+    {
+      "name": "elementsregtest",
+      "genesis": null,
+      "bech32_hrp": "ert"
+    }
+  ],
+  "measured": {
+    "call_at_maturity": {
+      "budget_wu": 12234,
+      "cost_bound_wu": 1268,
+      "program_bytes": 2602,
+      "transaction": "as a liquidation, closing: the surplus to the borrower",
+      "vsize": 1338,
+      "weight": 5350,
+      "witness_bytes": 338
+    },
+    "liquidate_partial": {
+      "budget_wu": 13466,
+      "cost_bound_wu": 1653,
+      "program_bytes": 2910,
+      "transaction": "the vault, a beacon coin and the liquidator's coin; the successor, the lender, the beacon, the seizure, change",
+      "vsize": 1427,
+      "weight": 5706,
+      "witness_bytes": 338
+    },
+    "recover": {
+      "budget_wu": 5302,
+      "cost_bound_wu": 504,
+      "program_bytes": 983,
+      "transaction": "the vault and a fee coin; the collateral to the lender",
+      "vsize": 561,
+      "weight": 2242,
+      "witness_bytes": 226
+    },
+    "repay_full": {
+      "budget_wu": 5954,
+      "cost_bound_wu": 591,
+      "program_bytes": 1146,
+      "transaction": "the vault and a debt-asset coin; the collateral to the borrower, the lender's payment",
+      "vsize": 668,
+      "weight": 2671,
+      "witness_bytes": 226
+    },
+    "repay_partial": {
+      "budget_wu": 6758,
+      "cost_bound_wu": 751,
+      "program_bytes": 1347,
+      "transaction": "the vault and a debt-asset coin; the successor and the lender's payment",
+      "vsize": 730,
+      "weight": 2920,
+      "witness_bytes": 226
+    },
+    "source": "harness/records/l1.json",
+    "top_up": {
+      "budget_wu": 5178,
+      "cost_bound_wu": 501,
+      "program_bytes": 952,
+      "transaction": "the vault and a collateral coin; the vault again, holding more",
+      "vsize": 565,
+      "weight": 2259,
+      "witness_bytes": 226
+    }
+  }
+}

@@ -1,0 +1,283 @@
+{
+  "descriptor": 2,
+  "template": {
+    "budget": {
+      "max": 4000050,
+      "offset": 50,
+      "per_witness_byte": 4
+    },
+    "internal_key": "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    "name": "pignus/offer",
+    "params": [
+      {
+        "label": "Collateral asset",
+        "name": "COLL",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Debt asset",
+        "name": "DEBT_ASSET",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Oracle key, whose format-2 attestations price the collateral in the debt asset",
+        "name": "ORACLE",
+        "role": "pubkey",
+        "type": "Pubkey"
+      },
+      {
+        "label": "The oracle's beacon asset",
+        "name": "BEACON_ASSET",
+        "role": "asset",
+        "type": "u256"
+      },
+      {
+        "label": "Precision of the oracle's price: price / 10^PRECISION debt atoms per collateral atom",
+        "name": "PRECISION",
+        "role": "number",
+        "type": "u8"
+      },
+      {
+        "label": "Liquidation threshold: the vault is unhealthy below this collateral ratio, in basis points",
+        "name": "LIQ_BP",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "Liquidation target: a liquidation restores the vault at most to this collateral ratio, in basis points",
+        "name": "TARGET_BP",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "Liquidation bonus: a liquidator seizes collateral worth at most this share of what it repays, in basis points",
+        "name": "BONUS_BP",
+        "role": "number",
+        "type": "u32"
+      },
+      {
+        "label": "Maturity: from this Unix time anyone may call the loan at an attested price",
+        "name": "MATURITY",
+        "role": "time",
+        "type": "u32"
+      },
+      {
+        "label": "Recovery: from this Unix time anyone may pay the whole collateral to the lender",
+        "name": "RECOVER_AFTER",
+        "role": "time",
+        "type": "u32"
+      },
+      {
+        "label": "Lender's payout script",
+        "name": "LENDER",
+        "role": "script_hash",
+        "type": "u256"
+      },
+      {
+        "label": "Principal a take draws, in the debt asset",
+        "name": "LOT",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "What a vault opened for one lot owes, in the debt asset",
+        "name": "DEBT",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "Least collateral a vault opened for one lot holds",
+        "name": "COLLATERAL",
+        "role": "amount",
+        "type": "u64"
+      },
+      {
+        "label": "From this Unix time anyone may return the offer to the lender",
+        "name": "EXPIRY",
+        "role": "time",
+        "type": "u32"
+      }
+    ],
+    "paths": [
+      {
+        "effect": "Output 2k is a pignus/vault version 2 on these terms, the borrower's payout script hash given in the witness, owing DEBT, its LAST_TIME the transaction's lock time, holding at least COLLATERAL of COLL; exactly LOT of DEBT_ASSET leaves this coin and the rest is paid to this script at output 2k+1. This coin is input k.",
+        "leaf": "offer",
+        "name": "take",
+        "who": "anyone"
+      },
+      {
+        "effect": "Once the lock time reaches EXPIRY, pays the lender at output 2k at least the whole coin. This coin is input k.",
+        "leaf": "offer",
+        "name": "refund",
+        "who": "anyone"
+      }
+    ],
+    "slots": [],
+    "summary": "A lender's principal at rest: anyone takes one lot by opening a version 2 Pignus vault on the offer's terms with enough collateral, the rest resting again; after expiry anyone returns it to the lender.",
+    "tree": {
+      "branch": [
+        {
+          "leaf": "offer",
+          "simplicity": {
+            "cmr": "c88d2c4ea79563ad0d6c28e1c9d6b99e1131b0c66ddf48d326618deca0b5d9bc",
+            "compiler": {
+              "name": "simplicityhl",
+              "version": "0.7.2"
+            },
+            "max_cost_wu": 1216,
+            "source": "pignus_offer.simf",
+            "source_sha256": "38dfaa068ae52eef02997a5b025f7bc262371da3b8feb3e775988e89a7e0df4d",
+            "witness": [
+              {
+                "name": "COLL",
+                "source": "param:COLL",
+                "type": "u256"
+              },
+              {
+                "name": "DEBT_ASSET",
+                "source": "param:DEBT_ASSET",
+                "type": "u256"
+              },
+              {
+                "name": "ORACLE",
+                "source": "param:ORACLE",
+                "type": "Pubkey"
+              },
+              {
+                "name": "BEACON_ASSET",
+                "source": "param:BEACON_ASSET",
+                "type": "u256"
+              },
+              {
+                "name": "PRECISION",
+                "source": "param:PRECISION",
+                "type": "u8"
+              },
+              {
+                "name": "LIQ_BP",
+                "source": "param:LIQ_BP",
+                "type": "u32"
+              },
+              {
+                "name": "TARGET_BP",
+                "source": "param:TARGET_BP",
+                "type": "u32"
+              },
+              {
+                "name": "BONUS_BP",
+                "source": "param:BONUS_BP",
+                "type": "u32"
+              },
+              {
+                "name": "MATURITY",
+                "source": "param:MATURITY",
+                "type": "u32"
+              },
+              {
+                "name": "RECOVER_AFTER",
+                "source": "param:RECOVER_AFTER",
+                "type": "u32"
+              },
+              {
+                "name": "LENDER",
+                "source": "param:LENDER",
+                "type": "u256"
+              },
+              {
+                "name": "LOT",
+                "source": "param:LOT",
+                "type": "u64"
+              },
+              {
+                "name": "DEBT",
+                "source": "param:DEBT",
+                "type": "u64"
+              },
+              {
+                "name": "COLLATERAL",
+                "source": "param:COLLATERAL",
+                "type": "u64"
+              },
+              {
+                "name": "EXPIRY",
+                "source": "param:EXPIRY",
+                "type": "u32"
+              },
+              {
+                "name": "PATH",
+                "source": "spender",
+                "type": "Either<u256, ()>"
+              }
+            ]
+          }
+        },
+        {
+          "data": [
+            "COLL",
+            "DEBT_ASSET",
+            "ORACLE",
+            "BEACON_ASSET",
+            "PRECISION",
+            "LIQ_BP",
+            "TARGET_BP",
+            "BONUS_BP",
+            "MATURITY",
+            "RECOVER_AFTER",
+            "LENDER",
+            "LOT",
+            "DEBT",
+            "COLLATERAL",
+            "EXPIRY"
+          ],
+          "leaf": "terms"
+        }
+      ]
+    },
+    "version": 2
+  },
+  "template_hash": "4e999cdc9efa1186c0876ce9ebcc8e6dac60c10885bfb2cb5dce9489840084e7",
+  "chains": [
+    {
+      "name": "sequentia-testnet",
+      "genesis": "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e",
+      "bech32_hrp": "tb"
+    },
+    {
+      "name": "elementsregtest",
+      "genesis": null,
+      "bech32_hrp": "ert"
+    }
+  ],
+  "measured": {
+    "refund": {
+      "budget_wu": 4642,
+      "cost_bound_wu": 590,
+      "program_bytes": 850,
+      "transaction": "the offer and a fee coin; the whole coin to the lender",
+      "vsize": 520,
+      "weight": 2077,
+      "witness_bytes": 194
+    },
+    "source": "harness/records/l1.json",
+    "take": {
+      "budget_wu": 8114,
+      "cost_bound_wu": 1216,
+      "program_bytes": 1670,
+      "transaction": "the offer and a collateral coin; the vault, the offer's rest, the principal",
+      "vsize": 894,
+      "weight": 3573,
+      "witness_bytes": 242
+    },
+    "take_whole_rest": {
+      "budget_wu": 7702,
+      "cost_bound_wu": 1176,
+      "program_bytes": 1567,
+      "transaction": "the last lot: no rest",
+      "vsize": 789,
+      "weight": 3156,
+      "witness_bytes": 242
+    }
+  }
+}
