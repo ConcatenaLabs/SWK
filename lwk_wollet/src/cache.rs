@@ -211,6 +211,26 @@ impl Cache {
         &self.heights
     }
 
+    /// The outpoints spent by the transactions the wallet holds, confirmed or
+    /// not, each with the txid of the transaction spending it.
+    ///
+    /// This reads every held transaction, so it is meant for occasional
+    /// callers such as [`crate::Wollet::apply_transaction()`], not for scans.
+    pub(crate) fn held_spends(&self) -> HashMap<OutPoint, Txid> {
+        let mut spends = HashMap::new();
+        for txid in self.heights.keys() {
+            match self.tx(txid) {
+                Some(tx) => {
+                    for input in tx.input.iter() {
+                        spends.insert(input.previous_output, *txid);
+                    }
+                }
+                None => log::warn!("held transaction {txid} is missing from the store"),
+            }
+        }
+        spends
+    }
+
     pub fn all_txs(&self) -> impl Iterator<Item = (Txid, Transaction)> + '_ {
         self.all_txids()
             .iter()

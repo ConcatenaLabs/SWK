@@ -119,6 +119,10 @@ impl Wollet {
     /// If the caller does not want to wait for a full scan containing the transaction, it can
     /// apply the transaction to the wallet state using this function.
     ///
+    /// Applying a transaction the wallet already holds changes nothing: it keeps its confirmation
+    /// height, and its outputs stay spent or unspent as they were. An output of a new transaction
+    /// that a transaction the wallet holds (confirmed or not) already spends stays spent.
+    ///
     /// Note: if this transaction is *not* returned by a next full scan, after `apply_update()` it will disappear from the
     /// transactions list, will not be included in balance computations, and by the remaining
     /// wollet methods.
