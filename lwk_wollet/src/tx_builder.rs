@@ -4,7 +4,10 @@ use crate::{
     hashes::Hash,
     liquidex::{self, LiquidexError, Validated},
     model::{ExternalUtxo, IssuanceDetails, Recipient},
-    pset_create::{validate_address, IssuanceRequest, SECP256K1_SURJECTIONPROOF_MAX_N_INPUTS},
+    pset_create::{
+        validate_address, validate_issuance_receiver, IssuanceRequest,
+        SECP256K1_SURJECTIONPROOF_MAX_N_INPUTS,
+    },
     Contract, DownloadTxResult, Error, LiquidexProposal, Network, UnvalidatedRecipient, Update,
     Wollet, EC,
 };
@@ -496,6 +499,9 @@ impl TxBuilder {
     ///
     /// If a `contract` is provided, it's metadata will be committed in the generated asset id.
     ///
+    /// On Sequentia a receiver may be an explicit address, and its output is then explicit;
+    /// elsewhere it must be confidential.
+    ///
     /// Can't be used if `reissue_asset` has been called
     pub fn issue_asset(
         mut self,
@@ -509,10 +515,10 @@ impl TxBuilder {
             return Err(Error::IssuanceAlreadySet);
         }
         if let Some(addr) = asset_receiver.as_ref() {
-            validate_address(&addr.to_string(), self.network())?;
+            validate_issuance_receiver(addr, self.network())?;
         }
         if let Some(addr) = token_receiver.as_ref() {
-            validate_address(&addr.to_string(), self.network())?;
+            validate_issuance_receiver(addr, self.network())?;
         }
         if asset_sats == 0 && token_sats == 0 {
             return Err(Error::InvalidAmount);
@@ -549,7 +555,7 @@ impl TxBuilder {
             return Err(Error::IssuanceAlreadySet);
         }
         if let Some(addr) = asset_receiver.as_ref() {
-            validate_address(&addr.to_string(), self.network())?;
+            validate_issuance_receiver(addr, self.network())?;
         }
         if satoshi_to_reissue == 0 {
             return Err(Error::InvalidAmount);

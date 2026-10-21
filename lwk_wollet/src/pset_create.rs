@@ -3,6 +3,7 @@ use crate::contract::Contract;
 use crate::elements::confidential::AssetBlindingFactor;
 use crate::elements::issuance::ContractHash;
 use crate::elements::pset::{Output, PartiallySignedTransaction};
+use crate::elements::secp256k1_zkp::Tweak;
 use crate::elements::{Address, AssetId, OutPoint, Transaction, TxOut, TxOutSecrets, Txid};
 use crate::error::Error;
 use crate::hashes::Hash;
@@ -137,8 +138,7 @@ impl Wollet {
             .get_mut(idx)
             .ok_or_else(|| Error::MissingVin)?;
         input.issuance_value_amount = Some(satoshi_asset);
-        let nonce = token_asset_bf.into_inner();
-        input.issuance_blinding_nonce = Some(nonce);
+        input.issuance_blinding_nonce = Some(reissuance_nonce(token_asset_bf));
         input.issuance_asset_entropy = Some(*entropy);
         input.blinded_issuance = Some(0x00);
         Ok(())
@@ -234,6 +234,18 @@ pub(crate) fn validate_address(address: &str, network: Network) -> Result<Addres
     Ok(address)
 }
 
+/// Validate the receiver of an issued or reissued amount: an address of
+/// `network`. On Sequentia, which is transparent by default, it may be
+/// explicit, and the output then is; elsewhere it must be confidential.
+pub(crate) fn validate_issuance_receiver(address: &Address, network: Network) -> Result<(), Error> {
+    if cfg!(feature = "sequentia") {
+        Address::parse_with_params(&address.to_string(), network.address_params())?;
+        Ok(())
+    } else {
+        validate_address(&address.to_string(), network).map(|_| ())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::{pset_create::validate_address, Network, Update, WolletBuilder, WolletDescriptor};
@@ -295,5 +307,39 @@ mod test {
             .unwrap();
         wollet.apply_update(update).unwrap();
         wollet
+    }
+}
+
+/// The nonce of a reissuance spending a token whose asset blinding factor is
+/// `token_asset_bf`. A reissuance is told from a new issuance by a non-zero
+/// nonce, which Elements fills with the token's asset blinding factor; a token
+/// on an explicit output has none (zero), so the input would read as a new
+/// issuance. For an explicit token the node uses a fixed non-zero sentinel,
+/// `uint256::ONE` (`ReissuanceExplicitTokenNonce` in Sequentia's `issuance.h`),
+/// whose value consensus ignores when the spent token is explicit; the kit
+/// uses the same one, serialized as the node serializes it.
+pub(crate) fn reissuance_nonce(token_asset_bf: &AssetBlindingFactor) -> Tweak {
+    if *token_asset_bf == AssetBlindingFactor::zero() {
+        let mut one = [0u8; 32];
+        one[0] = 1;
+        Tweak::from_slice(&one).expect("one is a valid tweak")
+    } else {
+        token_asset_bf.into_inner()
+    }
+}
+
+#[cfg(test)]
+mod reissuance_nonce_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_token_takes_the_nodes_sentinel() {
+        let n = reissuance_nonce(&AssetBlindingFactor::zero());
+        let mut one = [0u8; 32];
+        one[0] = 1;
+        assert_eq!(n.as_ref(), &one[..]);
+        assert_ne!(n, elements::secp256k1_zkp::ZERO_TWEAK);
+        let bf = AssetBlindingFactor::from_slice(&[7u8; 32]).unwrap();
+        assert_eq!(reissuance_nonce(&bf), bf.into_inner());
     }
 }

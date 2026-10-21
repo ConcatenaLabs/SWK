@@ -216,6 +216,15 @@ Changes by file:
   (Elements requires at least one blinded output to balance a blinded input,
   and coin selection may pick one). Also
   `Wollet::explicit_utxos()` and a valid zero anchor in the placeholder header.
+- `src/pset_create.rs`, `src/tx_builder.rs`: issuance and reissuance on a
+  transparent chain. `issue_asset` and `reissue_asset` take explicit receiver
+  addresses as well as confidential ones (feature `sequentia`), and pay them
+  explicit outputs. A reissuance marks its token input with a non-zero nonce,
+  which Elements fills with the token's asset blinding factor; a token on an
+  explicit output has none, so the kit sets the node's sentinel `uint256::ONE`
+  (`ReissuanceExplicitTokenNonce` in the node's `issuance.h`, serialized
+  `01 00 … 00`), without which consensus reads the input as a new issuance and
+  refuses the transaction (`bad-txns-in-ne-out`).
 - `src/tx_builder.rs`:
   - Any-asset fees: `TxBuilder::fee_asset(asset, rate)` pays the fee in any
     accepted asset at a given rate, per Sequentia's open fee market (no
