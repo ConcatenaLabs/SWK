@@ -16,7 +16,7 @@ use elements::hash_types::TxMerkleNode;
 use elements::{BlockExtData, BlockHash, BlockHeader, TxInWitness, TxOutWitness};
 use lwk_common::SignedBalance;
 use lwk_common::{decrypt_with_nonce_prefix, encrypt_with_random_nonce, DynStore};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{atomic, Arc, Mutex};
 
 /// Transactions downloaded and unblinded
@@ -437,15 +437,66 @@ impl Wollet {
             }
         }
 
+        // A transaction the wallet already holds brings nothing new: its height
+        // and the state of its outputs are already known, and possibly better
+        // than here (it may be confirmed, and its outputs may have been spent
+        // since, by a transaction this wallet holds or by one only the server
+        // knows about). Applying it again changes neither.
+        let held = self.cache.tx_height(&txid).is_some();
+        // For a transaction the wallet does not hold yet: the outputs that a
+        // held transaction (confirmed or not) already spends.
+        let spends = if held {
+            HashMap::new()
+        } else {
+            self.cache.held_spends()
+        };
+
+        let mut txid_height_new = vec![];
+        if !held {
+            txid_height_new.push((txid, None));
+            if !self.utxo_only() {
+                // `Cache::update` makes the wallet outputs of every listed
+                // transaction unspent, then removes the inputs of those same
+                // transactions. List the held transactions that spend the
+                // outputs this one would revive, at their current heights, and
+                // in turn those spending theirs, so that every such output
+                // stays spent, now and when the update is replayed.
+                let mut listed: HashSet<Txid> = HashSet::from([txid]);
+                let mut frontier: Vec<OutPoint> = unblinds.iter().map(|(op, _)| *op).collect();
+                while let Some(outpoint) = frontier.pop() {
+                    let Some(spender) = spends.get(&outpoint) else {
+                        continue;
+                    };
+                    if !listed.insert(*spender) {
+                        continue;
+                    }
+                    txid_height_new
+                        .push((*spender, self.cache.tx_height(spender).copied().flatten()));
+                    if let Some(spender_tx) = self.cache.tx(spender) {
+                        for vout in 0..spender_tx.output.len() {
+                            let op = OutPoint::new(*spender, vout as u32);
+                            if self.cache.get_unblinded(&op).is_some() {
+                                frontier.push(op);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let unspent = if self.utxo_only() {
             let mut unspent = self.cache.unspent().clone();
             for input in tx.input.iter() {
                 unspent.remove(&input.previous_output);
             }
-            for (vout, output) in tx.output.iter().enumerate() {
-                let outpoint = OutPoint::new(txid, vout as u32);
-                if unblinds.iter().any(|(op, _)| op == &outpoint) {
-                    unspent.insert(outpoint, output.script_pubkey.clone());
+            if !held {
+                for (outpoint, _) in unblinds.iter() {
+                    if spends.contains_key(outpoint) {
+                        continue;
+                    }
+                    if let Some(output) = tx.output.get(outpoint.vout as usize) {
+                        unspent.insert(*outpoint, output.script_pubkey.clone());
+                    }
                 }
             }
             unspent.into_keys().collect()
@@ -460,7 +511,7 @@ impl Wollet {
                 txs: vec![(txid, tx)],
                 unblinds,
             },
-            txid_height_new: vec![(txid, None)],
+            txid_height_new,
             txid_height_delete: vec![],
             timestamps: vec![],
             scripts_with_blinding_pubkey: vec![],
@@ -637,6 +688,10 @@ impl Wollet {
     ///
     /// If the caller does not want to wait for a full scan containing the transaction, it can
     /// apply the transaction to the wallet state using this function.
+    ///
+    /// Applying a transaction the wallet already holds changes nothing: it keeps its confirmation
+    /// height, and its outputs stay spent or unspent as they were. An output of a new transaction
+    /// that a transaction the wallet holds (confirmed or not) already spends stays spent.
     ///
     /// Note: if this transaction is *not* returned by a next full scan, after [`Wollet::apply_update()`] it will disappear from the
     /// transactions list, will not be included in balance computations, and by the remaining
@@ -1463,5 +1518,171 @@ mod test {
             fresh_wollet.utxos().unwrap().len(),
             "Merged update should produce same UTXO count"
         );
+    }
+
+    /// An explicit output of a made-up asset: these tests need no blinding.
+    fn explicit_txout(script: Script, value: u64) -> elements::TxOut {
+        elements::TxOut {
+            asset: elements::confidential::Asset::Explicit(
+                elements::AssetId::from_slice(&[7u8; 32]).unwrap(),
+            ),
+            value: elements::confidential::Value::Explicit(value),
+            nonce: elements::confidential::Nonce::Null,
+            script_pubkey: script,
+            witness: elements::TxOutWitness::default(),
+        }
+    }
+
+    fn spending_tx(
+        prev: elements::OutPoint,
+        output: Vec<elements::TxOut>,
+    ) -> elements::Transaction {
+        elements::Transaction {
+            version: 2,
+            lock_time: elements::LockTime::ZERO,
+            input: vec![elements::TxIn {
+                previous_output: prev,
+                ..Default::default()
+            }],
+            output,
+        }
+    }
+
+    fn empty_update(wollet: &crate::Wollet) -> Update {
+        Update {
+            version: 4,
+            wollet_status: wollet.status(),
+            new_txs: DownloadTxResult::default(),
+            txid_height_new: vec![],
+            txid_height_delete: vec![],
+            timestamps: vec![],
+            scripts_with_blinding_pubkey: vec![],
+            tip: super::default_blockheader(),
+            unspent: vec![],
+            last_unused: LastUnused::default(),
+        }
+    }
+
+    /// The three transactions of a wallet whose change another client spends:
+    /// `funding` pays the wallet, `send` spends it and keeps change at vout 1,
+    /// `other` spends that change to a script the wallet does not own.
+    struct SpentChange {
+        funding: elements::Transaction,
+        send: elements::Transaction,
+        other: elements::Transaction,
+        change: elements::OutPoint,
+    }
+
+    /// A wallet (utxo_only or not) that knows its first receive and change
+    /// scripts, as it would after a scan, and the transactions above.
+    fn spent_change_wollet(utxo_only: bool) -> (crate::Wollet, SpentChange) {
+        use elements::bitcoin::bip32::ChildNumber;
+        use elements::hashes::Hash;
+        let desc: WolletDescriptor = lwk_test_util::wollet_descriptor_string().parse().unwrap();
+        let mut wollet = WolletBuilder::new(Network::default_regtest(), desc)
+            .with_stores(Arc::new(lwk_common::MemoryStore::default()))
+            .unwrap()
+            .utxo_only(utxo_only)
+            .build()
+            .unwrap();
+        let receive = wollet.address(Some(0)).unwrap().address().script_pubkey();
+        let change_script = wollet.change(Some(0)).unwrap().address().script_pubkey();
+        let child = ChildNumber::from_normal_idx(0).unwrap();
+        let mut scripts = empty_update(&wollet);
+        scripts.scripts_with_blinding_pubkey = vec![
+            (Chain::External, child, receive.clone(), None),
+            (Chain::Internal, child, change_script.clone(), None),
+        ];
+        wollet.apply_update(scripts).unwrap();
+
+        let foreign = Script::from(vec![0x51]);
+        let funding = spending_tx(
+            elements::OutPoint::new(elements::Txid::from_byte_array([0xaa; 32]), 0),
+            vec![explicit_txout(receive, 1_000)],
+        );
+        let send = spending_tx(
+            elements::OutPoint::new(funding.txid(), 0),
+            vec![
+                explicit_txout(foreign.clone(), 300),
+                explicit_txout(change_script, 690),
+            ],
+        );
+        let change = elements::OutPoint::new(send.txid(), 1);
+        let other = spending_tx(change, vec![explicit_txout(foreign, 680)]);
+        let txs = SpentChange {
+            funding,
+            send,
+            other,
+            change,
+        };
+        (wollet, txs)
+    }
+
+    /// A wallet restored from the same stores, which replays (and merges) the
+    /// persisted updates, has the same outputs and heights.
+    fn assert_restore_matches(wollet: &crate::Wollet, utxo_only: bool) {
+        let restored = WolletBuilder::new(Network::default_regtest(), wollet.descriptor.clone())
+            .with_stores(wollet.updates_persister.updates_store.clone())
+            .unwrap()
+            .utxo_only(utxo_only)
+            .build()
+            .unwrap();
+        assert_eq!(restored.cache.unspent(), wollet.cache.unspent());
+        assert_eq!(restored.cache.heights(), wollet.cache.heights());
+    }
+
+    #[test]
+    fn test_apply_transaction_keeps_held_spends() {
+        for utxo_only in [true, false] {
+            let (mut wollet, t) = spent_change_wollet(utxo_only);
+            wollet.apply_transaction(t.funding.clone()).unwrap();
+            wollet.apply_transaction(t.send.clone()).unwrap();
+            assert!(wollet.cache.unspent().contains_key(&t.change));
+
+            // A scan confirms both.
+            let mut confirm = empty_update(&wollet);
+            confirm.txid_height_new =
+                vec![(t.funding.txid(), Some(99)), (t.send.txid(), Some(100))];
+            confirm.unspent = vec![t.change];
+            wollet.apply_update(confirm).unwrap();
+
+            // Another client spends the change; the wallet holds that transaction.
+            wollet.apply_transaction(t.other.clone()).unwrap();
+            assert!(!wollet.cache.unspent().contains_key(&t.change));
+
+            // Applying the send again must neither revive its change nor forget
+            // that it is confirmed.
+            wollet.apply_transaction(t.send.clone()).unwrap();
+            let revived = wollet.cache.unspent().contains_key(&t.change);
+            let height = wollet.cache.tx_height(&t.send.txid()).copied();
+            assert!(
+                !revived && height == Some(Some(100)),
+                "utxo_only={utxo_only}: change spent by a held transaction revived={revived}, \
+                 confirmed send height now {height:?}"
+            );
+            assert_restore_matches(&wollet, utxo_only);
+        }
+    }
+
+    #[test]
+    fn test_apply_transaction_after_its_spender() {
+        for utxo_only in [true, false] {
+            let (mut wollet, t) = spent_change_wollet(utxo_only);
+            wollet.apply_transaction(t.funding.clone()).unwrap();
+            // The spender of the change arrives first, then the send that made it.
+            wollet.apply_transaction(t.other.clone()).unwrap();
+            wollet.apply_transaction(t.send.clone()).unwrap();
+            let revived = wollet.cache.unspent().contains_key(&t.change);
+            assert!(
+                !revived,
+                "utxo_only={utxo_only}: change spent by a held transaction revived={revived}"
+            );
+            assert!(!wollet
+                .cache
+                .unspent()
+                .contains_key(&t.send.input[0].previous_output));
+            assert_eq!(wollet.cache.tx_height(&t.send.txid()), Some(&None));
+            assert_restore_matches(&wollet, utxo_only);
+        }
     }
 }

@@ -216,6 +216,13 @@ Changes by file:
   (Elements requires at least one blinded output to balance a blinded input,
   and coin selection may pick one). Also
   `Wollet::explicit_utxos()` and a valid zero anchor in the placeholder header.
+- `src/update.rs`, `src/cache.rs`: `Wollet::apply_transaction()` (wasm
+  `applyTransaction`) never makes spendable an output that a transaction the
+  wallet holds, confirmed or not, already spends, and applying a transaction
+  the wallet already holds changes nothing, so a confirmed transaction keeps
+  its height. Upstream re-inserts the applied transaction's outputs and marks
+  it unconfirmed, which revives change that another client has spent since and
+  leads to sends refused with `bad-txns-inputs-missingorspent`.
 - `src/pset_create.rs`, `src/tx_builder.rs`: issuance and reissuance on a
   transparent chain. `issue_asset` and `reissue_asset` take explicit receiver
   addresses as well as confidential ones (feature `sequentia`), and pay them
