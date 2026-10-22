@@ -29,6 +29,23 @@
 //! hex is produced with `to_string()`, NOT the raw bytes. Using the raw bytes
 //! would reproduce the b9f63c8 bug.
 //!
+//! ## Transparent or blinded receive: the taker's choice for each swap
+//!
+//! Sequentia is transparent by default, and confidentiality is the holder's choice
+//! for each transfer. The taker makes that choice with the receive address it
+//! passes:
+//!
+//! - **An unconfidential address** (the plain `tb1…` form) builds an explicit half:
+//!   the receive output and every change output carry their asset and amount in the
+//!   clear, and only explicit coins are spent, since a blinded input's blinding
+//!   factors can only be absorbed by a blinded output. A wallet whose coins of the
+//!   asset sit only at blinded addresses is refused before anything is sent to the
+//!   maker. The maker completes such a half explicitly; its own outputs follow its
+//!   own coins and choice.
+//! - **A confidential address** builds the blinded half: the maker blinds the
+//!   receive output to the address's blinding key and the change outputs with the
+//!   taker's revealed input blinders.
+//!
 //! ## Checking the maker's answer before signing
 //!
 //! [`Wollet::seqdex_verify_accept`] compares the maker's co-signed transaction with
@@ -44,7 +61,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::bitcoin::PublicKey as BitcoinPublicKey;
 use crate::elements::pset::{Output, PartiallySignedTransaction};
-use crate::elements::{Address, AssetId, OutPoint, Script};
+use crate::elements::{Address, AssetId, OutPoint, Script, TxOutSecrets};
 use crate::error::Error;
 use crate::util::EC;
 use crate::wollet::Wollet;
@@ -100,7 +117,9 @@ pub struct SeqdexSwapRequestOpts {
     pub asset_r: AssetId,
     /// Amount of `asset_r` the taker receives (the `amount_r` on the wire).
     pub amount_r: u64,
-    /// The taker's own confidential address that receives `asset_r` and the change.
+    /// The taker's own address that receives `asset_r` and the change. Its form is
+    /// the taker's choice for this swap: an unconfidential address receives
+    /// explicitly (the transparent default), a confidential one receives blinded.
     pub receive_address: Address,
     /// Fee asset (display hex) — the asset the taker funds the on-chain network
     /// fee in (open fee market). May be `asset_p` or any other held, fee-eligible
@@ -125,8 +144,14 @@ impl Wollet {
     ///
     /// Selects the wallet's `asset_p` UTXOs to fund `amount_p`, builds an
     /// unsigned/unblinded PSETv2 with a receive output of `amount_r` `asset_r` to
-    /// `receive_address` (blinded by the maker) and an `asset_p` change output
-    /// (blinded by the taker), and reveals the selected inputs' blinders.
+    /// `receive_address` and an `asset_p` change output, and reveals the selected
+    /// inputs' blinders.
+    ///
+    /// With an unconfidential `receive_address` both outputs are explicit and only
+    /// explicit coins are selected; a shortfall that the wallet's blinded coins of
+    /// the asset would cover is refused with that reason. With a confidential
+    /// `receive_address` the maker blinds the receive output to its key and the
+    /// change outputs with the revealed blinders, as below.
     ///
     /// Open fee market — the taker may fund the on-chain network fee in ANY held,
     /// fee-eligible asset (the user picks; default = the asset being sent), not
@@ -178,12 +203,12 @@ impl Wollet {
             opts.amount_p
         };
 
-        // The receive address must be confidential — the maker blinds the
-        // receive output to its blinding pubkey, and the change goes there too.
-        let blinding_pubkey = opts
-            .receive_address
-            .blinding_pubkey
-            .ok_or(Error::NotConfidentialAddress)?;
+        // The receive address's form is the taker's choice: a confidential one has
+        // the maker blind the receive output to its key (and the change goes there
+        // too); an unconfidential one builds an explicit half that spends explicit
+        // coins only.
+        let blinding_pubkey = opts.receive_address.blinding_pubkey;
+        let explicit = blinding_pubkey.is_none();
         let out_script = opts.receive_address.script_pubkey();
 
         // Init the PSETv2 with the network genesis hash, like TxBuilder::finish.
@@ -211,9 +236,12 @@ impl Wollet {
                       asset: AssetId,
                       target: u64|
          -> Result<u64, Error> {
+            // An explicit half spends explicit coins only: a blinded input's blinding
+            // factors can only be absorbed by a blinded output.
             let mut candidates: Vec<_> = utxos
                 .values()
                 .filter(|u| u.unblinded.asset == asset)
+                .filter(|u| !explicit || is_explicit_coin(&u.unblinded))
                 .cloned()
                 .collect();
             candidates.sort_by(|a, b| b.unblinded.value.cmp(&a.unblinded.value));
@@ -266,11 +294,13 @@ impl Wollet {
             fund_amount,
         )?;
         if selected_p < fund_amount {
-            return Err(Error::InsufficientFunds {
-                missing_sats: fund_amount - selected_p,
-                asset_id: opts.asset_p,
-                is_token: false,
-            });
+            return Err(shortfall(
+                &utxos,
+                explicit,
+                opts.asset_p,
+                fund_amount,
+                selected_p,
+            ));
         }
         let asset_p_change = selected_p - fund_amount;
 
@@ -288,37 +318,40 @@ impl Wollet {
                 opts.fee_amount,
             )?;
             if fee_selected < opts.fee_amount {
-                return Err(Error::InsufficientFunds {
-                    missing_sats: opts.fee_amount - fee_selected,
-                    asset_id: opts.fee_asset,
-                    is_token: false,
-                });
+                return Err(shortfall(
+                    &utxos,
+                    explicit,
+                    opts.fee_asset,
+                    opts.fee_amount,
+                    fee_selected,
+                ));
             }
         }
 
-        // Receive output: amount_r of asset_r to the taker's address. The maker
-        // is responsible for blinding it (its input comes after every taker
-        // input), so BlinderIndex = total taker input count.
+        // Receive output: amount_r of asset_r to the taker's address. Blinded, the
+        // maker is responsible for blinding it (its input comes after every taker
+        // input), so BlinderIndex = total taker input count. Explicit, it carries
+        // no blinding key and nobody blinds it.
         let receive_output = Output {
             script_pubkey: out_script.clone(),
             amount: Some(opts.amount_r),
             asset: Some(opts.asset_r),
-            blinding_key: Some(BitcoinPublicKey::new(blinding_pubkey)),
-            blinder_index: Some(n_inputs),
+            blinding_key: blinding_pubkey.map(BitcoinPublicKey::new),
+            blinder_index: blinding_pubkey.map(|_| n_inputs),
             ..Default::default()
         };
         pset.add_output(receive_output);
 
-        // A blinded change output back to the taker. BlinderIndex 0 (the taker's
-        // first, always-revealed input); the maker blinds it via the revealed
-        // unblinded_inputs.
+        // A change output back to the taker, in the same form as the receive
+        // output. Blinded: BlinderIndex 0 (the taker's first, always-revealed
+        // input); the maker blinds it via the revealed unblinded_inputs.
         let add_change = |pset: &mut PartiallySignedTransaction, amount: u64, asset: AssetId| {
             pset.add_output(Output {
                 script_pubkey: out_script.clone(),
                 amount: Some(amount),
                 asset: Some(asset),
-                blinding_key: Some(BitcoinPublicKey::new(blinding_pubkey)),
-                blinder_index: Some(0),
+                blinding_key: blinding_pubkey.map(BitcoinPublicKey::new),
+                blinder_index: blinding_pubkey.map(|_| 0),
                 ..Default::default()
             });
         };
@@ -344,12 +377,12 @@ impl Wollet {
                 None,
             ));
         } else {
-            // asset_p change, blinded by the taker — unchanged from the default.
+            // asset_p change, in the receive output's form.
             if asset_p_change > 0 {
                 add_change(&mut pset, asset_p_change, opts.asset_p);
             }
             if taker_funds_fee {
-                // Third-asset fee: a blinded fee_asset change + explicit fee out.
+                // Third-asset fee: a fee_asset change + explicit fee out.
                 let fee_change = fee_selected - opts.fee_amount;
                 let dust = dust_threshold(opts.fee_rate);
                 if fee_change as u128 > dust as u128 {
@@ -552,6 +585,45 @@ impl Wollet {
             }
         }
         Ok(())
+    }
+}
+
+/// Whether a coin is explicit: both its blinding factors are zero.
+fn is_explicit_coin(secrets: &TxOutSecrets) -> bool {
+    use crate::elements::confidential::{AssetBlindingFactor, ValueBlindingFactor};
+    secrets.asset_bf == AssetBlindingFactor::zero()
+        && secrets.value_bf == ValueBlindingFactor::zero()
+}
+
+/// The error for a coin selection that fell short of `target`. For an explicit half,
+/// a shortfall the wallet's blinded coins of the asset would cover is not a lack of
+/// funds: it says so, and what to do about it.
+fn shortfall(
+    utxos: &HashMap<OutPoint, crate::WalletTxOut>,
+    explicit: bool,
+    asset: AssetId,
+    target: u64,
+    selected: u64,
+) -> Error {
+    if explicit {
+        let blinded: u64 = utxos
+            .values()
+            .filter(|u| u.unblinded.asset == asset && !is_explicit_coin(&u.unblinded))
+            .map(|u| u.unblinded.value)
+            .fold(0u64, |a, v| a.saturating_add(v));
+        if selected.saturating_add(blinded) >= target {
+            return Error::Generic(format!(
+                "a transparent receive spends only explicit coins, and this wallet's {asset} \
+                 that would pay for the swap is held at a blinded address: {selected} explicit \
+                 of the {target} needed. Send those coins to this wallet's usual address, or \
+                 receive this swap at a blinded address"
+            ));
+        }
+    }
+    Error::InsufficientFunds {
+        missing_sats: target - selected,
+        asset_id: asset,
+        is_token: false,
     }
 }
 
@@ -910,6 +982,92 @@ mod tests {
         refused(
             w.seqdex_verify_accept(&req, &acc),
             "its lock time differs from the request's",
+        );
+    }
+
+    #[test]
+    fn transparent_request_is_explicit_and_spends_explicit_coins() {
+        let mut w = wollet();
+        fund(&mut w, 0, asset(P), 2_000, true, 1);
+        let explicit_coin = fund(&mut w, 1, asset(P), 1_500, false, 2);
+        let req = w.seqdex_swap_request(&opts(&w, false, 1_000, 700)).unwrap();
+        let pset: PartiallySignedTransaction = req.transaction.parse().unwrap();
+        // Only the explicit coin, though the blinded one is larger.
+        assert_eq!(pset.inputs().len(), 1);
+        assert_eq!(pset.inputs()[0].previous_outpoint(), explicit_coin);
+        assert_eq!(
+            req.unblinded_inputs[0].asset_blinder,
+            AssetBlindingFactor::zero().to_string()
+        );
+        // Receive 700 R and change 500 P, both explicit.
+        assert_eq!(pset.outputs().len(), 2);
+        for o in pset.outputs() {
+            assert!(o.blinding_key.is_none() && o.blinder_index.is_none());
+        }
+        assert_eq!(
+            (pset.outputs()[0].asset, pset.outputs()[0].amount),
+            (Some(asset(R)), Some(700))
+        );
+        assert_eq!(
+            (pset.outputs()[1].asset, pset.outputs()[1].amount),
+            (Some(asset(P)), Some(500))
+        );
+    }
+
+    #[test]
+    fn transparent_request_refuses_blinded_coins() {
+        let mut w = wollet();
+        fund(&mut w, 0, asset(P), 5_000, true, 1);
+        let e = w
+            .seqdex_swap_request(&opts(&w, false, 1_000, 700))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("a transparent receive spends only explicit coins"),
+            "{e}"
+        );
+        assert!(e.contains("0 explicit of the 1000 needed"), "{e}");
+        // Not a lack of funds blinded either: the blinded request takes the coin.
+        let req = w.seqdex_swap_request(&opts(&w, true, 1_000, 700)).unwrap();
+        let pset: PartiallySignedTransaction = req.transaction.parse().unwrap();
+        assert!(pset.outputs().iter().all(|o| o.blinding_key.is_some()));
+        // And a shortfall that no coin covers stays a plain lack of funds.
+        let e = w
+            .seqdex_swap_request(&opts(&w, false, 9_000, 700))
+            .unwrap_err();
+        assert!(matches!(e, crate::Error::InsufficientFunds { .. }), "{e}");
+    }
+
+    #[test]
+    fn honest_explicit_accept_passes() {
+        let mut w = wollet();
+        fund(&mut w, 0, asset(P), 1_500, false, 1);
+        let req = w.seqdex_swap_request(&opts(&w, false, 1_000, 700)).unwrap();
+        let acc = complete(&w, &req);
+        w.seqdex_verify_accept(&req, &acc).unwrap();
+        let tx = acc.extract_tx().unwrap();
+        assert!(tx
+            .output
+            .iter()
+            .all(|o| o.asset.is_explicit() && o.value.is_explicit()));
+    }
+
+    #[test]
+    fn maker_blinding_an_explicit_receive_is_refused() {
+        let mut w = wollet();
+        fund(&mut w, 0, asset(P), 1_500, false, 1);
+        let req = w.seqdex_swap_request(&opts(&w, false, 1_000, 700)).unwrap();
+        let mut acc = complete(&w, &req);
+        // The maker blinds the taker's receive output to a key of its own.
+        let foreign = elements::secp256k1_zkp::SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let pk = elements::bitcoin::PublicKey::new(foreign.public_key(&EC));
+        let n = acc.inputs().len() as u32;
+        acc.outputs_mut()[0].blinding_key = Some(pk);
+        acc.outputs_mut()[0].blinder_index = Some(n - 1);
+        blind(&w, &req, &mut acc);
+        refused(
+            w.seqdex_verify_accept(&req, &acc),
+            "the maker blinded output 0, which this wallet asked to receive explicitly",
         );
     }
 }
