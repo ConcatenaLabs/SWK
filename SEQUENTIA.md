@@ -413,7 +413,10 @@ Changes by file:
 - `src/seqdex_swap.rs` (feature `sequentia`): `SeqdexSwapRequest`, the taker
   half of a SeqDEX same-chain atomic swap (unsigned unblinded PSETv2 plus
   revealed input blinders), wire-compatible with the SeqDEX daemon's
-  `/v1/trade/propose`; and `Wollet::seqdex_verify_accept`, which the taker runs
+  `/v1/trade/propose`. The receive address's form is the taker's choice: an
+  unconfidential address builds an explicit half that spends explicit coins only
+  (refusing, before anything is sent, a wallet whose coins of the asset sit at
+  blinded addresses), a confidential one a half the maker blinds. Also `Wollet::seqdex_verify_accept`, which the taker runs
   on the maker's co-signed answer before signing it. It refuses an answer that
   drops, changes or adds to the taker's inputs, asks for a sighash type that
   leaves outputs unsigned, or pays any output of the taker's half a different

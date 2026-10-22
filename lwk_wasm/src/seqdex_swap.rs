@@ -15,6 +15,10 @@
 //! emitted as display-order (txid-style) hex, matching the Elements node's
 //! `listunspent` output and the daemon's expectation. See that module's docs.
 //!
+//! The receive address's form is the taker's choice for each swap: its
+//! unconfidential form receives explicitly (Sequentia's default), its
+//! confidential form receives blinded.
+//!
 //! Before signing the maker's returned `SwapAccept` PSET, the taker checks it
 //! against its own request with `Wollet.seqdexVerifyAccept`; it then signs with
 //! the existing `Signer.sign(pset)` and finalizes and broadcasts it.
@@ -152,8 +156,10 @@ impl Wollet {
     ///
     /// - `asset_p` / `amount_p`: the asset and amount the taker sends (fee-exclusive).
     /// - `asset_r` / `amount_r`: the asset and amount the taker receives.
-    /// - `receive_address`: the taker's own confidential address that receives
-    ///   `asset_r` and any `asset_p` change.
+    /// - `receive_address`: the taker's own address that receives `asset_r` and any
+    ///   `asset_p` change. Its unconfidential form (`address.toUnconfidential()`)
+    ///   receives explicitly and spends explicit coins only; its confidential form
+    ///   receives blinded.
     /// - `fee_asset` / `fee_amount` / `fee_rate`: the open-fee-market network fee.
     ///   `fee_amount == 0` ⇒ maker-funds the fee in `asset_r` (default). Otherwise
     ///   the taker funds the fee in `fee_asset` (any held, fee-eligible asset
