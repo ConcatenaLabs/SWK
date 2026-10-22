@@ -15,15 +15,15 @@
 //! emitted as display-order (txid-style) hex, matching the Elements node's
 //! `listunspent` output and the daemon's expectation. See that module's docs.
 //!
-//! Completing the swap needs no new binding: the taker signs the returned
-//! `SwapAccept` PSET with the existing `Signer.sign(pset)`, then the daemon
-//! finalizes + broadcasts it via `CompleteTrade`.
+//! Before signing the maker's returned `SwapAccept` PSET, the taker checks it
+//! against its own request with `Wollet.seqdexVerifyAccept`; it then signs with
+//! the existing `Signer.sign(pset)` and finalizes and broadcasts it.
 
 use lwk_wollet::SeqdexSwapRequestOpts;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use crate::{Address, AssetId, Error, Wollet};
+use crate::{Address, AssetId, Error, Pset, Wollet};
 
 /// The taker half of a SeqDEX same-chain swap, ready to POST to the daemon's
 /// `/v1/trade/propose` as a `SwapRequest`.
@@ -163,7 +163,8 @@ impl Wollet {
     ///
     /// Returns a [`SwapRequest`] carrying the unsigned/unblinded PSETv2 + the
     /// revealed `unblinded_inputs`. POST it to the daemon's `ProposeTrade`
-    /// (`/v1/trade/propose`). To complete: the daemon returns a SwapAccept whose
+    /// (`/v1/trade/propose`). To complete: the daemon returns a SwapAccept; check
+    /// it with [`Wollet::seqdex_verify_accept`] before anything else. Its
     /// PSET contains the taker's input but, being a bare PSET, no bip32
     /// derivation — so before `Signer.sign` works on it, re-attach the taker
     /// input's keypath locally with `Wollet.psetDetails`/`add_details` (the lwk
@@ -195,5 +196,18 @@ impl Wollet {
             fee_rate,
         };
         Ok(self.inner().seqdex_swap_request(&opts)?.into())
+    }
+
+    /// Check the maker's co-signed `SwapAccept` PSET against this wallet's own
+    /// `request` before signing it. Throws, naming the reason, unless every input
+    /// the request spent is there unchanged and signed over the whole transaction,
+    /// no other coin of this wallet is spent, and every output the request put in
+    /// pays the same script the same asset and amount, explicit where the request
+    /// asked explicit and blinded to this wallet's key where it asked blinded.
+    #[wasm_bindgen(js_name = seqdexVerifyAccept)]
+    pub fn seqdex_verify_accept(&self, request: &SwapRequest, accept: &Pset) -> Result<(), Error> {
+        Ok(self
+            .inner()
+            .seqdex_verify_accept(&request.inner, accept.inner())?)
     }
 }
