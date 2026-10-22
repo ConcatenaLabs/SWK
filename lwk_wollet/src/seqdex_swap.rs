@@ -28,13 +28,25 @@
 //! serialize()` / `to_bytes()` is the internal little-endian order. So the wire
 //! hex is produced with `to_string()`, NOT the raw bytes. Using the raw bytes
 //! would reproduce the b9f63c8 bug.
+//!
+//! ## Checking the maker's answer before signing
+//!
+//! [`Wollet::seqdex_verify_accept`] compares the maker's co-signed transaction with
+//! the request this wallet built, and refuses it unless every input the wallet put
+//! in is there and unchanged, no other coin of the wallet is spent, the wallet's
+//! inputs are signed over the whole transaction, and every output the wallet put in
+//! pays the same script the same asset and amount, explicit where the wallet asked
+//! for explicit and blinded to the wallet's own key where it asked for blinded. The
+//! signature then authorises exactly the swap the wallet proposed, and nothing the
+//! maker added can take from it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::bitcoin::PublicKey as BitcoinPublicKey;
 use crate::elements::pset::{Output, PartiallySignedTransaction};
-use crate::elements::{Address, AssetId, Script};
+use crate::elements::{Address, AssetId, OutPoint, Script};
 use crate::error::Error;
+use crate::util::EC;
 use crate::wollet::Wollet;
 use lwk_common::set_genesis_hash;
 
@@ -192,12 +204,12 @@ impl Wollet {
         // reproduce the b9f63c8 bad-txns-in-ne-out bug), and bumps `n_inputs`.
         // Returns the total selected; the caller checks it covers `target`.
         let select = |pset: &mut PartiallySignedTransaction,
-                          inp_txout_sec: &mut HashMap<usize, crate::elements::TxOutSecrets>,
-                          inp_weight: &mut usize,
-                          n_inputs: &mut u32,
-                          unblinded_inputs: &mut Vec<SeqdexUnblindedInput>,
-                          asset: AssetId,
-                          target: u64|
+                      inp_txout_sec: &mut HashMap<usize, crate::elements::TxOutSecrets>,
+                      inp_weight: &mut usize,
+                      n_inputs: &mut u32,
+                      unblinded_inputs: &mut Vec<SeqdexUnblindedInput>,
+                      asset: AssetId,
+                      target: u64|
          -> Result<u64, Error> {
             let mut candidates: Vec<_> = utxos
                 .values()
@@ -384,6 +396,165 @@ impl Wollet {
     }
 }
 
+impl Wollet {
+    /// Check the maker's co-signed SwapAccept PSET against the `request` this wallet
+    /// built, before the wallet signs it.
+    ///
+    /// The taker's signature covers the whole transaction, so the check is on what
+    /// that transaction does to this wallet, recomputed from the wallet's own
+    /// request rather than from anything the maker says:
+    ///
+    /// - every input of the request is in the accept, with the same previous
+    ///   output, no issuance added, and no sighash type other than ALL (or the
+    ///   taproot default), so the signature cannot be reused for other outputs;
+    /// - no other coin of this wallet is spent;
+    /// - the lock time is the request's;
+    /// - every output of the request is at the same position with the same script,
+    ///   asset and amount: explicit where the request had no blinding key, and
+    ///   blinded to this wallet's own key where it had one. An output the taker
+    ///   asked to receive explicitly that comes back blinded is refused, and so is
+    ///   one asked blinded that comes back explicit: the form is the taker's choice.
+    ///
+    /// Outputs the maker appends after the request's own are the maker's business.
+    pub fn seqdex_verify_accept(
+        &self,
+        request: &SeqdexSwapRequest,
+        accept: &PartiallySignedTransaction,
+    ) -> Result<(), Error> {
+        let refuse = |why: String| Error::Generic(format!("refusing the maker's swap: {why}"));
+        let ours: PartiallySignedTransaction = request
+            .transaction
+            .parse()
+            .map_err(|e| Error::Generic(format!("the swap request does not parse: {e}")))?;
+
+        if ours.locktime()? != accept.locktime()? {
+            return Err(refuse("its lock time differs from the request's".into()));
+        }
+
+        // Inputs.
+        let mut our_inputs = HashMap::new();
+        for inp in ours.inputs() {
+            our_inputs.insert(inp.previous_outpoint(), inp);
+        }
+        let mut seen: HashSet<OutPoint> = HashSet::new();
+        let txos = self.txos_map()?;
+        for inp in accept.inputs() {
+            let op = inp.previous_outpoint();
+            match our_inputs.get(&op) {
+                Some(mine) => {
+                    if !seen.insert(op) {
+                        return Err(refuse(format!("it spends this wallet's {op} twice")));
+                    }
+                    if inp.witness_utxo != mine.witness_utxo {
+                        return Err(refuse(format!(
+                            "it changes the coin {op} this wallet funded the swap with"
+                        )));
+                    }
+                    if inp.has_issuance() != mine.has_issuance() {
+                        return Err(refuse(format!("it adds an issuance to the input {op}")));
+                    }
+                    if let Some(h) = inp.sighash_type {
+                        let h = h.to_u32();
+                        // 0 = the taproot default, 1 = ALL: both sign every output.
+                        if h != 0 && h != 1 {
+                            return Err(refuse(format!(
+                                "it asks this wallet to sign {op} with sighash type {h:#x}, \
+                                 which would leave outputs unsigned"
+                            )));
+                        }
+                    }
+                }
+                None => {
+                    let owned = txos.contains_key(&op)
+                        || inp
+                            .witness_utxo
+                            .as_ref()
+                            .is_some_and(|o| self.cache.paths.contains_key(&o.script_pubkey));
+                    if owned {
+                        return Err(refuse(format!(
+                            "it spends {op}, another coin of this wallet"
+                        )));
+                    }
+                }
+            }
+        }
+        if let Some(op) = our_inputs.keys().find(|op| !seen.contains(op)) {
+            return Err(refuse(format!(
+                "it leaves out {op}, which this wallet funded the swap with"
+            )));
+        }
+
+        // Outputs.
+        if accept.outputs().len() < ours.outputs().len() {
+            return Err(refuse("it drops outputs this wallet put in".into()));
+        }
+        let tx = accept.extract_tx()?;
+        for (i, mine) in ours.outputs().iter().enumerate() {
+            let theirs = &accept.outputs()[i];
+            let txout = &tx.output[i];
+            if theirs.script_pubkey != mine.script_pubkey
+                || txout.script_pubkey != mine.script_pubkey
+            {
+                return Err(refuse(format!(
+                    "output {i} no longer pays the script this wallet asked for"
+                )));
+            }
+            let want_asset = mine
+                .asset
+                .ok_or_else(|| Error::Generic(format!("request output {i} has no asset")))?;
+            let want_amount = mine
+                .amount
+                .ok_or_else(|| Error::Generic(format!("request output {i} has no amount")))?;
+            let explicit = txout.asset.is_explicit() && txout.value.is_explicit();
+            let got: (AssetId, u64) = match mine.blinding_key {
+                None => {
+                    if !explicit {
+                        return Err(refuse(format!(
+                            "the maker blinded output {i}, which this wallet asked to \
+                             receive explicitly"
+                        )));
+                    }
+                    (
+                        txout.asset.explicit().expect("explicit"),
+                        txout.value.explicit().expect("explicit"),
+                    )
+                }
+                Some(_) => {
+                    if txout.asset.is_explicit() || txout.value.is_explicit() {
+                        return Err(refuse(format!(
+                            "the maker left output {i} explicit, which this wallet asked \
+                             to receive blinded"
+                        )));
+                    }
+                    let sk = self
+                        .descriptor
+                        .blinding_key_for_script(&mine.script_pubkey)
+                        .ok_or_else(|| {
+                            refuse(format!(
+                                "output {i} pays a script this wallet cannot unblind"
+                            ))
+                        })?;
+                    let secrets = txout.unblind(&EC, sk).map_err(|_| {
+                        refuse(format!(
+                            "output {i} is not blinded to this wallet's key, so the wallet \
+                             could not see or spend what it holds"
+                        ))
+                    })?;
+                    (secrets.asset, secrets.value)
+                }
+            };
+            if got != (want_asset, want_amount) {
+                return Err(refuse(format!(
+                    "output {i} pays {} of {} where this wallet asked for {want_amount} of \
+                     {want_asset}",
+                    got.1, got.0
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The `fee_asset` dust threshold, mirroring the node's
 /// `ConvertValueToAmount(294, asset)` = `ceil(294 * exchange_rate_scale / rate)`.
 /// A confidential change at/below this is rejected by node dust policy, so the
@@ -416,4 +587,329 @@ fn random_swap_id() -> String {
     let mut bytes = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use elements::bitcoin::bip32::ChildNumber;
+    use elements::confidential::{self, AssetBlindingFactor, ValueBlindingFactor};
+    use elements::hashes::Hash;
+    use elements::pset::{Input, Output, PartiallySignedTransaction};
+    use elements::{AssetId, OutPoint, Script, Transaction, TxIn, TxOut, TxOutSecrets, Txid};
+
+    use super::{SeqdexSwapRequest, SeqdexSwapRequestOpts};
+    use crate::clients::LastUnused;
+    use crate::descriptor::Chain;
+    use crate::update::{default_blockheader, DownloadTxResult, Update};
+    use crate::{Wollet, WolletBuilder, WolletDescriptor, EC};
+
+    // A slip77 descriptor, so blinded outputs to it can be unblinded.
+    const DESC: &str = "ct(slip77(ac53739ddde9fdf6bba3dbc51e989b09aa8c9cdce7b7d7eddd49cec86ddf71f7),elwpkh([93970d14/84'/1'/0']tpubDC3BrFCCjXq4jAceV8k6UACxDDJCFb1eb7R7BiKYUGZdNagEhNfJoYtUrRdci9JFs1meiGGModvmNm8PrqkrEjJ6mpt6gA1DRNU8vu7GqXH/<0;1>/*))#u0y4axgs";
+
+    fn asset(b: u8) -> AssetId {
+        AssetId::from_slice(&[b; 32]).unwrap()
+    }
+    const P: u8 = 0x11; // what the taker pays
+    const R: u8 = 0x22; // what the taker receives
+
+    /// A wallet that knows its first two receive and change scripts.
+    fn wollet() -> Wollet {
+        let desc: WolletDescriptor = DESC.parse().unwrap();
+        let mut w = WolletBuilder::new(crate::Network::default_regtest(), desc)
+            .with_stores(Arc::new(lwk_common::MemoryStore::default()))
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut scripts = vec![];
+        for i in 0..2 {
+            let child = ChildNumber::from_normal_idx(i).unwrap();
+            let r = w.address(Some(i)).unwrap().address().script_pubkey();
+            let c = w.change(Some(i)).unwrap().address().script_pubkey();
+            scripts.push((Chain::External, child, r, None));
+            scripts.push((Chain::Internal, child, c, None));
+        }
+        let update = Update {
+            version: 4,
+            wollet_status: w.status(),
+            new_txs: DownloadTxResult::default(),
+            txid_height_new: vec![],
+            txid_height_delete: vec![],
+            timestamps: vec![],
+            scripts_with_blinding_pubkey: scripts,
+            tip: default_blockheader(),
+            unspent: vec![],
+            last_unused: LastUnused::default(),
+        };
+        w.apply_update(update).unwrap();
+        w
+    }
+
+    fn explicit_txout(script: Script, a: AssetId, value: u64) -> TxOut {
+        TxOut {
+            asset: confidential::Asset::Explicit(a),
+            value: confidential::Value::Explicit(value),
+            nonce: confidential::Nonce::Null,
+            script_pubkey: script,
+            witness: Default::default(),
+        }
+    }
+
+    /// Fund the wallet's address `i` with `value` of `a`, explicit or blinded to
+    /// the wallet's own key, in a transaction of its own.
+    fn fund(w: &mut Wollet, i: u32, a: AssetId, value: u64, blinded: bool, salt: u8) -> OutPoint {
+        let addr = w.address(Some(i)).unwrap().address().clone();
+        let out = if blinded {
+            let spent = [TxOutSecrets::new(
+                a,
+                AssetBlindingFactor::zero(),
+                value,
+                ValueBlindingFactor::zero(),
+            )];
+            TxOut::new_not_last_confidential(&mut rand::thread_rng(), &EC, value, addr, a, &spent)
+                .unwrap()
+                .0
+        } else {
+            explicit_txout(addr.script_pubkey(), a, value)
+        };
+        let tx = Transaction {
+            version: 2,
+            lock_time: elements::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::new(Txid::from_byte_array([salt; 32]), 0),
+                ..Default::default()
+            }],
+            output: vec![out],
+        };
+        let op = OutPoint::new(tx.txid(), 0);
+        w.apply_transaction(tx).unwrap();
+        op
+    }
+
+    fn opts(w: &Wollet, blinded: bool, amount_p: u64, amount_r: u64) -> SeqdexSwapRequestOpts {
+        let a = w.address(Some(0)).unwrap().address().clone();
+        SeqdexSwapRequestOpts {
+            asset_p: asset(P),
+            amount_p,
+            asset_r: asset(R),
+            amount_r,
+            receive_address: if blinded { a } else { a.to_unconfidential() },
+            fee_asset: asset(P),
+            fee_amount: 0,
+            fee_rate: 0,
+        }
+    }
+
+    fn maker_script() -> Script {
+        Script::from(vec![
+            0x00, 0x14, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+            0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+        ])
+    }
+
+    /// What an honest maker does with the request: adds its own coin of `R`,
+    /// takes `amount_p` of `P`, pays the fee in `R`, keeps its change, and
+    /// blinds when the request asks for it. Returns the accept PSET.
+    fn complete(w: &Wollet, req: &SeqdexSwapRequest) -> PartiallySignedTransaction {
+        complete_with(w, req, |_| {})
+    }
+
+    /// `complete`, with `tamper` applied to the maker's PSET before it blinds.
+    fn complete_with(
+        w: &Wollet,
+        req: &SeqdexSwapRequest,
+        tamper: impl Fn(&mut PartiallySignedTransaction),
+    ) -> PartiallySignedTransaction {
+        let mut pset: PartiallySignedTransaction = req.transaction.parse().unwrap();
+        let maker_in = 10_000u64;
+        let fee = 100u64;
+        let mut inp = Input::from_prevout(OutPoint::new(Txid::from_byte_array([0x99; 32]), 1));
+        inp.witness_utxo = Some(explicit_txout(maker_script(), asset(R), maker_in));
+        pset.add_input(inp);
+        pset.add_output(Output::new_explicit(
+            maker_script(),
+            req.amount_p,
+            asset(P),
+            None,
+        ));
+        pset.add_output(Output::new_explicit(
+            maker_script(),
+            maker_in - req.amount_r - fee,
+            asset(R),
+            None,
+        ));
+        pset.add_output(Output::new_explicit(Script::default(), fee, asset(R), None));
+        tamper(&mut pset);
+        let blinded = pset.outputs().iter().any(|o| o.blinding_key.is_some());
+        if blinded {
+            blind(w, req, &mut pset);
+        }
+        pset
+    }
+
+    /// Blind every output carrying a blinding key, as the maker's last blinder does,
+    /// from the taker's revealed input secrets and the maker's explicit input.
+    fn blind(w: &Wollet, req: &SeqdexSwapRequest, pset: &mut PartiallySignedTransaction) {
+        let utxos = w.utxos_map().unwrap();
+        let mut secrets: HashMap<usize, TxOutSecrets> = HashMap::new();
+        for (i, inp) in pset.inputs().iter().enumerate() {
+            let s = match utxos.get(&inp.previous_outpoint()) {
+                Some(u) => u.unblinded,
+                None => {
+                    let o = inp.witness_utxo.as_ref().unwrap();
+                    TxOutSecrets::new(
+                        o.asset.explicit().unwrap(),
+                        AssetBlindingFactor::zero(),
+                        o.value.explicit().unwrap(),
+                        ValueBlindingFactor::zero(),
+                    )
+                }
+            };
+            secrets.insert(i, s);
+        }
+        let _ = req;
+        pset.blind_last(&mut rand::thread_rng(), &EC, &secrets)
+            .unwrap();
+    }
+
+    fn refused(r: Result<(), crate::Error>, want: &str) {
+        let e = r.expect_err("the accept must be refused").to_string();
+        assert!(e.contains(want), "refusal {e:?} does not name {want:?}");
+    }
+
+    #[test]
+    fn honest_blinded_accept_passes() {
+        let mut w = wollet();
+        fund(&mut w, 0, asset(P), 1_500, true, 1);
+        let req = w.seqdex_swap_request(&opts(&w, true, 1_000, 700)).unwrap();
+        let acc = complete(&w, &req);
+        let tx = acc.extract_tx().unwrap();
+        assert!(!tx.output[0].value.is_explicit() && !tx.output[1].value.is_explicit());
+        w.seqdex_verify_accept(&req, &acc).unwrap();
+    }
+
+    #[test]
+    fn maker_leaving_a_blinded_receive_explicit_is_refused() {
+        let mut w = wollet();
+        fund(&mut w, 0, asset(P), 1_500, false, 1);
+        let req = w.seqdex_swap_request(&opts(&w, true, 1_000, 700)).unwrap();
+        let mut acc: PartiallySignedTransaction = req.transaction.parse().unwrap();
+        // Complete it without blinding anything.
+        let mut inp = Input::from_prevout(OutPoint::new(Txid::from_byte_array([0x99; 32]), 1));
+        inp.witness_utxo = Some(explicit_txout(maker_script(), asset(R), 10_000));
+        acc.add_input(inp);
+        acc.add_output(Output::new_explicit(maker_script(), 1_000, asset(P), None));
+        acc.add_output(Output::new_explicit(maker_script(), 9_200, asset(R), None));
+        acc.add_output(Output::new_explicit(Script::default(), 100, asset(R), None));
+        refused(
+            w.seqdex_verify_accept(&req, &acc),
+            "the maker left output 0 explicit, which this wallet asked to receive blinded",
+        );
+    }
+
+    #[test]
+    fn maker_blinding_to_a_foreign_key_is_refused() {
+        let mut w = wollet();
+        fund(&mut w, 0, asset(P), 1_500, true, 1);
+        let req = w.seqdex_swap_request(&opts(&w, true, 1_000, 700)).unwrap();
+        let mut acc: PartiallySignedTransaction = req.transaction.parse().unwrap();
+        let foreign = elements::secp256k1_zkp::SecretKey::from_slice(&[7u8; 32]).unwrap();
+        acc.outputs_mut()[0].blinding_key =
+            Some(elements::bitcoin::PublicKey::new(foreign.public_key(&EC)));
+        let mut inp = Input::from_prevout(OutPoint::new(Txid::from_byte_array([0x99; 32]), 1));
+        inp.witness_utxo = Some(explicit_txout(maker_script(), asset(R), 10_000));
+        acc.add_input(inp);
+        acc.add_output(Output::new_explicit(maker_script(), 1_000, asset(P), None));
+        acc.add_output(Output::new_explicit(maker_script(), 9_200, asset(R), None));
+        acc.add_output(Output::new_explicit(Script::default(), 100, asset(R), None));
+        blind(&w, &req, &mut acc);
+        refused(
+            w.seqdex_verify_accept(&req, &acc),
+            "output 0 is not blinded to this wallet's key",
+        );
+    }
+
+    #[test]
+    fn maker_short_paying_is_refused() {
+        let mut w = wollet();
+        fund(&mut w, 0, asset(P), 1_500, true, 1);
+        let req = w.seqdex_swap_request(&opts(&w, true, 1_000, 700)).unwrap();
+        // One atom less to the taker, one more to the maker's change: a valid
+        // transaction that a wallet signing unchecked would broadcast.
+        let acc = complete_with(&w, &req, |p| {
+            p.outputs_mut()[0].amount = Some(699);
+            let maker_change = p.outputs().len() - 2;
+            let v = p.outputs()[maker_change].amount.unwrap();
+            p.outputs_mut()[maker_change].amount = Some(v + 1);
+        });
+        refused(
+            w.seqdex_verify_accept(&req, &acc),
+            &format!(
+                "output 0 pays 699 of {} where this wallet asked for 700",
+                asset(R)
+            ),
+        );
+        // Or pays the change somewhere else.
+        let acc = complete_with(&w, &req, |p| {
+            p.outputs_mut()[1].script_pubkey = maker_script()
+        });
+        refused(
+            w.seqdex_verify_accept(&req, &acc),
+            "output 1 no longer pays the script this wallet asked for",
+        );
+        // Or drops the change.
+        let mut acc: PartiallySignedTransaction = req.transaction.parse().unwrap();
+        acc.remove_output(1);
+        refused(
+            w.seqdex_verify_accept(&req, &acc),
+            "it drops outputs this wallet put in",
+        );
+    }
+
+    #[test]
+    fn maker_touching_the_takers_inputs_is_refused() {
+        let mut w = wollet();
+        let coin = fund(&mut w, 0, asset(P), 1_500, true, 1);
+        let other = fund(&mut w, 1, asset(P), 3_000, true, 2);
+        let mut o = opts(&w, true, 1_000, 700);
+        o.amount_p = 2_500; // selects the 3,000 coin only
+        let req = w.seqdex_swap_request(&o).unwrap();
+        let pset: PartiallySignedTransaction = req.transaction.parse().unwrap();
+        assert_eq!(pset.inputs()[0].previous_outpoint(), other);
+
+        // Another coin of the wallet added.
+        let coin_txout = w.txos_map().unwrap()[&coin].clone();
+        let mut acc = complete(&w, &req);
+        let mut extra = Input::from_prevout(coin);
+        extra.witness_utxo = Some(explicit_txout(coin_txout.script_pubkey, asset(P), 1_500));
+        acc.add_input(extra);
+        refused(
+            w.seqdex_verify_accept(&req, &acc),
+            &format!("it spends {coin}, another coin of this wallet"),
+        );
+
+        // The wallet's own input signed for less than the whole transaction.
+        let mut acc = complete(&w, &req);
+        acc.inputs_mut()[0].sighash_type = Some(elements::pset::PsbtSighashType::from_u32(0x83));
+        refused(w.seqdex_verify_accept(&req, &acc), "with sighash type 0x83");
+
+        // The wallet's input dropped (replaced by a maker coin).
+        let mut acc = complete(&w, &req);
+        acc.remove_input(0);
+        refused(
+            w.seqdex_verify_accept(&req, &acc),
+            &format!("it leaves out {other}, which this wallet funded the swap with"),
+        );
+
+        // A different lock time.
+        let mut acc = complete(&w, &req);
+        acc.global.tx_data.fallback_locktime =
+            Some(elements::LockTime::from_height(500_000).unwrap());
+        refused(
+            w.seqdex_verify_accept(&req, &acc),
+            "its lock time differs from the request's",
+        );
+    }
 }

@@ -413,7 +413,12 @@ Changes by file:
 - `src/seqdex_swap.rs` (feature `sequentia`): `SeqdexSwapRequest`, the taker
   half of a SeqDEX same-chain atomic swap (unsigned unblinded PSETv2 plus
   revealed input blinders), wire-compatible with the SeqDEX daemon's
-  `/v1/trade/propose`.
+  `/v1/trade/propose`; and `Wollet::seqdex_verify_accept`, which the taker runs
+  on the maker's co-signed answer before signing it. It refuses an answer that
+  drops, changes or adds to the taker's inputs, asks for a sighash type that
+  leaves outputs unsigned, or pays any output of the taker's half a different
+  script, asset or amount, or in a different form (explicit or blinded to the
+  taker's key) than the taker asked for.
 - `src/seqdex_htlc.rs` (feature `sequentia`): the cross-chain HTLC's Sequentia
   leg: `build_htlc_redeem_script()` (the single redeemScript source for BOTH
   legs, byte-identical to the daemon's), `build_claim_tx()`,
@@ -516,7 +521,8 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   (`lwk_contracts::statement`). Values cross as JSON text.
 - `build-web.sh`: the browser build (`wasm-pack build --target web
   --release`) with every build-machine path remapped, failing if one remains.
-- `src/seqdex_swap.rs`: `SwapRequest` (same-chain SeqDEX swap proposal).
+- `src/seqdex_swap.rs`: `SwapRequest` (same-chain SeqDEX swap proposal) and
+  `Wollet.seqdexVerifyAccept` (the check of the maker's answer before signing).
 - `src/seqdex_htlc.rs`: `generateSwapSecret`, `htlcKeypair`,
   `buildSeqHtlcRedeemScript`, `buildSeqHtlcClaimTx`, `buildSeqHtlcRefundTx`.
 - `src/tx_builder.rs`: `feeAsset()` (any-asset fees), `addExplicitRecipient()`,
