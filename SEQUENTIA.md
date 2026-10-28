@@ -37,7 +37,7 @@ Crates touched only mechanically:
   fixtures that hard-code the Liquid wire format fail to deserialize, so a plain
   `cargo test -p lwk_wollet --lib` has known failures in upstream fixture tests;
   the Sequentia-specific test modules all pass.
-- `bitcoin = "=0.32.7"` pinned exactly to the version `elements-miniscript`
+- `bitcoin = "=0.32.8"` pinned exactly to the version `elements-miniscript`
   pulls transitively, so the parent-chain crate can never drift and silently
   change HTLC redeemScript bytes.
 - `arca-covenant`, Arca's covenant scripts, leaf record and client checks
