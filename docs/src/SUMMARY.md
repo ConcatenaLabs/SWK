@@ -29,6 +29,8 @@
   * [Bip85](bip85.md) ✅
   * [CLI]() #(cli.md) 🚧
   * [High-Volume Wallets](highvolume.md)
+* [Sequentia wallets]()
+  * [Default mode](default-mode.md)
 * [Miscellaneous]() #(misc.md) ❌
   * [Architecture](arch.md) 🚧
   * [Use Cases]() #(usecases.md) ❌
