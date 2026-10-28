@@ -80,8 +80,11 @@ through wasm.
   genesis hash silently breaks covenant signing rather than failing loudly.
 - **The vendored `rust-elements/` fork** adds the Bitcoin anchor to the block header and includes
   it in the block hash. It is patched in via `[patch.crates-io]` and is not a workspace member.
-- **`bitcoin` is pinned to an exact version** (`=0.32.7`) specifically to stop HTLC redeemScript
-  bytes drifting. Do not loosen that pin.
+- **`bitcoin` is pinned to an exact version** (`=0.32.8`) specifically to stop HTLC redeemScript
+  bytes drifting. Do not loosen that pin. It is the lowest version every consumer's graph
+  accepts (Bark's on-chain wallet, through `bdk_wallet` 3.1, needs 0.32.8 or later); move it
+  only to keep one copy of the crate, and then every consumer runs
+  `cargo update -p bitcoin --precise <version>`.
 - **`btc-blocking` cannot target wasm32** and says so with a `compile_error!`. Use `btc-async` for
   anything that must run in a browser.
 - Sequentia-specific modules exported from `lwk_wollet`: `btc`, `adaptor`, `openamp`, `ark`,

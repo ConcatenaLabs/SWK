@@ -65,7 +65,7 @@ elements-miniscript = { version = "0.4", features = ["base64", "serde"] }
 # SEQUENTIA dual-chain: pin the Bitcoin parent-chain crate to EXACTLY the version
 # elements-miniscript pulls in transitively, so it can never drift and silently
 # break HTLC redeemScript / spend-tx byte-identity across the two legs + daemon.
-bitcoin = "=0.32.7"
+bitcoin = "=0.32.8"
 serde = { version = "1.0" }
 serde_json = { version = "1.0" }
 log = { version = "0.4.22" }

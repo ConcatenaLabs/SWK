@@ -13,7 +13,7 @@
 > - The `btc` / `btc-async` / `btc-blocking` feature-gated module in
 >   `lwk_wollet/src/btc/` (no new crate), with the blocking+async transports
 >   over one I/O-free core, the wasm32 `compile_error!` guard, and
->   `bitcoin = "=0.32.7"` pinned in the workspace (Phases 0-1).
+>   `bitcoin = "=0.32.8"` pinned in the workspace (Phases 0-1).
 > - `ChainAddressParams` in `lwk_wollet/src/btc/addr.rs` with the hardcoded
 >   Bitcoin network and shared `(coin_type, HRP)` per network; `isSequentia()`
 >   on the wasm `Network`.
@@ -85,9 +85,9 @@ First principles this plan must honor:
 
 ## What makes this cheap (verified)
 
-- `bitcoin` 0.32.7 is already in the dependency graph (transitive via `elements-miniscript`),
+- `bitcoin` 0.32.8 is already in the dependency graph (transitive via `elements-miniscript`),
   re-exported at `lwk_wollet/src/lib.rs` as `pub use ...bitcoin`. It already models
-  `Network::Testnet4`. No new crate dependency is needed; pin `bitcoin = "=0.32.7"` in the
+  `Network::Testnet4`. No new crate dependency is needed; pin `bitcoin = "=0.32.8"` in the
   workspace so it cannot drift from the `elements-miniscript` transitive version (a drift
   would silently break HTLC redeemScript byte-identity).
 - `SwSigner::derive_xprv(path)` already yields a `bitcoin::Xpriv` at any BIP84 path and works
@@ -218,7 +218,7 @@ testnet4 faucet source; a running `seqdexd` with the test asset whitelisted; `cl
 wasm-pack secp256k1 build. Each "real on-chain" exit below is split into a deterministic CI
 fixture gate (always runnable) plus a separately-tracked live-testnet acceptance step.
 
-- Phase 0 -- Parity baseline. Pin `bitcoin=0.32.7`; add the `btc`/`btc-async`/`btc-blocking`
+- Phase 0 -- Parity baseline. Pin `bitcoin=0.32.8`; add the `btc`/`btc-async`/`btc-blocking`
   feature scaffold; import `ambra_core` `btc.rs` and `btc_htlc.rs` as the blocking impl; collapse
   the redeemScript to one chain-agnostic source; lift the tb1-identity test and the
   BTC-vs-Sequentia-vs-daemon redeemScript test into SWK; ADD claim and refund spend-tx parity
