@@ -22,7 +22,25 @@ pub fn singlesig_desc<S: Signer + ?Sized>(
         Singlesig::ShWpkh => ("elsh(wpkh", format!("49h/{coin_type}h/0h"), ")"),
         Singlesig::Tr => ("eltr", format!("86h/{coin_type}h/0h"), ""),
     };
+    account_desc(signer, prefix, &path, suffix, blinding_variant)
+}
 
+/// Generate the descriptor of an Electrum `segwit` seed wallet: p2wpkh keys at
+/// `m/0'/0/i` (receive) and `m/0'/1/i` (change), whatever the network.
+pub fn electrum_segwit_desc<S: Signer + ?Sized>(
+    signer: &S,
+    blinding_variant: DescriptorBlindingKey,
+) -> Result<String, String> {
+    account_desc(signer, "elwpkh", "0h", "", blinding_variant)
+}
+
+fn account_desc<S: Signer + ?Sized>(
+    signer: &S,
+    prefix: &str,
+    path: &str,
+    suffix: &str,
+    blinding_variant: DescriptorBlindingKey,
+) -> Result<String, String> {
     let fingerprint = signer.fingerprint().map_err(|e| format!("{e:?}"))?;
 
     let xpub = signer

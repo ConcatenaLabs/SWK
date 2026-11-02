@@ -2807,6 +2807,7 @@ dependencies = [
  "lwk_test_util",
  "serde_json",
  "thiserror 2.0.18",
+ "unicode-normalization",
 ]
 
 [[package]]
