@@ -26,6 +26,8 @@ use elements_miniscript::{
 };
 use lwk_common::{get_genesis_hash, Signer};
 
+use crate::electrum::{electrum_seed, electrum_seed_type, ElectrumSeedType};
+
 /// Possible errors when signing with the software signer [`SwSigner`]
 #[derive(thiserror::Error, Debug)]
 #[allow(missing_docs)]
@@ -65,6 +67,14 @@ pub enum NewError {
     /// Error deriving the extended private key
     #[error(transparent)]
     Bip32(#[from] bip32::Error),
+
+    /// The phrase is not an Electrum seed
+    #[error("Not an Electrum seed")]
+    NotElectrumSeed,
+
+    /// The Electrum seed is of a type this signer cannot stand for alone
+    #[error("Electrum {0} seeds are not supported")]
+    UnsupportedElectrumSeed(&'static str),
 }
 
 /// Options for ECDSA signing
@@ -84,6 +94,8 @@ pub struct SwSigner {
     pub(crate) xprv: Xpriv,
     pub(crate) secp: Secp256k1<All>, // could be sign only, but it is likely the caller already has the All context.
     pub(crate) mnemonic: Option<Mnemonic>,
+    seed: Option<[u8; 64]>,
+    electrum_seed_type: Option<ElectrumSeedType>,
     ecdsa_sign_opt: EcdsaSignOpt,
 }
 
@@ -115,8 +127,51 @@ impl SwSigner {
             xprv,
             secp,
             mnemonic: Some(mnemonic),
+            seed: Some(seed),
+            electrum_seed_type: None,
             ecdsa_sign_opt: EcdsaSignOpt::default(),
         })
+    }
+
+    /// Creates a new software signer from an Electrum seed phrase (Electrum 2.0 and later).
+    ///
+    /// The master key comes from the Electrum BIP32 seed, so the signer holds no BIP39
+    /// mnemonic. Only the single-signature types are accepted: `standard` (addresses at
+    /// `m/0/i`, `m/1/i`) and `segwit` (at `m/0'/0/i`, `m/0'/1/i`); see
+    /// [`ElectrumSeedType::account_path`]. 2FA seeds are refused, as their wallets need a
+    /// cosigner.
+    pub fn from_electrum_seed(
+        phrase: &str,
+        passphrase: &str,
+        is_mainnet: bool,
+    ) -> Result<Self, NewError> {
+        let seed_type = electrum_seed_type(phrase).ok_or(NewError::NotElectrumSeed)?;
+        if seed_type.account_path().is_none() {
+            return Err(NewError::UnsupportedElectrumSeed(seed_type.as_str()));
+        }
+        let seed = electrum_seed(phrase, passphrase);
+
+        let network = if is_mainnet {
+            bitcoin::Network::Bitcoin
+        } else {
+            bitcoin::Network::Testnet
+        };
+
+        let xprv = Xpriv::new_master(network, &seed)?;
+
+        Ok(Self {
+            xprv,
+            secp: Secp256k1::new(),
+            mnemonic: None,
+            seed: Some(seed),
+            electrum_seed_type: Some(seed_type),
+            ecdsa_sign_opt: EcdsaSignOpt::default(),
+        })
+    }
+
+    /// The Electrum seed type, if the signer was created with [`Self::from_electrum_seed`]
+    pub fn electrum_seed_type(&self) -> Option<ElectrumSeedType> {
+        self.electrum_seed_type
     }
 
     /// Return true if the signer is for mainnet. There is no need to discriminate between regtest and testnet.
@@ -136,6 +191,8 @@ impl SwSigner {
             xprv,
             secp: Secp256k1::new(),
             mnemonic: None,
+            seed: None,
+            electrum_seed_type: None,
             ecdsa_sign_opt: EcdsaSignOpt::default(),
         }
     }
@@ -155,9 +212,10 @@ impl SwSigner {
         Xpub::from_priv(&self.secp, &self.xprv)
     }
 
-    /// Return the seed of the signer if it has been initialized with the mnemonic (can't provide the seed if initialized with xprv)
+    /// Return the seed of the signer if it has been initialized with a mnemonic or an Electrum
+    /// seed (can't provide the seed if initialized with xprv)
     pub fn seed(&self) -> Option<[u8; 64]> {
-        self.mnemonic.as_ref().map(|m| m.to_seed(""))
+        self.seed
     }
 
     /// Return the mnemonic of the signer if it has been initialized with the mnemonic (can't provide the mnemonic if initialized with xprv)
@@ -502,6 +560,84 @@ mod tests {
     use elements_miniscript::elements::hex::ToHex;
 
     use super::*;
+
+    #[test]
+    fn electrum_seed_signer() {
+        use bitcoin::{Address, CompressedPublicKey};
+        use std::str::FromStr;
+
+        // Electrum's test_electrum_seed_* in tests/test_wallet_vertical.py: the first
+        // receive and change address of each wallet.
+        let addr = |signer: &SwSigner, path: &str, segwit: bool| {
+            let path = DerivationPath::from_str(path).unwrap();
+            let pk = signer.derive_xpub(&path).unwrap().public_key;
+            if segwit {
+                Address::p2wpkh(&CompressedPublicKey(pk), bitcoin::Network::Bitcoin).to_string()
+            } else {
+                Address::p2pkh(CompressedPublicKey(pk), bitcoin::Network::Bitcoin).to_string()
+            }
+        };
+
+        let standard = SwSigner::from_electrum_seed(
+            "cycle rocket west magnet parrot shuffle foot correct salt library feed song",
+            "",
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            standard.electrum_seed_type(),
+            Some(ElectrumSeedType::Standard)
+        );
+        assert_eq!(standard.xpub().to_string(), "xpub661MyMwAqRbcFWohJWt7PHsFEJfZAvw9ZxwQoDa4SoMgsDDM1T7WK3u9E4edkC4ugRnZ8E4xDZRpk8Rnts3Nbt97dPwT52CwBdDWroaZf8U");
+        assert_eq!(
+            addr(&standard, "m/0/0", false),
+            "1NNkttn1YvVGdqBW4PR6zvc3Zx3H5owKRf"
+        );
+        assert_eq!(
+            addr(&standard, "m/1/0", false),
+            "1KSezYMhAJMWqFbVFB2JshYg69UpmEXR4D"
+        );
+        assert!(standard.mnemonic().is_none());
+        assert!(standard.seed().is_some());
+
+        let words = "bitter grass shiver impose acquire brush forget axis eager alone wine silver";
+        let segwit = SwSigner::from_electrum_seed(words, "", true).unwrap();
+        assert_eq!(segwit.electrum_seed_type(), Some(ElectrumSeedType::Segwit));
+        assert_eq!(
+            addr(&segwit, "m/0'/0/0", true),
+            "bc1q3g5tmkmlvxryhh843v4dz026avatc0zzr6h3af"
+        );
+        assert_eq!(
+            addr(&segwit, "m/0'/1/0", true),
+            "bc1qdy94n2q5qcp0kg7v9yzwe6wvfkhnvyzje7nx2p"
+        );
+
+        // test_electrum_seed_segwit_passphrase
+        let horror = String::from_utf8(
+            (0..crate::electrum::tests::UNICODE_HORROR_HEX.len())
+                .step_by(2)
+                .map(|i| {
+                    u8::from_str_radix(&crate::electrum::tests::UNICODE_HORROR_HEX[i..i + 2], 16)
+                        .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        let with_passphrase = SwSigner::from_electrum_seed(words, &horror, true).unwrap();
+        assert_eq!(
+            addr(&with_passphrase, "m/0'/0/0", true),
+            "bc1qx94dutas7ysn2my645cyttujrms5d9p57f6aam"
+        );
+        assert_eq!(
+            addr(&with_passphrase, "m/0'/1/0", true),
+            "bc1qcywwsy87sdp8vz5rfjh3sxdv6rt95kujdqq38g"
+        );
+
+        assert!(matches!(
+            SwSigner::from_electrum_seed(lwk_test_util::TEST_MNEMONIC, "", false),
+            Err(NewError::NotElectrumSeed)
+        ));
+    }
 
     #[test]
     fn new_signer() {

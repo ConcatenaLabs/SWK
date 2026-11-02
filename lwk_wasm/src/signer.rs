@@ -29,6 +29,53 @@ impl Signer {
         })
     }
 
+    /// Creates a `Signer` from an Electrum seed phrase (Electrum 2.0 and later), with its
+    /// optional passphrase ("seed extension").
+    ///
+    /// Accepts `standard` and `segwit` seeds; 2FA seeds are refused. The signer holds no
+    /// BIP39 mnemonic, and its single-sig descriptor follows the Electrum account: see
+    /// [`Self::wpkh_slip77_descriptor`].
+    #[wasm_bindgen(js_name = fromElectrumSeed)]
+    pub fn from_electrum_seed(
+        phrase: &str,
+        passphrase: &str,
+        network: &Network,
+    ) -> Result<Signer, Error> {
+        let inner =
+            lwk_signer::SwSigner::from_electrum_seed(phrase, passphrase, network.is_mainnet())?;
+        Ok(Self {
+            inner,
+            network: network.into(),
+        })
+    }
+
+    /// The Electrum seed type `phrase` declares: "standard", "segwit", "2fa" or
+    /// "2fa_segwit", or undefined when it is not an Electrum seed (Electrum 1.x seeds
+    /// are not recognised). A phrase can be both a valid BIP39 mnemonic and an Electrum
+    /// seed; telling them apart is the caller's choice.
+    #[wasm_bindgen(js_name = electrumSeedType)]
+    pub fn electrum_seed_type(phrase: &str) -> Option<String> {
+        lwk_signer::electrum::electrum_seed_type(phrase).map(|t| t.as_str().to_string())
+    }
+
+    /// The 64-byte BIP32 seed (hex) of an Electrum phrase and passphrase, for code
+    /// outside this signer that derives keys from the same master key
+    #[wasm_bindgen(js_name = electrumSeedHex)]
+    pub fn electrum_seed_hex(phrase: &str, passphrase: &str) -> String {
+        lwk_signer::electrum::electrum_seed(phrase, passphrase)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// The Electrum seed type of this signer, or undefined if it was made from a mnemonic
+    #[wasm_bindgen(getter = electrumType)]
+    pub fn electrum_type(&self) -> Option<String> {
+        self.inner
+            .electrum_seed_type()
+            .map(|t| t.as_str().to_string())
+    }
+
     /// Sign and consume the given PSET, returning the signed one
     pub fn sign(&self, pset: Pset) -> Result<Pset, Error> {
         let mut pset: PartiallySignedTransaction = pset.into();
@@ -50,14 +97,27 @@ impl Signer {
     }
 
     /// Return the witness public key hash, slip77 descriptor of this signer
+    ///
+    /// The account is BIP84 (`m/84'/coin'/0'`) for a mnemonic signer and `m/0'` for an
+    /// Electrum `segwit` one. An Electrum `standard` seed has p2pkh addresses, which
+    /// this descriptor cannot express, so it is refused.
     #[wasm_bindgen(js_name = wpkhSlip77Descriptor)]
     pub fn wpkh_slip77_descriptor(&self) -> Result<WolletDescriptor, Error> {
         // TODO: make script_variant and blinding_variant parameters
 
         let script_variant = lwk_common::Singlesig::Wpkh;
         let blinding_variant = lwk_common::DescriptorBlindingKey::Slip77;
-        let desc_str = lwk_common::singlesig_desc(&self.inner, script_variant, blinding_variant)
-            .map_err(Error::Generic)?;
+        let desc_str = match self.inner.electrum_seed_type() {
+            None => lwk_common::singlesig_desc(&self.inner, script_variant, blinding_variant),
+            Some(lwk_signer::ElectrumSeedType::Segwit) => {
+                lwk_common::electrum_segwit_desc(&self.inner, blinding_variant)
+            }
+            Some(t) => Err(format!(
+                "Electrum {} seeds have no wpkh descriptor",
+                t.as_str()
+            )),
+        }
+        .map_err(Error::Generic)?;
 
         WolletDescriptor::new(&desc_str)
     }
@@ -108,6 +168,20 @@ impl Signer {
         Ok(signature.to_string())
     }
 
+    /// Return keyorigin and xpub of an Electrum `segwit` signer's account, like
+    /// "[73c5da0a/0h]tpub..."
+    #[wasm_bindgen(js_name = electrumKeyoriginXpub)]
+    pub fn electrum_keyorigin_xpub(&self) -> Result<String, Error> {
+        if self.inner.electrum_seed_type() != Some(lwk_signer::ElectrumSeedType::Segwit) {
+            return Err(Error::Generic(
+                "not a signer from an Electrum segwit seed".to_string(),
+            ));
+        }
+        let path = bip32::DerivationPath::from(vec![bip32::ChildNumber::Hardened { index: 0 }]);
+        let xpub = self.inner.derive_xpub(&path)?;
+        Ok(format!("[{}/0h]{}", self.inner.fingerprint(), xpub))
+    }
+
     /// Return keyorigin and xpub, like "[73c5da0a/84h/1h/0h]tpub..."
     #[wasm_bindgen(js_name = keyoriginXpub)]
     pub fn keyorigin_xpub(&self, bip: &Bip) -> Result<String, Error> {
@@ -123,12 +197,12 @@ impl Signer {
         Ok(self.inner.fingerprint().to_string())
     }
 
-    /// Return the mnemonic of the signer
-    pub fn mnemonic(&self) -> Mnemonic {
+    /// Return the mnemonic of the signer; a signer from an Electrum seed has none
+    pub fn mnemonic(&self) -> Result<Mnemonic, Error> {
         self.inner
             .mnemonic()
-            .expect("wasm bindings always create signer via mnemonic and not via xpriv")
-            .into()
+            .map(Into::into)
+            .ok_or_else(|| Error::Generic("this signer has no BIP39 mnemonic".to_string()))
     }
 
     /// Return the derived BIP85 mnemonic
@@ -474,6 +548,40 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn electrum_signer() {
+        let network = Network::testnet();
+        // Electrum's test_electrum_seed_segwit and test_electrum_seed_standard.
+        let segwit = "bitter grass shiver impose acquire brush forget axis eager alone wine silver";
+        let standard =
+            "cycle rocket west magnet parrot shuffle foot correct salt library feed song";
+        assert_eq!(
+            Signer::electrum_seed_type(segwit).as_deref(),
+            Some("segwit")
+        );
+        assert_eq!(
+            Signer::electrum_seed_type(standard).as_deref(),
+            Some("standard")
+        );
+        assert_eq!(Signer::electrum_seed_type("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"), None);
+
+        let signer = Signer::from_electrum_seed(segwit, "", &network).unwrap();
+        assert_eq!(signer.electrum_type().as_deref(), Some("segwit"));
+        assert!(signer.mnemonic().is_err());
+        let fingerprint = signer.fingerprint().unwrap();
+        let keyorigin = signer.electrum_keyorigin_xpub().unwrap();
+        assert!(keyorigin.starts_with(&format!("[{fingerprint}/0h]tpub")));
+        let desc = signer.wpkh_slip77_descriptor().unwrap().to_string();
+        assert!(
+            desc.contains(&format!("elwpkh({keyorigin}/<0;1>/*)")),
+            "{desc}"
+        );
+
+        let standard = Signer::from_electrum_seed(standard, "", &network).unwrap();
+        assert!(standard.wpkh_slip77_descriptor().is_err());
+        assert!(standard.electrum_keyorigin_xpub().is_err());
+    }
+
+    #[wasm_bindgen_test]
     fn signer() {
         let mnemonic_str =  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let mnemonic = Mnemonic::new(mnemonic_str).unwrap();
@@ -495,7 +603,8 @@ mod tests {
 
         assert_eq!(signer.keyorigin_xpub(&Bip::bip86()).unwrap(), "[73c5da0a/86h/1h/0h]tpubDDfvzhdVV4unsoKt5aE6dcsNsfeWbTgmLZPi8LQDYU2xixrYemMfWJ3BaVneH3u7DBQePdTwhpybaKRU95pi6PMUtLPBJLVQRpzEnjfjZzX");
 
-        assert_eq!(signer.mnemonic(), mnemonic);
+        assert_eq!(signer.mnemonic().unwrap(), mnemonic);
+        assert_eq!(signer.electrum_type(), None);
 
         assert_eq!(signer.sign_message("Hello, world!").unwrap(), "Hwlg40qLYZXEj9AoA3oZpfJMJPxaXzBL0+siHAJRhTIvSFiwSdtCsqxqB7TxgWfhqIr/YnGE4nagWzPchFJElTo=");
 
