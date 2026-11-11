@@ -50,6 +50,7 @@ mod registry;
 mod secret_key;
 mod seqdex_htlc;
 mod seqob_covenant;
+mod swap_escrow;
 // SEQUENTIA staking pools: join, move between, and (the half a descriptor wallet
 // cannot do alone) leave one.
 mod sequentia_delegation;

@@ -445,6 +445,26 @@ impl Signer {
         Ok(sig.serialize().to_hex())
     }
 
+    /// The secret of a swap the buyer pays BTC for (restricted assets traded
+    /// for on-chain BTC), derived from the m/5/0 key and a per-swap `nonce` (hex,
+    /// the wallet's swap id): `tagged_hash("openamp-swap-secret-v1", key || nonce)`,
+    /// returned as 64-hex. Deriving it from the seed means a restored wallet can
+    /// still claim a swap it had locked bitcoin for. The secret is published on
+    /// the chain by the claim; a hash of the key does not reveal the key.
+    #[wasm_bindgen(js_name = swapSecret)]
+    pub fn swap_secret(&self, nonce_hex: &str) -> Result<String, Error> {
+        use lwk_wollet::elements::hex::{FromHex, ToHex};
+        let nonce = Vec::<u8>::from_hex(nonce_hex)
+            .map_err(|e| Error::Generic(format!("invalid nonce hex: {e}")))?;
+        if nonce.is_empty() || nonce.len() > 64 {
+            return Err(Error::Generic("the nonce must be 1 to 64 bytes".into()));
+        }
+        let keypair = self.openamp_keypair()?;
+        let mut msg = keypair.secret_bytes().to_vec();
+        msg.extend_from_slice(&nonce);
+        Ok(lwk_wollet::tagged_hash("openamp-swap-secret-v1", &msg).to_hex())
+    }
+
     /// Sign a TAGGED message with the m/5/0 key (spec 0.4(2)): computes
     /// `tagged_hash(tag, message) = sha256(sha256(tag)||sha256(tag)||message)` then
     /// plain BIP340 over that, returning 128-hex. `message_hex` is the message
