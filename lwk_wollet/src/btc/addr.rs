@@ -11,8 +11,9 @@ use crate::bitcoin::Network;
 
 /// The `(coin_type, HRP, Bitcoin network)` triple that makes the shared address
 /// work. Testnet: coin_type 1, HRP `tb` -> `tb1...` (Bitcoin testnet4 and
-/// Sequentia testnet derive the identical address). Mainnet: coin_type 0 (the
-/// inherited Liquid `1776` is a bug fixed elsewhere), HRP `bc` -> `bc1...`.
+/// Sequentia testnet derive the identical address). Mainnet: coin_type 0, HRP
+/// `bc` -> `bc1...`. The Sequentia side takes its coin type from
+/// `lwk_common::bip44_coin_type`, which gives the same values.
 #[derive(Debug, Clone, Copy)]
 pub struct ChainAddressParams {
     /// BIP84 coin_type: `1` on testnet, `0` on mainnet (Bitcoin's, shared by design).
