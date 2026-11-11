@@ -279,7 +279,8 @@ pub fn adaptor_verify(
 pub fn adaptor_complete(presig: &[u8; PRESIG_LEN], t: &SecretKey) -> Result<[u8; SIG_LEN], Error> {
     let r_comb =
         PublicKey::from_slice(&presig[..33]).map_err(|e| err(format!("bad R+T in â: {e}")))?;
-    let s_hat = SecretKey::from_slice(&presig[33..]).map_err(|e| err(format!("bad ŝ in â: {e}")))?;
+    let s_hat =
+        SecretKey::from_slice(&presig[33..]).map_err(|e| err(format!("bad ŝ in â: {e}")))?;
 
     let s = if has_even_y(&r_comb) {
         s_hat.add_tweak(&Scalar::from(*t)) // s = ŝ + t
@@ -307,7 +308,8 @@ pub fn adaptor_extract(
 ) -> Result<[u8; 32], Error> {
     let r_comb =
         PublicKey::from_slice(&presig[..33]).map_err(|e| err(format!("bad R+T in â: {e}")))?;
-    let s_hat = SecretKey::from_slice(&presig[33..]).map_err(|e| err(format!("bad ŝ in â: {e}")))?;
+    let s_hat =
+        SecretKey::from_slice(&presig[33..]).map_err(|e| err(format!("bad ŝ in â: {e}")))?;
     let s = SecretKey::from_slice(&full_sig[32..]).map_err(|e| err(format!("bad s in σ: {e}")))?;
 
     // The σ nonce x(R+T) must equal â's R+T, else the pair does not match.
@@ -455,8 +457,7 @@ mod tests {
         let sig = adaptor_complete(&presig, &t).unwrap();
 
         // Stock BIP340 verification is the ground truth (spec §8, criterion 4).
-        let signature =
-            crate::bitcoin::secp256k1::schnorr::Signature::from_slice(&sig).unwrap();
+        let signature = crate::bitcoin::secp256k1::schnorr::Signature::from_slice(&sig).unwrap();
         let message = Message::from_digest(msg);
         secp.verify_schnorr(&signature, &message, &px)
             .expect("completed adaptor signature must verify as an ordinary BIP340 signature");
@@ -495,9 +496,7 @@ mod tests {
             let signature =
                 crate::bitcoin::secp256k1::schnorr::Signature::from_slice(&sig).unwrap();
             secp.verify_schnorr(&signature, &Message::from_digest(msg), &px)
-                .unwrap_or_else(|_| {
-                    panic!("completed sig must verify (parity even={want_even})")
-                });
+                .unwrap_or_else(|_| panic!("completed sig must verify (parity even={want_even})"));
         }
     }
 

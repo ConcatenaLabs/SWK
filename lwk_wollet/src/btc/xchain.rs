@@ -78,10 +78,16 @@ impl PathMode {
 /// Derive `(secret, 33-byte compressed pubkey hex)` at `path`. Byte-identical to
 /// ambra's SwSigner derivation: the kit's `master_xprv` is the same BIP39 seed("")
 /// -> `Xpriv::new_master` -> `derive_priv` chain SwSigner uses.
-fn derive_keypair(params: &ChainAddressParams, mnemonic: &str, path: &str) -> Result<(SecretKey, String), Error> {
+fn derive_keypair(
+    params: &ChainAddressParams,
+    mnemonic: &str,
+    path: &str,
+) -> Result<(SecretKey, String), Error> {
     let secp = Secp256k1::new();
     let master = super::core::master_xprv(mnemonic, params)?;
-    let xprv = master.derive_priv(&secp, &DerivationPath::from_str(path).map_err(map)?).map_err(map)?;
+    let xprv = master
+        .derive_priv(&secp, &DerivationPath::from_str(path).map_err(map)?)
+        .map_err(map)?;
     let sk = xprv.private_key;
     let pubkey = sk.public_key(&secp).serialize().to_lower_hex_string();
     Ok((sk, pubkey))
@@ -156,7 +162,11 @@ pub fn evaluate_gate(
     btc_leg_height: i64,
     min_depth: i64,
 ) -> AnchorEvidence {
-    let depth = if seq_anchor_height >= 0 { btc_tip - seq_anchor_height + 1 } else { -1 };
+    let depth = if seq_anchor_height >= 0 {
+        btc_tip - seq_anchor_height + 1
+    } else {
+        -1
+    };
     let ok = seq_anchor_height >= 0
         && seq_anchor_height >= btc_leg_height
         && anchor_status == "ok"
@@ -213,7 +223,10 @@ pub fn seq_claim_fee_atoms(rate: u64, seq_feerate_native: u64) -> Result<u64, Er
         ));
     }
     let native_value = seq_feerate_native.saturating_mul(claim_tx_vsize());
-    Ok(crate::seqdex_swap::convert_value_to_amount(native_value, rate))
+    Ok(crate::seqdex_swap::convert_value_to_amount(
+        native_value,
+        rate,
+    ))
 }
 
 /// The SEQ-leg redeemScript the taker rebuilds (claim = her SEQ-claim key, refund =
@@ -270,7 +283,9 @@ pub fn seq_claim(
     )
     .map_err(map)?;
     if fee >= seq_amount {
-        return Err(Error::Generic("Sequentia-leg claim fee exceeds the leg amount".into()));
+        return Err(Error::Generic(
+            "Sequentia-leg claim fee exceeds the leg amount".into(),
+        ));
     }
     let spend = crate::SeqHtlcSpend {
         txid: seq_txid.to_string(),
@@ -320,17 +335,29 @@ pub mod blocking {
         let seq = seq_esplora.trim_end_matches('/');
         let t4 = t4_api.trim_end_matches('/');
 
-        let block: serde_json::Value =
-            client.get(format!("{seq}/block/{seq_block_hash}")).send().map_err(map)?.json().map_err(map)?;
+        let block: serde_json::Value = client
+            .get(format!("{seq}/block/{seq_block_hash}"))
+            .send()
+            .map_err(map)?
+            .json()
+            .map_err(map)?;
         let seq_anchor_height = block
             .get("bitcoin_anchor")
             .and_then(|a| a.get("height"))
             .and_then(|h| h.as_i64())
             .unwrap_or(-1);
 
-        let status_v: serde_json::Value =
-            client.get(format!("{seq}/sequentia/anchorstatus")).send().map_err(map)?.json().map_err(map)?;
-        let anchor_status = status_v.get("anchorstatus").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
+        let status_v: serde_json::Value = client
+            .get(format!("{seq}/sequentia/anchorstatus"))
+            .send()
+            .map_err(map)?
+            .json()
+            .map_err(map)?;
+        let anchor_status = status_v
+            .get("anchorstatus")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         let btc_tip = client
             .get(format!("{t4}/blocks/tip/height"))
@@ -342,7 +369,13 @@ pub mod blocking {
             .parse::<i64>()
             .map_err(map)?;
 
-        Ok(evaluate_gate(seq_anchor_height, &anchor_status, btc_tip, btc_leg_height, min_depth))
+        Ok(evaluate_gate(
+            seq_anchor_height,
+            &anchor_status,
+            btc_tip,
+            btc_leg_height,
+            min_depth,
+        ))
     }
 
     /// The taker's own SEQ chain tip height (for the claim-deadline gate), or `-1`.
@@ -368,7 +401,11 @@ pub mod blocking {
     pub fn seq_broadcast(seq_esplora: &str, tx_hex: &str) -> Result<String, Error> {
         let client = client()?;
         let base = seq_esplora.trim_end_matches('/');
-        let resp = client.post(format!("{base}/tx")).body(tx_hex.to_string()).send().map_err(map)?;
+        let resp = client
+            .post(format!("{base}/tx"))
+            .body(tx_hex.to_string())
+            .send()
+            .map_err(map)?;
         let ok = resp.status().is_success();
         let body = resp.text().map_err(map)?;
         super::super::core::parse_broadcast(ok, &body)
@@ -413,12 +450,18 @@ pub mod blocking {
         if !os.get("spent").and_then(|s| s.as_bool()).unwrap_or(false) {
             return Ok(None);
         }
-        let Some(spend_txid) = os.get("txid").and_then(|t| t.as_str()) else { return Ok(None) };
+        let Some(spend_txid) = os.get("txid").and_then(|t| t.as_str()) else {
+            return Ok(None);
+        };
 
         // 2. Fetch the spending tx and scan every input's scriptSig (and witness,
         //    defensively) for the 32-byte push that hashes to H.
-        let stx: serde_json::Value =
-            client.get(format!("{base}/tx/{spend_txid}")).send().map_err(map)?.json().map_err(map)?;
+        let stx: serde_json::Value = client
+            .get(format!("{base}/tx/{spend_txid}"))
+            .send()
+            .map_err(map)?
+            .json()
+            .map_err(map)?;
         let is_hex = |s: &str| s.len() >= 2 && s.chars().all(|c| c.is_ascii_hexdigit());
         if let Some(vins) = stx.get("vin").and_then(|v| v.as_array()) {
             for vin in vins {
@@ -442,7 +485,9 @@ pub mod blocking {
                 for p in pushes {
                     if p.len() == 64 {
                         if let Ok(bytes) = Vec::<u8>::from_hex(&p) {
-                            let h = sha256::Hash::hash(&bytes).to_byte_array().to_lower_hex_string();
+                            let h = sha256::Hash::hash(&bytes)
+                                .to_byte_array()
+                                .to_lower_hex_string();
                             if h == want {
                                 return Ok(Some(p));
                             }
@@ -514,7 +559,11 @@ pub mod asyncr {
             .json()
             .await
             .map_err(map)?;
-        let anchor_status = status_v.get("anchorstatus").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
+        let anchor_status = status_v
+            .get("anchorstatus")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         let btc_tip = client
             .get(format!("{t4}/blocks/tip/height"))
@@ -528,7 +577,13 @@ pub mod asyncr {
             .parse::<i64>()
             .map_err(map)?;
 
-        Ok(evaluate_gate(seq_anchor_height, &anchor_status, btc_tip, btc_leg_height, min_depth))
+        Ok(evaluate_gate(
+            seq_anchor_height,
+            &anchor_status,
+            btc_tip,
+            btc_leg_height,
+            min_depth,
+        ))
     }
 
     /// The taker's own SEQ chain tip height (async), or `-1`.
@@ -536,7 +591,12 @@ pub mod asyncr {
         let Ok(client) = client() else { return -1 };
         let base = seq_esplora.trim_end_matches('/');
         match client.get(format!("{base}/blocks/tip/height")).send().await {
-            Ok(r) => r.text().await.ok().and_then(|t| t.trim().parse::<i64>().ok()).unwrap_or(-1),
+            Ok(r) => r
+                .text()
+                .await
+                .ok()
+                .and_then(|t| t.trim().parse::<i64>().ok())
+                .unwrap_or(-1),
             Err(_) => -1,
         }
     }
@@ -550,7 +610,12 @@ pub mod asyncr {
     pub async fn seq_broadcast(seq_esplora: &str, tx_hex: &str) -> Result<String, Error> {
         let client = client()?;
         let base = seq_esplora.trim_end_matches('/');
-        let resp = client.post(format!("{base}/tx")).body(tx_hex.to_string()).send().await.map_err(map)?;
+        let resp = client
+            .post(format!("{base}/tx"))
+            .body(tx_hex.to_string())
+            .send()
+            .await
+            .map_err(map)?;
         let ok = resp.status().is_success();
         let body = resp.text().await.map_err(map)?;
         super::super::core::parse_broadcast(ok, &body)
@@ -592,9 +657,12 @@ mod tests {
         // native (rate 1e8) -> fee == native_value == feerate * vsize.
         let native = seq_claim_fee_atoms(100_000_000, 1).unwrap();
         assert_eq!(native, claim_tx_vsize()); // 1 atom/vB * 400 vB
-        // a high-unit-value asset pays FEWER atoms (granularity), per first-principle 4.
+                                              // a high-unit-value asset pays FEWER atoms (granularity), per first-principle 4.
         let gold = seq_claim_fee_atoms(4_377_615_194_112, 1).unwrap();
-        assert!(gold >= 1 && gold < native, "a valuable asset pays fewer atoms (not a bug)");
+        assert!(
+            gold >= 1 && gold < native,
+            "a valuable asset pays fewer atoms (not a bug)"
+        );
     }
 
     // Legacy and canonical SEQ-claim keys differ (the web shim must record which).
@@ -604,7 +672,10 @@ mod tests {
         let m = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let (_, canon) = seq_claim_keypair(&p, m, PathMode::Canonical).unwrap();
         let (_, legacy) = seq_claim_keypair(&p, m, PathMode::LegacyRelative).unwrap();
-        assert_ne!(canon, legacy, "m/84'/1'/0'/3/0 and m/3/0 must derive different keys");
+        assert_ne!(
+            canon, legacy,
+            "m/84'/1'/0'/3/0 and m/3/0 must derive different keys"
+        );
         assert_eq!(canon.len(), 66); // 33-byte compressed pubkey hex
     }
 

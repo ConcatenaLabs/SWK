@@ -56,7 +56,16 @@ pub fn prepare(
     let addrs: Vec<String> = keys.iter().map(|k| k.address.to_string()).collect();
     let lists = tx::fetch_utxos(&client, base, &addrs);
     let utxos = core::utxos_from_lists(keys, lists)?;
-    core::build_signed_tx(&secp, &master, params, dest_addr, amount_sats, fee_rate, scan.change_next, utxos)
+    core::build_signed_tx(
+        &secp,
+        &master,
+        params,
+        dest_addr,
+        amount_sats,
+        fee_rate,
+        scan.change_next,
+        utxos,
+    )
 }
 
 /// Live BTC fee rate (sat/vB) for confirming within `target_blocks`, from the
@@ -79,7 +88,11 @@ pub fn broadcast(t4_api: &str, tx_hex: &str) -> Result<String, Error> {
 /// Find the HTLC funding output in `txid` by matching `p2sh_spk_hex`, reporting
 /// its value + confirmation depth on the caller's own testnet4 view. HARD-FAILS
 /// if no output matches (never defaults to vout 0).
-pub fn find_htlc_funding(t4_api: &str, txid: &str, p2sh_spk_hex: &str) -> Result<HtlcFunding, Error> {
+pub fn find_htlc_funding(
+    t4_api: &str,
+    txid: &str,
+    p2sh_spk_hex: &str,
+) -> Result<HtlcFunding, Error> {
     let client = tx::client()?;
     let base = t4_api.trim_end_matches('/');
     let tx_json = tx::get_tx_json(&client, base, txid)?;

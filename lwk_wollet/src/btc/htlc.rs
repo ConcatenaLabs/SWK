@@ -26,8 +26,8 @@ use crate::bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
 use crate::bitcoin::sighash::SighashCache;
 use crate::bitcoin::transaction::Version;
 use crate::bitcoin::{
-    opcodes, Address, Amount, EcdsaSighashType, Network, OutPoint, ScriptBuf, Sequence, Transaction,
-    TxIn, TxOut, Txid, Witness,
+    opcodes, Address, Amount, EcdsaSighashType, Network, OutPoint, ScriptBuf, Sequence,
+    Transaction, TxIn, TxOut, Txid, Witness,
 };
 
 use crate::error::Error;
@@ -103,7 +103,10 @@ pub fn build_refund_tx(
         version: Version::TWO,
         lock_time: LockTime::from_consensus(locktime),
         input: vec![TxIn {
-            previous_output: OutPoint { txid, vout: spend.vout },
+            previous_output: OutPoint {
+                txid,
+                vout: spend.vout,
+            },
             script_sig: ScriptBuf::new(),
             // 0xfffffffd: non-final (bit 31 set -> BIP68 disabled, so absolute
             // CLTV still applies) AND BIP125-replaceable, so a time-sensitive
@@ -113,7 +116,10 @@ pub fn build_refund_tx(
             sequence: Sequence(0xffff_fffd),
             witness: Witness::new(),
         }],
-        output: vec![TxOut { value: Amount::from_sat(out_value), script_pubkey: spend.dest_spk.clone() }],
+        output: vec![TxOut {
+            value: Amount::from_sat(out_value),
+            script_pubkey: spend.dest_spk.clone(),
+        }],
     };
     // Legacy SIGHASH_ALL over the redeemScript (the subscript), computed while the
     // cache borrows &tx; then drop it before mutating the input's scriptSig.
@@ -162,12 +168,18 @@ pub fn build_claim_tx(
         version: Version::TWO,
         lock_time: LockTime::from_consensus(0), // claim has no CLTV constraint
         input: vec![TxIn {
-            previous_output: OutPoint { txid, vout: spend.vout },
+            previous_output: OutPoint {
+                txid,
+                vout: spend.vout,
+            },
             script_sig: ScriptBuf::new(),
             sequence: Sequence(0xffff_ffff), // final: the claim branch has no timelock
             witness: Witness::new(),
         }],
-        output: vec![TxOut { value: Amount::from_sat(out_value), script_pubkey: spend.dest_spk.clone() }],
+        output: vec![TxOut {
+            value: Amount::from_sat(out_value),
+            script_pubkey: spend.dest_spk.clone(),
+        }],
     };
     // Legacy SIGHASH_ALL over the redeemScript (the subscript) — identical to refund.
     let sighash = SighashCache::new(&tx)
@@ -212,10 +224,17 @@ mod tests {
 
         let btc = super::build_htlc_redeem_script(&hash, &claim, &refund, locktime).unwrap();
         let seq = crate::build_htlc_redeem_script(&hash, &claim, &refund, locktime).unwrap();
-        assert_eq!(btc.as_bytes(), seq.as_bytes(), "BTC HTLC script must byte-match the SEQ/daemon script");
+        assert_eq!(
+            btc.as_bytes(),
+            seq.as_bytes(),
+            "BTC HTLC script must byte-match the SEQ/daemon script"
+        );
 
         let (addr, spk) = super::htlc_p2sh(&btc).unwrap();
-        assert!(addr.to_string().starts_with('2'), "testnet P2SH base58 starts with 2, got {addr}");
+        assert!(
+            addr.to_string().starts_with('2'),
+            "testnet P2SH base58 starts with 2, got {addr}"
+        );
         assert_eq!(spk.as_bytes()[0], 0xa9, "P2SH spk starts with OP_HASH160");
     }
 
@@ -224,7 +243,9 @@ mod tests {
         let secp = Secp256k1::new();
         let refund_sk = SecretKey::from_slice(&[7u8; 32]).unwrap();
         let refund_pub = refund_sk.public_key(&secp).serialize();
-        let redeem = super::build_htlc_redeem_script(&[0x22u8; 32], &pubkey(2), &refund_pub, 800_000).unwrap();
+        let redeem =
+            super::build_htlc_redeem_script(&[0x22u8; 32], &pubkey(2), &refund_pub, 800_000)
+                .unwrap();
         let dest_spk = super::htlc_p2sh(&redeem).unwrap().1; // any spk for the structural check
         let spend = super::BtcHtlcSpend {
             txid: "a".repeat(64),
@@ -250,8 +271,13 @@ mod tests {
     fn refund_rejects_fee_over_amount() {
         let secp = Secp256k1::new();
         let sk = SecretKey::from_slice(&[7u8; 32]).unwrap();
-        let redeem =
-            super::build_htlc_redeem_script(&[0x22u8; 32], &pubkey(2), &sk.public_key(&secp).serialize(), 1).unwrap();
+        let redeem = super::build_htlc_redeem_script(
+            &[0x22u8; 32],
+            &pubkey(2),
+            &sk.public_key(&secp).serialize(),
+            1,
+        )
+        .unwrap();
         let spend = super::BtcHtlcSpend {
             txid: "a".repeat(64),
             vout: 0,
@@ -280,7 +306,8 @@ mod tests {
         let claim_sk = SecretKey::from_slice(&[9u8; 32]).unwrap();
         let claim_pub = claim_sk.public_key(&secp).serialize();
         let refund_pub = pubkey(3);
-        let redeem = super::build_htlc_redeem_script(&hash, &claim_pub, &refund_pub, 800_000).unwrap();
+        let redeem =
+            super::build_htlc_redeem_script(&hash, &claim_pub, &refund_pub, 800_000).unwrap();
         let spend = super::BtcHtlcSpend {
             txid: "b".repeat(64),
             vout: 2,
@@ -301,19 +328,34 @@ mod tests {
         assert_eq!(tx.output[0].value.to_sat(), 49_000); // amount - fee
 
         // scriptSig = <sig> <preimage> OP_1 <redeemScript>
-        let items: Vec<_> = tx.input[0].script_sig.instructions().collect::<Result<_, _>>().unwrap();
-        assert_eq!(items.len(), 4, "scriptSig items = [sig, preimage, OP_1, redeemScript]");
+        let items: Vec<_> = tx.input[0]
+            .script_sig
+            .instructions()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            items.len(),
+            4,
+            "scriptSig items = [sig, preimage, OP_1, redeemScript]"
+        );
         let sig_der = match items[0] {
             Instruction::PushBytes(b) => b.as_bytes(),
             _ => panic!("item 0 must push the sig"),
         };
         match items[1] {
-            Instruction::PushBytes(b) => assert_eq!(b.as_bytes(), &preimage, "preimage pushed verbatim"),
+            Instruction::PushBytes(b) => {
+                assert_eq!(b.as_bytes(), &preimage, "preimage pushed verbatim")
+            }
             _ => panic!("item 1 must push the preimage"),
         }
-        assert!(matches!(items[2], Instruction::Op(op) if op.to_u8() == 0x51), "item 2 = OP_1 (IF selector)");
+        assert!(
+            matches!(items[2], Instruction::Op(op) if op.to_u8() == 0x51),
+            "item 2 = OP_1 (IF selector)"
+        );
         match items[3] {
-            Instruction::PushBytes(b) => assert_eq!(b.as_bytes(), redeem.as_bytes(), "redeemScript pushed last"),
+            Instruction::PushBytes(b) => {
+                assert_eq!(b.as_bytes(), redeem.as_bytes(), "redeemScript pushed last")
+            }
             _ => panic!("item 3 must push the redeemScript"),
         }
 
@@ -321,7 +363,10 @@ mod tests {
         assert_eq!(sha256::Hash::hash(&preimage).to_byte_array(), hash);
         // spend condition 2: the sig (DER || 0x01) verifies against the legacy SIGHASH_ALL
         // over the redeemScript for the EXACT claim pubkey -> OP_CHECKSIG would pass.
-        assert_eq!(*sig_der.last().unwrap(), EcdsaSighashType::All.to_u32() as u8);
+        assert_eq!(
+            *sig_der.last().unwrap(),
+            EcdsaSighashType::All.to_u32() as u8
+        );
         let sighash = SighashCache::new(&tx)
             .legacy_signature_hash(0, &redeem, EcdsaSighashType::All.to_u32())
             .unwrap();
@@ -341,6 +386,9 @@ mod tests {
         let m = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let (_, claim) = btc_claim_keypair(&p, m, PathMode::Canonical).unwrap();
         let (_, refund) = btc_refund_keypair(&p, m, PathMode::Canonical).unwrap();
-        assert_ne!(claim, refund, "m/84h/1h/0h/4/0 (claim) and …/2/0 (refund) must derive different keys");
+        assert_ne!(
+            claim, refund,
+            "m/84h/1h/0h/4/0 (claim) and …/2/0 (refund) must derive different keys"
+        );
     }
 }

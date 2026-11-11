@@ -704,8 +704,10 @@ mod tests {
         let value = 100_000u64;
         // Fixed enclave scriptPubKey (a 32-byte v1 program) as the prevout spk.
         let spk = Script::from(
-            Vec::<u8>::from_hex("5120aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                .unwrap(),
+            Vec::<u8>::from_hex(
+                "5120aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap(),
         );
         // Fixed transfer leaf: <K_user> CHECKSIGVERIFY <K_policy> CHECKSIG, 0xc4.
         // transfer leaf: <32B K_user> CHECKSIGVERIFY <32B K_policy> CHECKSIG
@@ -719,10 +721,9 @@ mod tests {
         // Control block: 0xc4 (leaf version, even parity) || NUMS internal key.
         let mut cb = vec![ENCLAVE_LEAF_VERSION];
         cb.extend_from_slice(&Vec::<u8>::from_hex(ENCLAVE_NUMS_HEX).unwrap());
-        let genesis = BlockHash::from_str(
-            "0000000000000000000000000000000000000000000000000000000000000042",
-        )
-        .unwrap();
+        let genesis =
+            BlockHash::from_str("0000000000000000000000000000000000000000000000000000000000000042")
+                .unwrap();
         let tx = Transaction {
             version: 2,
             lock_time: LockTime::ZERO,
@@ -752,8 +753,7 @@ mod tests {
             script_pubkey: spk,
             witness: Default::default(),
         };
-        let sighash =
-            enclave_sighash(&tx, 0, &[prevout], &leaf, &cb, genesis).unwrap();
+        let sighash = enclave_sighash(&tx, 0, &[prevout], &leaf, &cb, genesis).unwrap();
         println!("ENCLAVE_SIGHASH={}", sighash.to_hex());
     }
 
@@ -795,8 +795,10 @@ mod tests {
         let asset = AssetId::from_slice(&[0x01u8; 32]).unwrap();
         let value = 100_000u64;
         let spk = Script::from(
-            Vec::<u8>::from_hex("5120aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                .unwrap(),
+            Vec::<u8>::from_hex(
+                "5120aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap(),
         );
         // transfer leaf: <32B K_user> CHECKSIGVERIFY <32B K_policy> CHECKSIG
         let mut leaf_bytes = vec![0x20u8];
@@ -808,10 +810,9 @@ mod tests {
         let leaf = Script::from(leaf_bytes);
         let mut cb = vec![ENCLAVE_LEAF_VERSION];
         cb.extend_from_slice(&Vec::<u8>::from_hex(ENCLAVE_NUMS_HEX).unwrap());
-        let genesis = BlockHash::from_str(
-            "0000000000000000000000000000000000000000000000000000000000000042",
-        )
-        .unwrap();
+        let genesis =
+            BlockHash::from_str("0000000000000000000000000000000000000000000000000000000000000042")
+                .unwrap();
         let tx = Transaction {
             version: 2,
             lock_time: LockTime::ZERO,
@@ -870,7 +871,9 @@ mod tests {
     fn tagged_hash_challenge_and_document_vectors() {
         // Challenge over a fixed UTF-8 string.
         let ch = tagged_hash(TAG_CHALLENGE, b"hello-openamp");
-        let mut th = sha256::Hash::hash(TAG_CHALLENGE.as_bytes()).to_byte_array().to_vec();
+        let mut th = sha256::Hash::hash(TAG_CHALLENGE.as_bytes())
+            .to_byte_array()
+            .to_vec();
         th.extend_from_slice(&sha256::Hash::hash(TAG_CHALLENGE.as_bytes()).to_byte_array());
         th.extend_from_slice(b"hello-openamp");
         let expect = sha256::Hash::hash(&th).to_byte_array();

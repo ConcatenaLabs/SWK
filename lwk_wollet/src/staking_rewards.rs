@@ -570,8 +570,13 @@ mod tests {
             owned_outputs: vec![owned(0, staking_script(), asset(9), 500)],
         }];
         // 60 deep: still 941 to go, exactly as the node reports.
-        let r = attribute_rewards(&txs, &scripts(), &no_relations(), 1059,
-                                  SEQUENTIA_COINBASE_MATURITY);
+        let r = attribute_rewards(
+            &txs,
+            &scripts(),
+            &no_relations(),
+            1059,
+            SEQUENTIA_COINBASE_MATURITY,
+        );
         assert_eq!(r[0].blocks_to_maturity, 941);
         assert!(!r[0].mature());
         assert!(!r[0].convertible());
@@ -789,7 +794,10 @@ mod tests {
             receives: 20_000,
             reference: 20_000,
         };
-        assert_eq!(decide(&batch, Some(q), &s), Decision::Convert { receives: 20_000 });
+        assert_eq!(
+            decide(&batch, Some(q), &s),
+            Decision::Convert { receives: 20_000 }
+        );
     }
 
     #[test]

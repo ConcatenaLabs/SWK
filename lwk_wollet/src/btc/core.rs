@@ -16,8 +16,9 @@ use crate::bitcoin::hashes::Hash;
 use crate::bitcoin::secp256k1::{All, Message, Secp256k1, SecretKey};
 use crate::bitcoin::sighash::SighashCache;
 use crate::bitcoin::{
-    absolute::LockTime, transaction::Version, Address, Amount, CompressedPublicKey, EcdsaSighashType,
-    Network as BtcNetwork, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
+    absolute::LockTime, transaction::Version, Address, Amount, CompressedPublicKey,
+    EcdsaSighashType, Network as BtcNetwork, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+    TxOut, Txid, Witness,
 };
 
 use super::addr::ChainAddressParams;
@@ -59,7 +60,11 @@ pub(super) struct Key {
 pub(super) fn master_xprv(mnemonic: &str, params: &ChainAddressParams) -> Result<Xpriv, Error> {
     let mnemonic: Mnemonic = mnemonic.parse().map_err(map)?;
     let seed = mnemonic.to_seed("");
-    let network = if params.coin_type == 0 { BtcNetwork::Bitcoin } else { BtcNetwork::Testnet };
+    let network = if params.coin_type == 0 {
+        BtcNetwork::Bitcoin
+    } else {
+        BtcNetwork::Testnet
+    };
     Xpriv::new_master(network, &seed).map_err(map)
 }
 
@@ -70,21 +75,38 @@ pub(super) fn derive(
     internal: bool,
     i: u32,
 ) -> Result<Key, Error> {
-    let path =
-        DerivationPath::from_str(&format!("m/84h/{}h/0h/{}/{}", params.coin_type, internal as u8, i)).map_err(map)?;
+    let path = DerivationPath::from_str(&format!(
+        "m/84h/{}h/0h/{}/{}",
+        params.coin_type, internal as u8, i
+    ))
+    .map_err(map)?;
     let xprv = master.derive_priv(secp, &path).map_err(map)?;
     let sk = xprv.private_key;
     let pk = CompressedPublicKey(sk.public_key(secp));
     let address = Address::p2wpkh(&pk, params.hrp);
     let script = address.script_pubkey();
-    Ok(Key { sk, pk, address, script })
+    Ok(Key {
+        sk,
+        pk,
+        address,
+        script,
+    })
 }
 
 /// The `tb1` address at a derivation slot — used by the alignment test and any
 /// BTC-specific receive flow. (Normal receive reuses the shared address.)
-pub fn address(params: &ChainAddressParams, mnemonic: &str, internal: bool, i: u32) -> Result<String, Error> {
+pub fn address(
+    params: &ChainAddressParams,
+    mnemonic: &str,
+    internal: bool,
+    i: u32,
+) -> Result<String, Error> {
     let secp = Secp256k1::new();
-    Ok(derive(&secp, &master_xprv(mnemonic, params)?, params, internal, i)?.address.to_string())
+    Ok(
+        derive(&secp, &master_xprv(mnemonic, params)?, params, internal, i)?
+            .address
+            .to_string(),
+    )
 }
 
 // --- gap scan (transport-agnostic accumulation) -------------------------------
@@ -111,7 +133,12 @@ pub(super) struct ScanState {
 
 impl ScanState {
     pub(super) fn new() -> Self {
-        Self { balance: 0, ext_max: -1, chg_max: -1, scanned: GAP }
+        Self {
+            balance: 0,
+            ext_max: -1,
+            chg_max: -1,
+            scanned: GAP,
+        }
     }
 
     /// Derive a batch's external + internal addresses starting at `start`,
@@ -128,7 +155,11 @@ impl ScanState {
         for i in start..start + GAP {
             for internal in [false, true] {
                 slots.push((internal, i));
-                addrs.push(derive(secp, master, params, internal, i)?.address.to_string());
+                addrs.push(
+                    derive(secp, master, params, internal, i)?
+                        .address
+                        .to_string(),
+                );
             }
         }
         Ok((slots, addrs))
@@ -138,13 +169,19 @@ impl ScanState {
     /// whether ANY address in the batch showed activity (so the driver knows
     /// whether to scan the next gap-wide batch). `start` is this batch's first
     /// index; the scan frontier advances by `GAP`.
-    pub(super) fn absorb(&mut self, start: u32, slots: &[(bool, u32)], infos: Vec<Option<AddrInfo>>) -> bool {
+    pub(super) fn absorb(
+        &mut self,
+        start: u32,
+        slots: &[(bool, u32)],
+        infos: Vec<Option<AddrInfo>>,
+    ) -> bool {
         let mut any = false;
         for ((internal, i), info) in slots.iter().zip(infos.into_iter()) {
             let Some(info) = info else { continue };
             let cs = info.chain_stats;
             let ms = info.mempool_stats;
-            self.balance += (cs.funded_txo_sum - cs.spent_txo_sum) + (ms.funded_txo_sum - ms.spent_txo_sum);
+            self.balance +=
+                (cs.funded_txo_sum - cs.spent_txo_sum) + (ms.funded_txo_sum - ms.spent_txo_sum);
             if cs.tx_count + ms.tx_count > 0 {
                 any = true;
                 if *internal {
@@ -199,7 +236,10 @@ pub(super) fn window_keys(
 
 /// Zip the window keys with their fetched UTXO lists (same order) into spendable
 /// UTXOs carrying their key.
-pub(super) fn utxos_from_lists(keys: Vec<Key>, lists: Vec<Vec<EsploraUtxo>>) -> Result<Vec<Utxo>, Error> {
+pub(super) fn utxos_from_lists(
+    keys: Vec<Key>,
+    lists: Vec<Vec<EsploraUtxo>>,
+) -> Result<Vec<Utxo>, Error> {
     let mut utxos = Vec::new();
     for (k, list) in keys.iter().zip(lists.into_iter()) {
         for u in list {
@@ -253,7 +293,11 @@ pub(super) fn build_signed_tx(
     if amount_sats == 0 {
         return Err(Error::Generic("enter an amount greater than zero".into()));
     }
-    let fee_rate = if fee_rate > 0.0 { fee_rate } else { DEFAULT_FEERATE };
+    let fee_rate = if fee_rate > 0.0 {
+        fee_rate
+    } else {
+        DEFAULT_FEERATE
+    };
 
     let dest = Address::from_str(dest_addr)
         .map_err(|_| Error::Generic("invalid Bitcoin address".into()))?
@@ -261,7 +305,9 @@ pub(super) fn build_signed_tx(
         .map_err(|_| Error::Generic("address is not a Bitcoin testnet (tb1) address".into()))?;
 
     if utxos.is_empty() {
-        return Err(Error::Generic("no spendable BTC; the testnet4 balance is empty".into()));
+        return Err(Error::Generic(
+            "no spendable BTC; the testnet4 balance is empty".into(),
+        ));
     }
     utxos.sort_by(|a, b| b.value.cmp(&a.value)); // largest first
 
@@ -309,13 +355,24 @@ pub(super) fn build_signed_tx(
         })
         .collect();
 
-    let mut output = vec![TxOut { value: Amount::from_sat(amount_sats), script_pubkey: dest.script_pubkey() }];
+    let mut output = vec![TxOut {
+        value: Amount::from_sat(amount_sats),
+        script_pubkey: dest.script_pubkey(),
+    }];
     if with_change {
         let change_spk = derive(secp, master, params, true, change_index)?.script;
-        output.push(TxOut { value: Amount::from_sat(change), script_pubkey: change_spk });
+        output.push(TxOut {
+            value: Amount::from_sat(change),
+            script_pubkey: change_spk,
+        });
     }
 
-    let mut tx = Transaction { version: Version::TWO, lock_time: LockTime::ZERO, input, output };
+    let mut tx = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input,
+        output,
+    };
 
     // Sign each P2WPKH input (BIP143). Compute every sighash first (the cache holds
     // an immutable borrow of the tx), then drop it and attach the witnesses.
@@ -324,11 +381,19 @@ pub(super) fn build_signed_tx(
         let mut cache = SighashCache::new(&tx);
         for (idx, u) in sel.iter().enumerate() {
             let sighash = cache
-                .p2wpkh_signature_hash(idx, &u.script, Amount::from_sat(u.value), EcdsaSighashType::All)
+                .p2wpkh_signature_hash(
+                    idx,
+                    &u.script,
+                    Amount::from_sat(u.value),
+                    EcdsaSighashType::All,
+                )
                 .map_err(map)?;
             let msg = Message::from_digest(sighash.to_byte_array());
             let sig = secp.sign_ecdsa(&msg, &u.sk);
-            let es = crate::bitcoin::ecdsa::Signature { signature: sig, sighash_type: EcdsaSighashType::All };
+            let es = crate::bitcoin::ecdsa::Signature {
+                signature: sig,
+                sighash_type: EcdsaSighashType::All,
+            };
             witnesses.push(Witness::p2wpkh(&es, &u.pk.0));
         }
     }
@@ -361,26 +426,52 @@ pub struct HtlcFunding {
 /// `p2sh_spk_hex`, given the caller's current `tip` height (the driver fetches
 /// both). HARD-FAILS if no output matches (never defaults to vout 0). Pure: the
 /// confirmation depth is computed from the supplied tip.
-pub(super) fn parse_htlc_funding(tx: &serde_json::Value, p2sh_spk_hex: &str, tip: i64) -> Result<HtlcFunding, Error> {
-    let vouts = tx.get("vout").and_then(|v| v.as_array()).ok_or_else(|| Error::Generic("funding tx has no vout".into()))?;
+pub(super) fn parse_htlc_funding(
+    tx: &serde_json::Value,
+    p2sh_spk_hex: &str,
+    tip: i64,
+) -> Result<HtlcFunding, Error> {
+    let vouts = tx
+        .get("vout")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| Error::Generic("funding tx has no vout".into()))?;
     let mut found: Option<(u32, u64)> = None;
     for (i, o) in vouts.iter().enumerate() {
         let spk = o.get("scriptpubkey").and_then(|s| s.as_str()).unwrap_or("");
         if spk.eq_ignore_ascii_case(p2sh_spk_hex) {
-            found = Some((i as u32, o.get("value").and_then(|v| v.as_u64()).unwrap_or(0)));
+            found = Some((
+                i as u32,
+                o.get("value").and_then(|v| v.as_u64()).unwrap_or(0),
+            ));
             break;
         }
     }
-    let (vout, value_sats) = found.ok_or_else(|| Error::Generic("HTLC P2SH output not found in the funding tx".into()))?;
+    let (vout, value_sats) = found
+        .ok_or_else(|| Error::Generic("HTLC P2SH output not found in the funding tx".into()))?;
     let status = tx.get("status");
-    let confirmed = status.and_then(|s| s.get("confirmed")).and_then(|b| b.as_bool()).unwrap_or(false);
+    let confirmed = status
+        .and_then(|s| s.get("confirmed"))
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
     let height = if confirmed {
-        status.and_then(|s| s.get("block_height")).and_then(|h| h.as_i64()).unwrap_or(-1)
+        status
+            .and_then(|s| s.get("block_height"))
+            .and_then(|h| h.as_i64())
+            .unwrap_or(-1)
     } else {
         -1
     };
-    let confirmations = if confirmed && height >= 0 && tip >= height { tip - height + 1 } else { 0 };
-    Ok(HtlcFunding { vout, value_sats, height, confirmations })
+    let confirmations = if confirmed && height >= 0 && tip >= height {
+        tip - height + 1
+    } else {
+        0
+    };
+    Ok(HtlcFunding {
+        vout,
+        value_sats,
+        height,
+        confirmations,
+    })
 }
 
 /// Validate an esplora broadcast response body: success status + a 64-hex txid.
@@ -390,7 +481,10 @@ pub(super) fn parse_broadcast(ok: bool, body: &str) -> Result<String, Error> {
         return Err(Error::Generic(body.to_string()));
     }
     if body.len() != 64 || !body.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(Error::Generic(format!("unexpected broadcast response: {}", &body[..body.len().min(80)])));
+        return Err(Error::Generic(format!(
+            "unexpected broadcast response: {}",
+            &body[..body.len().min(80)]
+        )));
     }
     Ok(body.to_string())
 }
@@ -412,15 +506,28 @@ mod tests {
     fn tb1_matches_lwk_unconfidential() {
         let params = ChainAddressParams::testnet();
         let btc0 = address(&params, MNEMONIC, false, 0).unwrap();
-        assert!(btc0.starts_with("tb1"), "expected a tb1 address, got {btc0}");
+        assert!(
+            btc0.starts_with("tb1"),
+            "expected a tb1 address, got {btc0}"
+        );
 
         let sw = SwSigner::new(MNEMONIC, false).unwrap();
         let desc_str = singlesig_desc(&sw, Singlesig::Wpkh, DescriptorBlindingKey::Slip77).unwrap();
         let desc = crate::WolletDescriptor::from_str(&desc_str).unwrap();
-        let wollet = crate::WolletBuilder::new(Network::sequentia_testnet(), desc).build().unwrap();
-        let lwk0 = wollet.address(Some(0)).unwrap().address().to_unconfidential().to_string();
+        let wollet = crate::WolletBuilder::new(Network::sequentia_testnet(), desc)
+            .build()
+            .unwrap();
+        let lwk0 = wollet
+            .address(Some(0))
+            .unwrap()
+            .address()
+            .to_unconfidential()
+            .to_string();
 
-        assert_eq!(btc0, lwk0, "Bitcoin and Sequentia-unconfidential addresses must match");
+        assert_eq!(
+            btc0, lwk0,
+            "Bitcoin and Sequentia-unconfidential addresses must match"
+        );
     }
 
     // Phase 1's parity property: the blocking and async drivers both call this
@@ -442,7 +549,10 @@ mod tests {
         let utxos = |n: u32| -> Vec<Utxo> {
             (0..n)
                 .map(|vout| Utxo {
-                    outpoint: OutPoint { txid: Txid::from_str(&"11".repeat(32)).unwrap(), vout },
+                    outpoint: OutPoint {
+                        txid: Txid::from_str(&"11".repeat(32)).unwrap(),
+                        vout,
+                    },
                     value: 100_000,
                     script: k.script.clone(),
                     sk: k.sk,
@@ -454,7 +564,10 @@ mod tests {
         let a = build_signed_tx(&secp, &master, &params, &dest, 150_000, 2.0, 1, utxos(2)).unwrap();
         let b = build_signed_tx(&secp, &master, &params, &dest, 150_000, 2.0, 1, utxos(2)).unwrap();
 
-        assert_eq!(a.hex, b.hex, "build must be deterministic -> blocking and async are byte-identical");
+        assert_eq!(
+            a.hex, b.hex,
+            "build must be deterministic -> blocking and async are byte-identical"
+        );
         assert_eq!(a.txid, b.txid);
         assert_eq!(a.inputs, 2); // 2x100k needed to cover 150k + fee
         assert!(a.fee_sats > 0);

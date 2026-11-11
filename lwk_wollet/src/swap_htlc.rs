@@ -429,6 +429,18 @@ pub fn finish_claim(
     if tx.input.len() != 2 || check.spent.len() != 2 {
         return refuse("a claim has the HTLC and its pot as inputs, and nothing else".into());
     }
+    // Every output plain: a proof or a nonce on an explicit output makes the
+    // node refuse the claim (bad-txns-in-ne-out), with the secret already out
+    // (proof review PV5, S17).
+    if let Some(i) = tx
+        .output
+        .iter()
+        .position(|o| !o.witness.is_empty() || !o.nonce.is_null())
+    {
+        return refuse(format!(
+            "output {i} of the claim carries a proof or a nonce: every output of a claim is plain"
+        ));
+    }
     let htlc = swap_htlc_tree(t)?;
     let pot = fee_pot_tree(p)?;
     let explicit = |o: &TxOut| match (o.asset, o.value) {
@@ -852,6 +864,56 @@ mod tests {
             &s,
             "the policy signature does not verify",
         );
+        // PV5 S17: a well-formed range and surjection proof, and a nonce,
+        // copied from a confidential output onto an explicit output of the
+        // claim, signed for real: the node refuses such a claim.
+        let conf = {
+            let k = crate::elements::secp256k1_zkp::SecretKey::from_slice(&[3u8; 32]).unwrap();
+            let pk = crate::elements::bitcoin::PublicKey::new(k.public_key(&crate::util::EC));
+            let addr = crate::elements::Address::p2wpkh(
+                &pk,
+                Some(k.public_key(&crate::util::EC)),
+                &crate::elements::AddressParams::ELEMENTS,
+            );
+            let spent = [crate::elements::TxOutSecrets::new(
+                c.p.fee_asset,
+                crate::elements::confidential::AssetBlindingFactor::zero(),
+                20_000,
+                crate::elements::confidential::ValueBlindingFactor::zero(),
+            )];
+            TxOut::new_not_last_confidential(
+                &mut rand::thread_rng(),
+                &crate::util::EC,
+                15_000,
+                addr,
+                c.p.fee_asset,
+                &spent,
+            )
+            .unwrap()
+            .0
+        };
+        for (what, mutate) in [
+            (
+                "a range proof",
+                Box::new(|o: &mut TxOut| o.witness.rangeproof = conf.witness.rangeproof.clone())
+                    as Box<dyn Fn(&mut TxOut)>,
+            ),
+            (
+                "a surjection proof",
+                Box::new(|o: &mut TxOut| {
+                    o.witness.surjection_proof = conf.witness.surjection_proof.clone()
+                }),
+            ),
+            ("a nonce", Box::new(|o: &mut TxOut| o.nonce = conf.nonce)),
+        ] {
+            let mut tx = c.tx.clone();
+            mutate(&mut tx.output[1]);
+            let [ps2, bs2, bps2] = c.sigs(&tx);
+            let err = finish_claim(tx, &c.check(c.early()), &s, &ps2, &bs2, &bps2)
+                .expect_err(what)
+                .to_string();
+            assert!(err.contains("carries a proof or a nonce"), "{what}: {err}");
+        }
         // A wrong secret.
         refused(
             c.tx.clone(),
