@@ -100,10 +100,7 @@ fn settle(wollet: &mut Wollet, client: &mut EsploraClient) -> R<()> {
 /// (known, confirmed) for a txid, via the explorer.
 fn tx_status(txid: &Txid) -> (bool, bool) {
     let s = curl(&[&format!("{ESPLORA}/tx/{txid}/status")]);
-    (
-        s.contains("confirmed"),
-        s.contains("\"confirmed\":true") || s.contains("\"confirmed\": true"),
-    )
+    (s.contains("confirmed"), s.contains("\"confirmed\":true") || s.contains("\"confirmed\": true"))
 }
 
 fn sign_finalize_broadcast(
@@ -181,42 +178,18 @@ fn main() -> R<()> {
     // whether producers would mine it.
     let priced_asset = |bal: &std::collections::BTreeMap<AssetId, u64>| {
         bal.iter()
-            .filter(|(a, v)| {
-                **a != policy && **v > 1000 && rate_for(&feerates, &a.to_string()).is_some()
-            })
+            .filter(|(a, v)| **a != policy && **v > 1000 && rate_for(&feerates, &a.to_string()).is_some())
             .map(|(a, v)| (*a, *v))
             .max_by_key(|(_, v)| *v)
     };
 
     // Fund if needed.
     if bal.get(&policy).copied().unwrap_or(0) < 1_000_000 {
-        println!(
-            "faucet tSEQ: {}",
-            curl(&[
-                "-X",
-                "POST",
-                "-H",
-                "Content-Type: application/json",
-                "-d",
-                &format!("{{\"address\":\"{unconf}\"}}"),
-                &format!("{BASE}/faucet")
-            ])
-        );
+        println!("faucet tSEQ: {}", curl(&["-X","POST","-H","Content-Type: application/json","-d",&format!("{{\"address\":\"{unconf}\"}}"),&format!("{BASE}/faucet")]));
     }
     if priced_asset(&bal).is_none() {
         for a in ["USDX", "EURX", "GOLD", "WBTC"] {
-            println!(
-                "faucet {a}: {}",
-                curl(&[
-                    "-X",
-                    "POST",
-                    "-H",
-                    "Content-Type: application/json",
-                    "-d",
-                    &format!("{{\"address\":\"{unconf}\",\"asset\":\"{a}\"}}"),
-                    &format!("{BASE}/faucet")
-                ])
-            );
+            println!("faucet {a}: {}", curl(&["-X","POST","-H","Content-Type: application/json","-d",&format!("{{\"address\":\"{unconf}\",\"asset\":\"{a}\"}}"),&format!("{BASE}/faucet")]));
         }
     }
     for i in 0..30 {
@@ -226,21 +199,14 @@ fn main() -> R<()> {
             break;
         }
         if i % 3 == 0 {
-            println!(
-                "  …waiting for funds (tSEQ={}, asset={:?})",
-                bal.get(&policy).copied().unwrap_or(0),
-                priced_asset(&bal)
-            );
+            println!("  …waiting for funds (tSEQ={}, asset={:?})", bal.get(&policy).copied().unwrap_or(0), priced_asset(&bal));
         }
         sleep(Duration::from_secs(10));
     }
     bal = wollet.balance()?;
     let (asset, asset_bal) = priced_asset(&bal).ok_or("no node-priced asset funded")?;
     let arate = rate_for(&feerates, &asset.to_string()).unwrap();
-    println!(
-        "tSEQ={} | asset {asset} bal={asset_bal} rate={arate}",
-        bal.get(&policy).copied().unwrap_or(0)
-    );
+    println!("tSEQ={} | asset {asset} bal={asset_bal} rate={arate}", bal.get(&policy).copied().unwrap_or(0));
 
     // An asset-fee self-send: reliably unconfirmed (producers won't mine a non-native fee), so a
     // dependable parent for the RBF tests.
@@ -259,19 +225,9 @@ fn main() -> R<()> {
     settle(&mut wollet, &mut client)?;
     // ---- 1) RBF BUMP: asset-fee parent → re-pay the same payment at a higher fee in tSEQ --------
     println!("\n[1/3] RBF bump (asset-fee parent → tSEQ)");
-    if let Some(orig) = broadcast_and_apply(
-        "stuck (fee in asset)",
-        asset_stuck(&wollet)?,
-        &signer,
-        &mut wollet,
-        &client,
-    )? {
-        let pset = wollet
-            .bump_fee_of(orig)?
-            .fee_rate(Some(8000.0))
-            .finish(&wollet)?;
-        if let Some(b) = sign_finalize_broadcast("bump → tSEQ", pset, &signer, &wollet, &client)?
-        {
+    if let Some(orig) = broadcast_and_apply("stuck (fee in asset)", asset_stuck(&wollet)?, &signer, &mut wollet, &client)? {
+        let pset = wollet.bump_fee_of(orig)?.fee_rate(Some(8000.0)).finish(&wollet)?;
+        if let Some(b) = sign_finalize_broadcast("bump → tSEQ", pset, &signer, &wollet, &client)? {
             sleep(Duration::from_secs(6));
             let orig_gone = !curl(&[&format!("{ESPLORA}/tx/{orig}")]).contains("\"txid\"");
             let (_, b_conf) = tx_status(&b);
@@ -284,22 +240,14 @@ fn main() -> R<()> {
     // ---- 2) RBF REPLACE: asset-fee parent → re-pin inputs, send NEW outputs, fee in tSEQ --------
     println!("\n[2/3] RBF replace (new outputs)");
     settle(&mut wollet, &mut client)?;
-    if let Some(orig) = broadcast_and_apply(
-        "stuck #2 (fee in asset)",
-        asset_stuck(&wollet)?,
-        &signer,
-        &mut wollet,
-        &client,
-    )? {
+    if let Some(orig) = broadcast_and_apply("stuck #2 (fee in asset)", asset_stuck(&wollet)?, &signer, &mut wollet, &client)? {
         // New output: a different amount of the same asset back to ourselves, fee in tSEQ.
         let pset = wollet
             .replace_tx_of(orig)?
             .add_explicit_recipient(&unconf, (asset_amt / 2).max(1), asset)?
             .fee_rate(Some(8000.0))
             .finish(&wollet)?;
-        if let Some(rep) =
-            sign_finalize_broadcast("replace (new outputs)", pset, &signer, &wollet, &client)?
-        {
+        if let Some(rep) = sign_finalize_broadcast("replace (new outputs)", pset, &signer, &wollet, &client)? {
             sleep(Duration::from_secs(6));
             let orig_gone = !curl(&[&format!("{ESPLORA}/tx/{orig}")]).contains("\"txid\"");
             println!("  REPLACE: PASS — {rep} accepted (orig replaced={orig_gone})");
@@ -315,30 +263,15 @@ fn main() -> R<()> {
         .add_explicit_recipient(&unconf, 100_000, policy)?
         .fee_rate(Some(1000.0)) // 1 sat/vB — clears min relay, still low priority
         .finish(&wollet)?;
-    if let Some(parent) = broadcast_and_apply(
-        "low-fee tSEQ parent",
-        tseq_stuck,
-        &signer,
-        &mut wollet,
-        &client,
-    )? {
+    if let Some(parent) = broadcast_and_apply("low-fee tSEQ parent", tseq_stuck, &signer, &mut wollet, &client)? {
         let (_, p_conf) = tx_status(&parent);
         if p_conf {
             println!("  CPFP: inconclusive — parent confirmed before the child could attach (quiet testnet, no mempool backlog)");
         } else {
             let rate = wollet.cpfp_suggested_feerate(parent, 10_000.0)?; // target 10 sat/vB package
-                                                                         // fee paid in tSEQ (default — producer-accepted); not the change's asset.
-            let pset = wollet
-                .cpfp_of(parent)?
-                .fee_rate(Some(rate))
-                .finish(&wollet)?;
-            if let Some(child) = sign_finalize_broadcast(
-                "CPFP child (fee in tSEQ)",
-                pset,
-                &signer,
-                &wollet,
-                &client,
-            )? {
+            // fee paid in tSEQ (default — producer-accepted); not the change's asset.
+            let pset = wollet.cpfp_of(parent)?.fee_rate(Some(rate)).finish(&wollet)?;
+            if let Some(child) = sign_finalize_broadcast("CPFP child (fee in tSEQ)", pset, &signer, &wollet, &client)? {
                 println!("  CPFP: PASS — node accepted child {child} of unconfirmed parent {parent} (suggested child feerate {:.0} sat/kvb)", rate);
             } else {
                 println!("  CPFP: FAIL");

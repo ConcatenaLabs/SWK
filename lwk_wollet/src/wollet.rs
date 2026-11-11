@@ -837,11 +837,7 @@ impl Wollet {
             .get(outpoint.vout as usize)
             .ok_or_else(|| Error::Generic("missing output".into()))?
             .clone();
-        let tx_ = if self.is_segwit() {
-            None
-        } else {
-            Some(tx.clone())
-        };
+        let tx_ = if self.is_segwit() { None } else { Some(tx.clone()) };
         Ok(ExternalUtxo {
             outpoint,
             txout,

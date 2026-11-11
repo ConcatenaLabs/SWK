@@ -226,9 +226,8 @@ pub fn build_covenant_fill_tx(plan: &CovenantFillPlan) -> Result<(String, Txid),
     let a_asset = plan.covenant.asset;
 
     // ---- inputs -----------------------------------------------------------
-    let cov_txid = Txid::from_str(&plan.covenant.txid).map_err(|e| {
-        Error::Generic(format!("invalid covenant txid {}: {e}", plan.covenant.txid))
-    })?;
+    let cov_txid = Txid::from_str(&plan.covenant.txid)
+        .map_err(|e| Error::Generic(format!("invalid covenant txid {}: {e}", plan.covenant.txid)))?;
     let cov_input = TxIn {
         previous_output: OutPoint::new(cov_txid, plan.covenant.vout),
         is_pegin: false,
@@ -349,11 +348,7 @@ pub fn build_covenant_fill_tx(plan: &CovenantFillPlan) -> Result<(String, Txid),
                 "remainder asset must equal the covenant's sold asset A".into(),
             ));
         }
-        outputs.push(explicit_out(
-            rem.asset,
-            rem.value,
-            Script::from(rem.spk.clone()),
-        )); // 1
+        outputs.push(explicit_out(rem.asset, rem.value, Script::from(rem.spk.clone()))); // 1
         outputs.push(receipt_out); // 2 (asset A)
         if let Some(bc) = b_change {
             outputs.push(bc);
@@ -396,10 +391,8 @@ pub fn build_covenant_fill_tx(plan: &CovenantFillPlan) -> Result<(String, Txid),
     };
 
     // Covenant input 0: introspection-only witness [leaf, control_block], no sig.
-    tx.input[0].witness.script_witness = vec![
-        plan.covenant.fill_leaf.clone(),
-        plan.covenant.control_block.clone(),
-    ];
+    tx.input[0].witness.script_witness =
+        vec![plan.covenant.fill_leaf.clone(), plan.covenant.control_block.clone()];
 
     // Taker inputs: key-path p2wpkh, segwit-v0 SIGHASH_ALL.
     let secp = Secp256k1::signing_only();
@@ -550,11 +543,7 @@ pub fn build_covenant_refund_tx(plan: &CovenantRefundPlan) -> Result<(String, Tx
             asset_issuance: Default::default(),
             witness: TxInWitness::default(),
         });
-        prevouts.push(explicit_out(
-            fi.asset,
-            fi.value,
-            Script::from(fi.spk.clone()),
-        ));
+        prevouts.push(explicit_out(fi.asset, fi.value, Script::from(fi.spk.clone())));
     }
 
     // ---- outputs ----------------------------------------------------------
@@ -568,19 +557,13 @@ pub fn build_covenant_refund_tx(plan: &CovenantRefundPlan) -> Result<(String, Tx
                 "fee paid in the covenant asset must not carry external fee inputs".into(),
             ));
         }
-        let reclaim = plan
-            .covenant
-            .locked
-            .checked_sub(plan.fee_atoms)
-            .ok_or_else(|| Error::Generic("fee exceeds the reclaimed covenant value".into()))?;
+        let reclaim = plan.covenant.locked.checked_sub(plan.fee_atoms).ok_or_else(|| {
+            Error::Generic("fee exceeds the reclaimed covenant value".into())
+        })?;
         if reclaim == 0 {
             return Err(Error::Generic("reclaimed value is zero after fee".into()));
         }
-        outputs.push(explicit_out(
-            a_asset,
-            reclaim,
-            plan.reclaim_addr.script_pubkey(),
-        ));
+        outputs.push(explicit_out(a_asset, reclaim, plan.reclaim_addr.script_pubkey()));
         outputs.push(fee_out);
     } else {
         // Reclaim the full locked A; fund the fee (and change) from fee inputs.
@@ -611,20 +594,12 @@ pub fn build_covenant_refund_tx(plan: &CovenantRefundPlan) -> Result<(String, Tx
         ));
         // Per-asset change back to the maker for every funded asset.
         for (asset, total) in &funded {
-            let used = if *asset == plan.fee_asset {
-                plan.fee_atoms
-            } else {
-                0
-            };
+            let used = if *asset == plan.fee_asset { plan.fee_atoms } else { 0 };
             let change = total
                 .checked_sub(used)
                 .ok_or_else(|| Error::Generic("refund fee change underflow".into()))?;
             if change > 0 {
-                outputs.push(explicit_out(
-                    *asset,
-                    change,
-                    plan.change_addr.script_pubkey(),
-                ));
+                outputs.push(explicit_out(*asset, change, plan.change_addr.script_pubkey()));
             }
         }
         outputs.push(fee_out);
@@ -754,7 +729,8 @@ mod tests {
     // OP_1 <maker_prog=0x11*32>  == the covenant's own scriptPubKey / remainder dest.
     const GOLD_ORDER_SPK: &str =
         "5120b22544534c99090050a06eece12231a2321f4144661ab3964408d5780821afaa";
-    const MAKER_PROG_HEX: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const MAKER_PROG_HEX: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
 
     fn asset_a() -> AssetId {
         // bytes(range(0,32)) in internal order == display hex reversed. AssetId
@@ -830,7 +806,10 @@ mod tests {
         // share the OP_1<32> witness-program form; the golden order spk is exactly
         // OP_1 <output_key>. Here we only assert the credit spk builder shape.
         let spk = witness_program_spk(1, &Vec::<u8>::from_hex(MAKER_PROG_HEX).unwrap()).unwrap();
-        assert_eq!(spk.as_bytes().to_hex(), "5120".to_string() + MAKER_PROG_HEX);
+        assert_eq!(
+            spk.as_bytes().to_hex(),
+            "5120".to_string() + MAKER_PROG_HEX
+        );
     }
 
     #[test]
@@ -872,8 +851,7 @@ mod tests {
             fee_asset: asset_fee(),
         };
         let (hex, _txid) = build_covenant_fill_tx(&plan).unwrap();
-        let tx: Transaction =
-            elements::encode::deserialize(&Vec::<u8>::from_hex(&hex).unwrap()).unwrap();
+        let tx: Transaction = elements::encode::deserialize(&Vec::<u8>::from_hex(&hex).unwrap()).unwrap();
 
         // Covenant input 0 witness == [FILL leaf, control block] (byte-for-byte).
         let w = &tx.input[0].witness.script_witness;
@@ -885,10 +863,7 @@ mod tests {
         let o0 = &tx.output[0];
         assert_eq!(o0.value, confidential::Value::Explicit(req));
         assert_eq!(o0.asset, confidential::Asset::Explicit(asset_b()));
-        assert_eq!(
-            o0.script_pubkey.as_bytes().to_hex(),
-            "5120".to_string() + MAKER_PROG_HEX
-        );
+        assert_eq!(o0.script_pubkey.as_bytes().to_hex(), "5120".to_string() + MAKER_PROG_HEX);
 
         // Output 1 (full fill) == a NON-asset-A gap output (the taker's B change).
         let o1 = &tx.output[1];
@@ -940,14 +915,10 @@ mod tests {
             fee_asset: asset_b(), // fee paid in asset B (folded into the B selection)
         };
         let (hex, _txid) = build_covenant_fill_tx(&plan).unwrap();
-        let tx: Transaction =
-            elements::encode::deserialize(&Vec::<u8>::from_hex(&hex).unwrap()).unwrap();
+        let tx: Transaction = elements::encode::deserialize(&Vec::<u8>::from_hex(&hex).unwrap()).unwrap();
 
         // Covenant witness intact.
-        assert_eq!(
-            tx.input[0].witness.script_witness[0].to_hex(),
-            GOLD_FILL_LEAF
-        );
+        assert_eq!(tx.input[0].witness.script_witness[0].to_hex(), GOLD_FILL_LEAF);
         // Output 0 credit (B); Output 1 remainder (A) to the SAME covenant spk.
         assert_eq!(tx.output[0].asset, confidential::Asset::Explicit(asset_b()));
         let o1 = &tx.output[1];
@@ -993,11 +964,16 @@ mod tests {
     // Deterministic, pinned to the regtest-proven Python refund spend
     // (feature_seqob_covenant_fill.py build_refund): same refund leaf, control
     // block, tapscript sighash, and (aux_rand=zeros) Schnorr signature.
-    const RGV_MAKER_SEC: &str = "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b";
-    const RGV_MAKER_X: &str = "bb58b5feca505c74edc000d8282fc556e51a1024fc8e7d7e56c6f887c5c8d5f2";
-    const RGV_ASSET_A: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
-    const RGV_FEE_ASSET: &str = "fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe";
-    const RGV_GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000042";
+    const RGV_MAKER_SEC: &str =
+        "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b";
+    const RGV_MAKER_X: &str =
+        "bb58b5feca505c74edc000d8282fc556e51a1024fc8e7d7e56c6f887c5c8d5f2";
+    const RGV_ASSET_A: &str =
+        "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    const RGV_FEE_ASSET: &str =
+        "fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe";
+    const RGV_GENESIS: &str =
+        "0000000000000000000000000000000000000000000000000000000000000042";
     const RGV_ORDER_SPK: &str =
         "5120933b455fffa3a7bc22689079ea81ce1b6855281ff5cb5d6bf228d4696b6e637d";
     const RGV_REFUND_LEAF: &str =
@@ -1005,7 +981,8 @@ mod tests {
     const RGV_REFUND_CB: &str =
         "c450929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac08040fab7573f58b10927b0e8b7046fec0f6b100f67d48296bb305dabe06b513e";
     const RGV_FEE_PREVOUT_SPK: &str = "00141414141414141414141414141414141414141414";
-    const RGV_SIGHASH: &str = "b21a2e5125876df901645bfa0d2a17c2e0604fe22a1e6024f32875b85c8d9847";
+    const RGV_SIGHASH: &str =
+        "b21a2e5125876df901645bfa0d2a17c2e0604fe22a1e6024f32875b85c8d9847";
     const RGV_SIGNATURE: &str =
         "0872c8cedc89f5952bef81bb2c2327c4a61bcf580290a92c0c357e07196732bac9956e81e71e920ca1612fc82eb709597a72abda9e61905db4629ad6fc81c9e4";
     const RGV_N: u64 = 1_000_000_000;
@@ -1059,7 +1036,10 @@ mod tests {
         let fee_prevout_spk = Vec::<u8>::from_hex(RGV_FEE_PREVOUT_SPK).unwrap();
 
         let cov_in = TxIn {
-            previous_output: OutPoint::new(Txid::from_str(&"11".repeat(32)).unwrap(), 0),
+            previous_output: OutPoint::new(
+                Txid::from_str(&"11".repeat(32)).unwrap(),
+                0,
+            ),
             is_pegin: false,
             script_sig: Script::new(),
             sequence: Sequence::from_consensus(SEQUENCE_ENABLE_LOCKTIME),
@@ -1067,7 +1047,10 @@ mod tests {
             witness: TxInWitness::default(),
         };
         let fee_in = TxIn {
-            previous_output: OutPoint::new(Txid::from_str(&"22".repeat(32)).unwrap(), 1),
+            previous_output: OutPoint::new(
+                Txid::from_str(&"22".repeat(32)).unwrap(),
+                1,
+            ),
             is_pegin: false,
             script_sig: Script::new(),
             sequence: Sequence::from_consensus(SEQUENCE_ENABLE_LOCKTIME),
@@ -1242,8 +1225,8 @@ mod tests {
             ChildNumber::from_normal_idx(0).unwrap(),
         ]);
         let child = master.derive_priv(&secp, &path).unwrap();
-        let (xonly, _p) =
-            secp256k1::PublicKey::from_secret_key(&secp, &child.private_key).x_only_public_key();
+        let (xonly, _p) = secp256k1::PublicKey::from_secret_key(&secp, &child.private_key)
+            .x_only_public_key();
         let (prog, spk) = maker_payout_program(xonly).unwrap();
         assert_eq!(spk.len(), 34);
         assert_eq!(spk[0], 0x51);

@@ -1394,11 +1394,7 @@ impl TxBuilder {
             let addressee = if let Some(address) = self.drain_to.clone() {
                 Recipient::from_address(policy_change, &address, policy_asset_id)
             } else {
-                wollet.addressee_change(
-                    policy_change,
-                    policy_asset_id,
-                    &mut last_unused_internal,
-                )?
+                wollet.addressee_change(policy_change, policy_asset_id, &mut last_unused_internal)?
             };
             wollet.add_output(&mut pset, &addressee)?;
             policy_change_idx = Some(pset.n_outputs() - 1);
@@ -1427,7 +1423,8 @@ impl TxBuilder {
         } else {
             policy_asset_id
         };
-        let fee_output = Output::new_explicit(Script::default(), temp_fee, fee_output_asset, None);
+        let fee_output =
+            Output::new_explicit(Script::default(), temp_fee, fee_output_asset, None);
         pset.add_output(fee_output);
         let fee_output_idx = pset.n_outputs() - 1;
 
@@ -1441,8 +1438,7 @@ impl TxBuilder {
         #[cfg(feature = "sequentia")]
         {
             let any_confidential_input = inp_txout_sec.values().any(|s| {
-                s.asset_bf != AssetBlindingFactor::zero()
-                    || s.value_bf != ValueBlindingFactor::zero()
+                s.asset_bf != AssetBlindingFactor::zero() || s.value_bf != ValueBlindingFactor::zero()
             });
             if !any_confidential_input {
                 let mut change_spks = HashSet::new();

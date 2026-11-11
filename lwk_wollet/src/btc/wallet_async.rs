@@ -13,11 +13,7 @@ use super::esplora::asyncr as tx;
 use crate::error::Error;
 
 /// BIP44-style gap scan (async). See [`super::wallet::scan`].
-pub async fn scan(
-    params: &ChainAddressParams,
-    mnemonic: &str,
-    t4_api: &str,
-) -> Result<BtcScan, Error> {
+pub async fn scan(params: &ChainAddressParams, mnemonic: &str, t4_api: &str) -> Result<BtcScan, Error> {
     let secp = Secp256k1::new();
     let master = core::master_xprv(mnemonic, params)?;
     let client = tx::client()?;
@@ -56,24 +52,13 @@ pub async fn prepare(
     let addrs: Vec<String> = keys.iter().map(|k| k.address.to_string()).collect();
     let lists = tx::fetch_utxos(&client, base, &addrs).await;
     let utxos = core::utxos_from_lists(keys, lists)?;
-    core::build_signed_tx(
-        &secp,
-        &master,
-        params,
-        dest_addr,
-        amount_sats,
-        fee_rate,
-        scan.change_next,
-        utxos,
-    )
+    core::build_signed_tx(&secp, &master, params, dest_addr, amount_sats, fee_rate, scan.change_next, utxos)
 }
 
 /// Live BTC fee rate (sat/vB) for confirming within `target_blocks` (async); for
 /// sizing a time-sensitive send/refund. `None` if unavailable.
 pub async fn fee_estimate(t4_api: &str, target_blocks: u16) -> Option<f64> {
-    let Ok(client) = tx::client() else {
-        return None;
-    };
+    let Ok(client) = tx::client() else { return None };
     tx::fee_estimate(&client, t4_api.trim_end_matches('/'), target_blocks).await
 }
 
@@ -92,11 +77,7 @@ pub async fn broadcast(t4_api: &str, tx_hex: &str) -> Result<String, Error> {
 // confirm before it commits the asset leg, and it is reached from wasm as
 // `xchainFindBtcFunding`. It was swept once already, as collateral damage from
 // deleting the retired RFQ rail by container rather than by reachability.
-pub async fn find_htlc_funding(
-    t4_api: &str,
-    txid: &str,
-    p2sh_spk_hex: &str,
-) -> Result<HtlcFunding, Error> {
+pub async fn find_htlc_funding(t4_api: &str, txid: &str, p2sh_spk_hex: &str) -> Result<HtlcFunding, Error> {
     let client = tx::client()?;
     let base = t4_api.trim_end_matches('/');
     let tx_json = tx::get_tx_json(&client, base, txid).await?;

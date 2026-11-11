@@ -111,19 +111,19 @@ mod tx_details;
 #[cfg(feature = "prices")]
 mod pos;
 
+mod pset_create;
 #[cfg(feature = "adaptor")]
 pub mod adaptor;
 #[cfg(feature = "openamp")]
 pub mod openamp;
-mod pset_create;
+#[cfg(feature = "openamp")]
+pub mod swap_htlc;
 #[cfg(feature = "registry")]
 pub mod registry;
 #[cfg(feature = "sequentia")]
 mod seqdex_htlc;
 #[cfg(feature = "sequentia")]
 mod seqob_covenant;
-#[cfg(feature = "openamp")]
-pub mod swap_htlc;
 // SEQUENTIA staking pools: build a delegation record, and (the part a descriptor
 // wallet cannot do on its own) spend one to re-point or leave a pool.
 #[cfg(feature = "sequentia")]
@@ -156,10 +156,6 @@ mod wollet;
 #[cfg(feature = "prices")]
 pub mod prices;
 
-#[cfg(feature = "adaptor")]
-pub use crate::adaptor::{
-    adaptor_complete, adaptor_extract, adaptor_sign, adaptor_verify, PRESIG_LEN, SIG_LEN,
-};
 pub use crate::clients::electrum_url::ElectrumUrl;
 pub use crate::clients::{Capability, History};
 pub use crate::contract::{asset_ids, issuance_ids, Contract, Entity};
@@ -170,6 +166,13 @@ pub use crate::model::{
     AddressResult, ExternalUtxo, IssuanceDetails, Recipient, UnvalidatedRecipient, WalletTx,
     WalletTxOut,
 };
+pub use crate::pegin::fed_peg_script;
+#[cfg(feature = "adaptor")]
+pub use crate::adaptor::{
+    adaptor_complete, adaptor_extract, adaptor_sign, adaptor_verify, PRESIG_LEN, SIG_LEN,
+};
+#[cfg(feature = "registry")]
+pub use crate::registry::RegistryAssetData;
 #[cfg(feature = "openamp")]
 pub use crate::openamp::{
     compute_aid, decode_enclave_spend, enclave_sighash, prevouts_to_txouts, tagged_hash,
@@ -177,28 +180,11 @@ pub use crate::openamp::{
     EnclaveSpendEffects, OpenampClient, OpenampUser, ToSign, TransferDraft, TransferResult,
     TAG_CHALLENGE, TAG_DOCUMENT,
 };
-pub use crate::pegin::fed_peg_script;
-#[cfg(feature = "registry")]
-pub use crate::registry::RegistryAssetData;
 pub use crate::tx_details::{TxDetails, TxOpt, TxOutDetails, TxsOpt};
 pub use crate::wollet::DirectoryIdHash;
 
 // Re-export store types from lwk_common
-#[cfg(feature = "sequentia")]
-pub use crate::coinjoin::{sign_coinjoin_inputs, CoinjoinInput};
-#[cfg(feature = "sequentia")]
-pub use crate::seqdex_htlc::{
-    build_claim_tx, build_htlc_redeem_script, build_refund_tx, generate_swap_secret,
-    pubkey_for_secret, secret_from_hex, SeqHtlcSpend, SwapSecret,
-};
-#[cfg(feature = "sequentia")]
-pub use crate::seqdex_swap::{SeqdexSwapRequest, SeqdexSwapRequestOpts, SeqdexUnblindedInput};
-#[cfg(feature = "sequentia")]
-pub use crate::seqob_covenant::{
-    build_covenant_fill_tx, build_covenant_refund_tx, covenant_secret_from_hex,
-    maker_payout_program, CovenantFillPlan, CovenantInput, CovenantRefundInput, CovenantRefundPlan,
-    FillCredit, FillRemainder, TakerFundingInput,
-};
+pub use crate::tx_builder::{BuiltTx, TxBuilder, WolletTxBuilder};
 #[cfg(feature = "sequentia")]
 pub use crate::sequentia_delegation::{
     build_delegation_create_tx, build_delegation_spend_tx, parse_delegation_script,
@@ -219,7 +205,21 @@ pub use crate::staking_rewards::{
 };
 #[cfg(feature = "sequentia")]
 pub use crate::tx_builder::sequentia_stake_script;
-pub use crate::tx_builder::{BuiltTx, TxBuilder, WolletTxBuilder};
+#[cfg(feature = "sequentia")]
+pub use crate::seqdex_htlc::{
+    build_claim_tx, build_htlc_redeem_script, build_refund_tx, generate_swap_secret,
+    pubkey_for_secret, secret_from_hex, SeqHtlcSpend, SwapSecret,
+};
+#[cfg(feature = "sequentia")]
+pub use crate::seqob_covenant::{
+    build_covenant_fill_tx, build_covenant_refund_tx, covenant_secret_from_hex,
+    maker_payout_program, CovenantFillPlan, CovenantInput, CovenantRefundInput, CovenantRefundPlan,
+    FillCredit, FillRemainder, TakerFundingInput,
+};
+#[cfg(feature = "sequentia")]
+pub use crate::seqdex_swap::{SeqdexSwapRequest, SeqdexSwapRequestOpts, SeqdexUnblindedInput};
+#[cfg(feature = "sequentia")]
+pub use crate::coinjoin::{sign_coinjoin_inputs, CoinjoinInput};
 pub use crate::update::{DownloadTxResult, Update};
 pub use crate::util::EC;
 pub use crate::wollet::{Tip, Wollet, WolletBuilder};
