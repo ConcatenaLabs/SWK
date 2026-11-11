@@ -380,6 +380,8 @@ pub struct ClaimCheck<'a> {
 /// buyer's bitcoin for the seller. So, before placing it, this refuses:
 /// - a claim at or after the cut-off, `T_seq` less [`CLAIM_CUTOFF_SECS`]: the
 ///   keyless refund could then beat it;
+/// - a claim that is not final now: a lock time, or an input whose sequence is
+///   not final, or one with an issuance or a peg-in;
 /// - a secret that does not hash to the HTLC's `H`, or a pot of other terms;
 /// - spent coins that are not the HTLC and the pot those terms build, with
 ///   exactly their explicit asset and amount;
@@ -406,6 +408,21 @@ pub fn finish_claim(
     }
     if secret_hash(secret) != t.hash {
         return refuse("the secret does not hash to the HTLC's H".into());
+    }
+    // A claim must be valid now. With a lock time (say T_seq) it could be
+    // mined only when the keyless refund is valid too, and could lose to it
+    // with the secret already out (proof review PV5, S16).
+    if tx.lock_time != LockTime::ZERO {
+        return refuse("the claim carries a lock time: it must be final now".into());
+    }
+    if tx
+        .input
+        .iter()
+        .any(|i| i.sequence != Sequence::MAX || i.is_pegin || !i.asset_issuance.is_null())
+    {
+        return refuse(
+            "every input of a claim must be final, with no issuance and no peg-in".into(),
+        );
     }
     if p.hash != t.hash || p.buyer != t.buyer || p.t_seq != t.t_seq {
         return refuse("the pot's terms are not the HTLC's (hash, buyer, T_seq)".into());
@@ -933,6 +950,28 @@ mod tests {
             good,
             &s,
             "the HTLC and its pot as inputs",
+        );
+        // PV5 S16: a claim that is not final now, each with valid signatures
+        // over itself, so only the finality rule can refuse it.
+        let mut tx = c.tx.clone();
+        tx.lock_time = LockTime::from_consensus(c.t.t_seq);
+        let [lps, lbs, lbps] = c.sigs(&tx);
+        refused(
+            tx,
+            &c.check(c.early()),
+            [&lps, &lbs, &lbps],
+            &s,
+            "carries a lock time",
+        );
+        let mut tx = c.tx.clone();
+        tx.input[1].sequence = Sequence::ENABLE_LOCKTIME_NO_RBF;
+        let [qps, qbs, qbps] = c.sigs(&tx);
+        refused(
+            tx,
+            &c.check(c.early()),
+            [&qps, &qbs, &qbps],
+            &s,
+            "must be final",
         );
     }
 }
