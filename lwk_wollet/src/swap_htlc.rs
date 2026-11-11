@@ -132,13 +132,13 @@ impl SwapTree {
     }
 }
 
-fn nums() -> Result<XOnlyPublicKey, Error> {
+pub(crate) fn nums() -> Result<XOnlyPublicKey, Error> {
     let b = Vec::<u8>::from_hex(ENCLAVE_NUMS_HEX)
         .map_err(|e| Error::Generic(format!("NUMS hex: {e}")))?;
     XOnlyPublicKey::from_slice(&b).map_err(|e| Error::Generic(format!("NUMS point: {e}")))
 }
 
-fn asset_bytes(asset: &AssetId) -> Vec<u8> {
+pub(crate) fn asset_bytes(asset: &AssetId) -> Vec<u8> {
     serialize(asset)
 }
 
@@ -175,13 +175,13 @@ fn home(b: Builder, version: u8, program: &[u8], asset: &AssetId, value: u64) ->
         .push_opcode(OP_EQUAL)
 }
 
-fn time_lock(b: Builder, t: u32) -> Builder {
+pub(crate) fn time_lock(b: Builder, t: u32) -> Builder {
     b.push_int(i64::from(t))
         .push_opcode(OP_CLTV)
         .push_opcode(OP_DROP)
 }
 
-fn check_sig_pair(a: &XOnlyPublicKey, b: &XOnlyPublicKey) -> Builder {
+pub(crate) fn check_sig_pair(a: &XOnlyPublicKey, b: &XOnlyPublicKey) -> Builder {
     Builder::new()
         .push_slice(&a.serialize())
         .push_opcode(OP_CHECKSIGVERIFY)
@@ -198,7 +198,7 @@ fn concat(a: Builder, b: Builder) -> Script {
 /// Builds a tree of named leaves in the shape of the test framework's
 /// `taproot_construct` over a flat list: one or two leaves at depth 1, three as
 /// `[a, [b, c]]`.
-fn build(leaves: Vec<(&str, Script)>) -> Result<SwapTree, Error> {
+pub(crate) fn build(leaves: Vec<(&str, Script)>) -> Result<SwapTree, Error> {
     let depths: &[usize] = match leaves.len() {
         2 => &[1, 1],
         3 => &[1, 2, 2],
@@ -529,24 +529,33 @@ mod tests {
     const VECTORS: &str = include_str!("../tests/data/htlc_vectors.json");
 
     #[derive(Deserialize)]
+    // One map holds the HTLC, pot and gated-order vectors; each test reads
+    // the fields its own kind has.
     struct Vector {
+        #[serde(default)]
         hash: String,
+        #[serde(default)]
         buyer_x: String,
         #[serde(default)]
         policy_x: String,
         #[serde(default)]
         issuer_x: String,
+        #[serde(default)]
         t_seq: u32,
         #[serde(default)]
         seller_version: u8,
+        #[serde(default)]
         seller_program: String,
         #[serde(default)]
         asset: String,
         #[serde(default)]
         fee_asset: String,
+        #[serde(default)]
         value: u64,
         spk: String,
+        #[serde(default)]
         claim_script: String,
+        #[serde(default)]
         claim_control: String,
         refund_script: String,
         refund_control: String,

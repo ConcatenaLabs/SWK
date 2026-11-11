@@ -289,3 +289,42 @@ pub fn swap_extract_secret(tx_hex: &str, hash_hex: &str) -> Result<Option<String
     .map_err(|e| Error::Generic(format!("tx decode: {e}")))?;
     Ok(se::extract_secret(&tx, &hex32(hash_hex, "hash")?).map(|s| s.to_hex()))
 }
+
+/// A gated order's terms, as the web wallet holds them. The asset id is
+/// display hex; `fill` is the SeqDEX fill covenant (hex) the order wraps.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GatedTermsJson {
+    policy_x: String,
+    fill: String,
+    #[serde(default)]
+    issuer_x: Option<String>,
+    expiry: u32,
+    maker_program: String,
+    asset: String,
+}
+
+/// A gated order (a resting offer to sell a restricted asset) for these
+/// terms: `{scriptPubkey, leaves: [{name, script, control}]}`, the same shape
+/// as [`swap_htlc_tree`]. A taker fills it as an ordinary SeqDEX order with
+/// the `fill` leaf and its control block (`buildCovenantFillTx`), paying the
+/// asset to its own enclave, and hands the transaction to the policy server
+/// with `order_inputs` and `"broadcast": true`; the server completes the order
+/// input's witness and broadcasts.
+#[wasm_bindgen(js_name = gatedOrderTree)]
+pub fn gated_order_tree(terms: JsValue) -> Result<JsValue, Error> {
+    let t: GatedTermsJson = serde_wasm_bindgen::from_value(terms)?;
+    let terms = lwk_wollet::gated_order::GatedOrderTerms {
+        policy: xonly(&t.policy_x, "policyX")?,
+        fill: Vec::<u8>::from_hex(&t.fill).map_err(|e| Error::Generic(format!("fill: {e}")))?,
+        issuer: match &t.issuer_x {
+            Some(s) if !s.is_empty() => Some(xonly(s, "issuerX")?),
+            _ => None,
+        },
+        expiry: t.expiry,
+        maker_program: hex32(&t.maker_program, "makerProgram")?,
+        asset: asset(&t.asset, "the order's")?,
+    };
+    let tree = lwk_wollet::gated_order::gated_order_tree(&terms)?;
+    Ok(serde_wasm_bindgen::to_value(&tree_json(&tree))?)
+}

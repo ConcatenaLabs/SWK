@@ -118,6 +118,8 @@ pub mod adaptor;
 pub mod openamp;
 #[cfg(feature = "openamp")]
 pub mod swap_htlc;
+#[cfg(feature = "openamp")]
+pub mod gated_order;
 #[cfg(feature = "registry")]
 pub mod registry;
 #[cfg(feature = "sequentia")]
