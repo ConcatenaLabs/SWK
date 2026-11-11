@@ -1,7 +1,7 @@
-//! Swap-escrow wasm bindings: the Sequentia side of a restricted (OpenAMP) asset
-//! traded for on-chain BTC (`lwk_wollet::swap_escrow`).
+//! Swap-htlc wasm bindings: the Sequentia side of a restricted (OpenAMP) asset
+//! traded for on-chain BTC (`lwk_wollet::swap_htlc`).
 //!
-//! The wallet derives every escrow and pot script itself from the terms, never
+//! The wallet derives every HTLC and pot script itself from the terms, never
 //! from a server's word, and compares them with the outputs it is about to
 //! claim. Signing stays on [`crate::Signer`]: the buyer recomputes each claim
 //! input's sighash with `enclaveSighash` and signs it with `openampSignSighash`;
@@ -11,7 +11,7 @@
 use lwk_wollet::elements;
 use lwk_wollet::elements::hex::{FromHex, ToHex};
 use lwk_wollet::elements::secp256k1_zkp::XOnlyPublicKey;
-use lwk_wollet::swap_escrow as se;
+use lwk_wollet::swap_htlc as se;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -33,10 +33,10 @@ fn asset(s: &str, what: &str) -> Result<elements::AssetId, Error> {
     elements::AssetId::from_str(s).map_err(|e| Error::Generic(format!("{what} asset id: {e}")))
 }
 
-/// The escrow's terms, as the web wallet holds them. Asset ids are display hex.
+/// The HTLC's terms, as the web wallet holds them. Asset ids are display hex.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EscrowTermsJson {
+struct HtlcTermsJson {
     hash: String,
     buyer_x: String,
     policy_x: String,
@@ -48,9 +48,9 @@ struct EscrowTermsJson {
     value: u64,
 }
 
-impl EscrowTermsJson {
-    fn terms(&self) -> Result<se::SwapEscrowTerms, Error> {
-        Ok(se::SwapEscrowTerms {
+impl HtlcTermsJson {
+    fn terms(&self) -> Result<se::SwapHtlcTerms, Error> {
+        Ok(se::SwapHtlcTerms {
             hash: hex32(&self.hash, "hash")?,
             buyer: xonly(&self.buyer_x, "buyerX")?,
             policy: xonly(&self.policy_x, "policyX")?,
@@ -60,7 +60,7 @@ impl EscrowTermsJson {
             },
             t_seq: self.t_seq,
             seller_program: hex32(&self.seller_program, "sellerProgram")?,
-            asset: asset(&self.asset, "the escrow's")?,
+            asset: asset(&self.asset, "the HTLC's")?,
             value: self.value,
         })
     }
@@ -124,16 +124,16 @@ fn tree_json(t: &se::SwapTree) -> TreeJson {
     }
 }
 
-/// The swap escrow for these terms: `{scriptPubkey, leaves: [{name, script,
+/// The swap HTLC for these terms: `{scriptPubkey, leaves: [{name, script,
 /// control}]}`. A wallet compares `scriptPubkey` with the output it claims.
-#[wasm_bindgen(js_name = swapEscrowTree)]
-pub fn swap_escrow_tree(terms: JsValue) -> Result<JsValue, Error> {
-    let t: EscrowTermsJson = serde_wasm_bindgen::from_value(terms)?;
-    let tree = se::swap_escrow_tree(&t.terms()?)?;
+#[wasm_bindgen(js_name = swapHtlcTree)]
+pub fn swap_htlc_tree(terms: JsValue) -> Result<JsValue, Error> {
+    let t: HtlcTermsJson = serde_wasm_bindgen::from_value(terms)?;
+    let tree = se::swap_htlc_tree(&t.terms()?)?;
     Ok(serde_wasm_bindgen::to_value(&tree_json(&tree))?)
 }
 
-/// The fee pot for these terms, in the same shape as [`swap_escrow_tree`].
+/// The fee pot for these terms, in the same shape as [`swap_htlc_tree`].
 #[wasm_bindgen(js_name = swapFeePotTree)]
 pub fn swap_fee_pot_tree(terms: JsValue) -> Result<JsValue, Error> {
     let t: PotTermsJson = serde_wasm_bindgen::from_value(terms)?;
@@ -157,9 +157,9 @@ pub fn swap_claim_cutoff_seconds() -> u32 {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClaimRecipe {
-    escrow_txid: String,
-    escrow_vout: u32,
-    escrow: EscrowTermsJson,
+    htlc_txid: String,
+    htlc_vout: u32,
+    htlc: HtlcTermsJson,
     buyer_enclave_spk: String,
     pot_txid: String,
     pot_vout: u32,
@@ -182,15 +182,15 @@ fn spk(s: &str, what: &str) -> Result<elements::Script, Error> {
     ))
 }
 
-/// The buyer's claim, unsigned, as transaction hex: the escrow and its pot in,
-/// the escrow's whole amount to the buyer's enclave, the pot less the fee to
+/// The buyer's claim, unsigned, as transaction hex: the HTLC and its pot in,
+/// the HTLC's whole amount to the buyer's enclave, the pot less the fee to
 /// the buyer's own address, and the fee out.
 #[wasm_bindgen(js_name = swapBuildClaim)]
 pub fn swap_build_claim(recipe: JsValue) -> Result<String, Error> {
     let r: ClaimRecipe = serde_wasm_bindgen::from_value(recipe)?;
     let tx = se::claim_tx(
-        outpoint(&r.escrow_txid, r.escrow_vout)?,
-        &r.escrow.terms()?,
+        outpoint(&r.htlc_txid, r.htlc_vout)?,
+        &r.htlc.terms()?,
         spk(&r.buyer_enclave_spk, "buyerEnclaveSpk")?,
         outpoint(&r.pot_txid, r.pot_vout)?,
         &r.pot.terms()?,
@@ -202,38 +202,78 @@ pub fn swap_build_claim(recipe: JsValue) -> Result<String, Error> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SpentJson {
+    script_pubkey: String,
+    asset: String,
+    value: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FinishRecipe {
     tx: String,
-    escrow: EscrowTermsJson,
+    htlc: HtlcTermsJson,
     pot: PotTermsJson,
+    /// The HTLC's output and the pot's output as read from the chain, in that order.
+    spent: Vec<SpentJson>,
+    buyer_enclave_spk: String,
+    /// The chain's genesis block hash (display hex).
+    genesis_hash: String,
+    /// The later of the wallet's clock and the chain's median time past.
+    now: u32,
     secret: String,
     policy_sig: String,
-    buyer_sig_escrow: String,
+    buyer_sig_htlc: String,
     buyer_sig_pot: String,
 }
 
 /// Completes a claim from [`swap_build_claim`] with the policy signature, the
-/// buyer's two signatures and the secret. Refuses a secret that does not hash
-/// to the escrow's `H`.
+/// buyer's two signatures and the secret. Before it places the secret it
+/// refuses a claim at or after the cut-off, a secret of another hash, spent
+/// coins that are not the HTLC and pot the terms build, a claim that does not
+/// pay the HTLC's whole amount to the buyer's enclave, and any signature that
+/// does not verify over the claim.
 #[wasm_bindgen(js_name = swapFinishClaim)]
 pub fn swap_finish_claim(recipe: JsValue) -> Result<String, Error> {
+    use std::str::FromStr;
     let r: FinishRecipe = serde_wasm_bindgen::from_value(recipe)?;
     let tx: elements::Transaction = elements::encode::deserialize(
         &Vec::<u8>::from_hex(&r.tx).map_err(|e| Error::Generic(format!("tx hex: {e}")))?,
     )
     .map_err(|e| Error::Generic(format!("tx decode: {e}")))?;
-    let et = r.escrow.terms()?;
     let sig = |s: &str, what: &str| {
         Vec::<u8>::from_hex(s).map_err(|e| Error::Generic(format!("{what}: {e}")))
     };
+    let spent = r
+        .spent
+        .iter()
+        .map(|o| {
+            Ok(elements::TxOut {
+                asset: elements::confidential::Asset::Explicit(asset(&o.asset, "spent asset")?),
+                value: elements::confidential::Value::Explicit(o.value),
+                nonce: elements::confidential::Nonce::Null,
+                script_pubkey: spk(&o.script_pubkey, "spent scriptPubkey")?,
+                witness: elements::TxOutWitness::default(),
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let (ht, pt) = (r.htlc.terms()?, r.pot.terms()?);
+    let enclave = spk(&r.buyer_enclave_spk, "buyerEnclaveSpk")?;
+    let check = se::ClaimCheck {
+        htlc: &ht,
+        pot: &pt,
+        spent: &spent,
+        buyer_enclave: &enclave,
+        genesis_hash: elements::BlockHash::from_str(&r.genesis_hash)
+            .map_err(|e| Error::Generic(format!("genesisHash: {e}")))?,
+        now: r.now,
+    };
     let done = se::finish_claim(
         tx,
-        &se::swap_escrow_tree(&et)?,
-        &se::fee_pot_tree(&r.pot.terms()?)?,
+        &check,
         &hex32(&r.secret, "secret")?,
-        &et.hash,
         &sig(&r.policy_sig, "policySig")?,
-        &sig(&r.buyer_sig_escrow, "buyerSigEscrow")?,
+        &sig(&r.buyer_sig_htlc, "buyerSigHtlc")?,
         &sig(&r.buyer_sig_pot, "buyerSigPot")?,
     )?;
     Ok(elements::encode::serialize_hex(&done))

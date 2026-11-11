@@ -299,13 +299,21 @@ Changes by file:
   non-spending signatures, `enclave_sighash()` + `decode_enclave_spend()` so a
   wallet recomputes the enclave sighash itself and never blind-signs) and the
   typed `OpenampClient` for the user / address / balance / transfer endpoints.
-- `src/swap_escrow.rs` (feature `openamp`): the swap escrow and fee pot through
+- `src/swap_htlc.rs` (feature `openamp`): the swap HTLC and fee pot through
   which a restricted asset trades for on-chain BTC. The scripts are openampd's,
-  checked byte for byte against the vectors its `tools/gen_escrow_vectors.py`
+  checked byte for byte against the vectors its `tools/gen_htlc_vectors.py`
   produces with the node's test framework (pinned in
-  `lwk_wollet/tests/data/escrow_vectors.json`). It also builds the buyer's
-  claim (the escrow and its pot together), completes its witness, and reads the
-  secret back out of a claim. Every lock is a time.
+  `lwk_wollet/tests/data/htlc_vectors.json`). It also builds the buyer's
+  claim (the HTLC and its pot together), completes its witness, and reads the
+  secret back out of a claim. Every lock is a time. A refund is keyless: the
+  coin is input 0 and output 0 pays it home, one refund per transaction, so no
+  refund output can also count for another covenant in the same transaction.
+  `finish_claim` places the secret only into a claim that will be valid: it
+  refuses at or after the cut-off (`T_seq` less an hour, judged by the later of
+  the clock and the chain's median time past), spent coins that are not the
+  HTLC and pot the terms build, a claim that does not pay the HTLC's whole
+  amount to the buyer's enclave, and any signature that does not verify over
+  the claim.
 - `src/ark/` (feature `ark`): what a wallet needs to hold a leaf of an Arca
   covenant tree. The scripts, the leaf record, its validation and the client's
   checks on a round are the Arca library's (`arca-covenant`), re-exported as
@@ -657,7 +665,7 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   `enclaveAddress`, `assetInfo`, `createTransfer`, `completeTransfer`) and
   the free functions `openampComputeAid`, `openampTaggedHash`,
   `enclaveSighash`, `decodeEnclaveSpend`.
-- `src/swap_escrow.rs`: `swapEscrowTree`, `swapFeePotTree`, `swapSecretHash`,
+- `src/swap_htlc.rs`: `swapHtlcTree`, `swapFeePotTree`, `swapSecretHash`,
   `swapClaimCutoffSeconds`, `swapBuildClaim`, `swapFinishClaim`,
   `swapExtractSecret`. The buyer signs each claim input with
   `openampSignSighash` over the digest `enclaveSighash` recomputes, and takes its
