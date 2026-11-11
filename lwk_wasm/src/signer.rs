@@ -473,10 +473,14 @@ impl Signer {
     ///
     /// This surface can NEVER authorize an enclave spend: it has no raw-digest
     /// mode, and the tagged hash domain-separates it from any transfer sighash.
+    /// It refuses every other `openamp-` tag (`check_site_tag`): openampd acts
+    /// on those (a co-sign request, a trade's expiry), and a site must not be
+    /// able to obtain one.
     #[wasm_bindgen(js_name = openampSignTagged)]
     pub fn openamp_sign_tagged(&self, tag: &str, message_hex: &str) -> Result<String, Error> {
         use lwk_wollet::bitcoin::secp256k1::{Message, Secp256k1};
         use lwk_wollet::elements::hex::{FromHex, ToHex};
+        lwk_wollet::openamp::check_site_tag(tag)?;
         let message = Vec::<u8>::from_hex(message_hex)
             .map_err(|e| Error::Generic(format!("invalid message hex: {e}")))?;
         let digest = lwk_wollet::tagged_hash(tag, &message);
