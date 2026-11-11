@@ -102,9 +102,9 @@ pub struct FeePotTerms {
     pub buyer: XOnlyPublicKey,
     /// The HTLC's `T_seq`.
     pub t_seq: u32,
-    /// The seller's payout address: witness version 0 or 1 ...
+    /// The seller's payout address: witness version 1 ...
     pub seller_version: u8,
-    /// ... and program (20 or 32 bytes for v0, 32 for v1).
+    /// ... and its 32-byte program.
     pub seller_program: Vec<u8>,
     /// The fee asset the pot holds.
     pub fee_asset: AssetId,
@@ -270,14 +270,13 @@ pub fn fee_pot_tree(t: &FeePotTerms) -> Result<SwapTree, Error> {
             t.t_seq
         )));
     }
-    let ok = match t.seller_version {
-        0 => t.seller_program.len() == 20 || t.seller_program.len() == 32,
-        1 => t.seller_program.len() == 32,
-        _ => false,
-    };
-    if !ok {
+    // A v1 program only, as the HTLC refund and every SeqDEX credit: a v0
+    // payout can be a staking controller's P2WPKH, which a split pool's claim
+    // counts as its own payment, so a stranger could take a delegator's share
+    // with the pot's refund (proof review PV5, P1).
+    if t.seller_version != 1 || t.seller_program.len() != 32 {
         return Err(Error::Generic(
-            "the pot's payout must be a v0 or v1 witness program".into(),
+            "the pot's payout must be a v1 (32-byte) witness program".into(),
         ));
     }
     if t.value == 0 {
@@ -627,7 +626,7 @@ mod tests {
             };
             check(name, &swap_htlc_tree(&t).unwrap(), v);
         }
-        for name in ["pot_v0", "pot_v1"] {
+        for name in ["pot_v1", "pot_v1_b"] {
             let v = &vs[name];
             let t = FeePotTerms {
                 hash: h32(&v.hash),
@@ -663,8 +662,8 @@ mod tests {
             hash: t.hash,
             buyer: t.buyer,
             t_seq: t.t_seq,
-            seller_version: 0,
-            seller_program: vec![6u8; 20],
+            seller_version: 1,
+            seller_program: vec![6u8; 32],
             fee_asset: AssetId::from_slice(&[0x22; 32]).unwrap(),
             value: 20_000,
         }
@@ -685,6 +684,13 @@ mod tests {
         let mut p = pot_terms();
         p.t_seq = 1;
         assert!(fee_pot_tree(&p).is_err());
+        // Never a v0 payout, of either length (P1).
+        for len in [20, 32] {
+            let mut p = pot_terms();
+            p.seller_version = 0;
+            p.seller_program = vec![6u8; len];
+            assert!(fee_pot_tree(&p).is_err(), "a v0 payout of {len} bytes");
+        }
     }
 
     // The vectors' buyer and policy keys are the x-only keys of these secrets
