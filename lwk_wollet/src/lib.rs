@@ -116,6 +116,8 @@ mod pset_create;
 pub mod adaptor;
 #[cfg(feature = "openamp")]
 pub mod openamp;
+#[cfg(feature = "openamp")]
+pub mod swap_htlc;
 #[cfg(feature = "registry")]
 pub mod registry;
 #[cfg(feature = "sequentia")]

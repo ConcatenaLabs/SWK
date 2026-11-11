@@ -299,6 +299,21 @@ Changes by file:
   non-spending signatures, `enclave_sighash()` + `decode_enclave_spend()` so a
   wallet recomputes the enclave sighash itself and never blind-signs) and the
   typed `OpenampClient` for the user / address / balance / transfer endpoints.
+- `src/swap_htlc.rs` (feature `openamp`): the swap HTLC and fee pot through
+  which a restricted asset trades for on-chain BTC. The scripts are openampd's,
+  checked byte for byte against the vectors its `tools/gen_htlc_vectors.py`
+  produces with the node's test framework (pinned in
+  `lwk_wollet/tests/data/htlc_vectors.json`). It also builds the buyer's
+  claim (the HTLC and its pot together), completes its witness, and reads the
+  secret back out of a claim. Every lock is a time. A refund is keyless: the
+  coin is input 0 and output 0 pays it home, one refund per transaction, so no
+  refund output can also count for another covenant in the same transaction.
+  `finish_claim` places the secret only into a claim that will be valid: it
+  refuses at or after the cut-off (`T_seq` less an hour, judged by the later of
+  the clock and the chain's median time past), spent coins that are not the
+  HTLC and pot the terms build, a claim that does not pay the HTLC's whole
+  amount to the buyer's enclave, and any signature that does not verify over
+  the claim.
 - `src/ark/` (feature `ark`): what a wallet needs to hold a leaf of an Arca
   covenant tree. The scripts, the leaf record, its validation and the client's
   checks on a round are the Arca library's (`arca-covenant`), re-exported as
@@ -650,6 +665,11 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   `enclaveAddress`, `assetInfo`, `createTransfer`, `completeTransfer`) and
   the free functions `openampComputeAid`, `openampTaggedHash`,
   `enclaveSighash`, `decodeEnclaveSpend`.
+- `src/swap_htlc.rs`: `swapHtlcTree`, `swapFeePotTree`, `swapSecretHash`,
+  `swapClaimCutoffSeconds`, `swapBuildClaim`, `swapFinishClaim`,
+  `swapExtractSecret`. The buyer signs each claim input with
+  `openampSignSighash` over the digest `enclaveSighash` recomputes, and takes its
+  secret from `Signer.swapSecret`.
 - `src/adaptor.rs`: `adaptorSign`, `adaptorVerify`, `adaptorComplete`,
   `adaptorExtract`.
 
@@ -667,7 +687,7 @@ purposes (BIP44 `44'`, BIP49 `49'`, BIP84 `84'`, BIP86 `86'`, AMP2 `87'`):
 |---|---|
 | `m/2/0` | The staking key: stake bonding and unbonding, staking-pool delegation (with the `P2WPKH` coin that authorises a record), and messages signed as the staker |
 | `m/3/0` | The SeqDEX HTLC key (`htlcKeypair`), and the cross-chain swap's Sequentia claim key in its legacy relative mode; the cross-chain swap's own keys are at `m/84'/1'/0'/2/0` (BTC refund), `/3/0` (Sequentia claim) and `/4/0` (BTC claim) |
-| `m/5/0` | The OpenAMP enclave key, which signs raw 32-byte digests (`openampSignSighash`) |
+| `m/5/0` | The OpenAMP enclave key, which signs raw 32-byte digests (`openampSignSighash`); the secret of a swap the wallet pays BTC for is a tagged hash of it and the swap's nonce (`swapSecret`) |
 | `m/6'/<account>'/c1'/c2'/c3'/c4'` | Arca leaf keys, one per leaf, from the leaf's owner nonce (`ark::keys`) |
 | `m/8383'/<coin>'/0'/...` | Contract keys (`lwk_contracts`): the keys a contract template names, `0/0` by default; `<coin>` is 1776 on mainnet and 1 elsewhere. The account and its default are the Simplex fork's, so a key made there signs here |
 

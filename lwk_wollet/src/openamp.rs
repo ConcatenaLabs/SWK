@@ -41,6 +41,22 @@ pub const TAG_CHALLENGE: &str = "openamp-challenge-v1";
 /// Tagged-hash tag for document e-signatures (spec 0.4(2)).
 pub const TAG_DOCUMENT: &str = "openamp-document-v1";
 
+/// Whether a generic tagged-message signer may sign under `tag` for a site.
+/// Every `openamp-` tag but the challenge and the document tags is refused:
+/// those name statements openampd itself acts on (`openamp-cosign-v1`, a
+/// sender's request for a co-sign; `openamp-dvp-v1`, a trade's expiry; and any
+/// later one), and a wallet makes them only in its own flows, never because a
+/// site asked (proof review PV5, T1).
+pub fn check_site_tag(tag: &str) -> Result<(), Error> {
+    let lower = tag.to_ascii_lowercase();
+    if lower.starts_with("openamp-") && tag != TAG_CHALLENGE && tag != TAG_DOCUMENT {
+        return Err(Error::Generic(format!(
+            "refusing to sign under the OpenAMP protocol tag \"{tag}\": only {TAG_CHALLENGE} and {TAG_DOCUMENT} are signed for a site"
+        )));
+    }
+    Ok(())
+}
+
 /// The BIP341 NUMS internal key of every enclave output (contract-v1 §4).
 pub const ENCLAVE_NUMS_HEX: &str =
     "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0";
@@ -834,6 +850,22 @@ mod tests {
     }
 
     // ---- SWK-T (c): tagged-hash vectors for both tags ------------------------
+    #[test]
+    fn a_site_cannot_get_an_openampd_authorisation() {
+        for tag in [
+            "openamp-cosign-v1",
+            "openamp-dvp-v1",
+            "OpenAMP-Cosign-v1",
+            "openamp-rotation-v1",
+            "openamp-next-v2",
+        ] {
+            assert!(check_site_tag(tag).is_err(), "{tag}");
+        }
+        for tag in [TAG_CHALLENGE, TAG_DOCUMENT, "example-app-v1"] {
+            assert!(check_site_tag(tag).is_ok(), "{tag}");
+        }
+    }
+
     #[test]
     fn tagged_hash_challenge_and_document_vectors() {
         // Challenge over a fixed UTF-8 string.
