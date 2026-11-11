@@ -314,6 +314,14 @@ Changes by file:
   HTLC and pot the terms build, a claim that does not pay the HTLC's whole
   amount to the buyer's enclave, and any signature that does not verify over
   the claim.
+- `src/gated_order.rs` (feature `openamp`): the gated order, a holder's resting
+  offer to sell a restricted asset on the chain: SeqDEX's fill covenant behind
+  the asset's policy key, and a keyless refund home after the expiry (input 0,
+  output 0 carrying the coin's whole value to the maker's enclave). The scripts
+  are openampd's, checked against the same vectors. A taker fills it as an
+  ordinary SeqDEX order with the gated `fill` leaf, pays the asset to its own
+  enclave, and hands the transaction to the policy server, which co-signs and
+  broadcasts it in one step.
 - `src/ark/` (feature `ark`): what a wallet needs to hold a leaf of an Arca
   covenant tree. The scripts, the leaf record, its validation and the client's
   checks on a round are the Arca library's (`arca-covenant`), re-exported as
@@ -669,7 +677,11 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
   `swapClaimCutoffSeconds`, `swapBuildClaim`, `swapFinishClaim`,
   `swapExtractSecret`. The buyer signs each claim input with
   `openampSignSighash` over the digest `enclaveSighash` recomputes, and takes its
-  secret from `Signer.swapSecret`.
+  secret from `Signer.swapSecret`. `gatedOrderTree` builds a gated order's tree for a
+  maker placing one or a taker filling one; the fill transaction itself is
+  `buildCovenantFillTx` with the gated `fill` leaf. A maker asks the policy
+  server for a co-sign with `openampSignTagged("openamp-cosign-v1", txid)`,
+  the txid's 32 bytes as displayed.
 - `src/adaptor.rs`: `adaptorSign`, `adaptorVerify`, `adaptorComplete`,
   `adaptorExtract`.
 
