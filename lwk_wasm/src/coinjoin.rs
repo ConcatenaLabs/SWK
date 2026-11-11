@@ -116,8 +116,8 @@ struct CoinjoinInputJson {
 pub fn coinjoin_sign_inputs(request: JsValue, network: &crate::Network) -> Result<String, Error> {
     let r: CoinjoinSignRequest = serde_wasm_bindgen::from_value(request)?;
     let signer = crate::Signer::new(&crate::Mnemonic::new(&r.mnemonic)?, network)?;
-    // BIP84 coin type: 1 on testnet/regtest, 1776 on mainnet (matches lwk_common::singlesig_desc).
-    let coin: u32 = if network.is_mainnet() { 1776 } else { 1 };
+    // The BIP84 account's coin type, as in lwk_common::singlesig_desc.
+    let coin: u32 = lwk_common::bip44_coin_type(network.is_mainnet());
 
     let mut inputs = Vec::with_capacity(r.inputs.len());
     for i in &r.inputs {

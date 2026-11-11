@@ -20,6 +20,33 @@ pub const SEQUENTIA_TESTNET_ADDRESS_PARAMS: AddressParams = AddressParams {
     blech_hrp: Hrp::parse_unchecked("tsqb"),
 };
 
+/// SEQUENTIA: address parameters for the Sequentia mainnet (`chain=sequentia`).
+/// base58 p2pkh 0 / p2sh 5 / blinded 12; bech32 `bc`; blech32 `sqb` (see
+/// Sequentia's chainparams.cpp). The unconfidential addresses are Bitcoin
+/// mainnet's, so a wallet's default `bc1` address is the same on both chains.
+pub const SEQUENTIA_MAINNET_ADDRESS_PARAMS: AddressParams = AddressParams {
+    p2pkh_prefix: 0,
+    p2sh_prefix: 5,
+    blinded_prefix: 12,
+    bech_hrp: Hrp::parse_unchecked("bc"),
+    blech_hrp: Hrp::parse_unchecked("sqb"),
+};
+
+/// The BIP44 coin type of the single-sig accounts, `m/<purpose>'/<coin>'/0'`.
+///
+/// Sequentia uses Bitcoin's coin type on each network: `0` on mainnet and `1`
+/// on every test network. A Sequentia wallet is also a Bitcoin wallet, and with
+/// Bitcoin's coin type one seed gives one default address that holds on both
+/// chains (`bc1...` on mainnet, `tb1...` on the testnets). Every derivation of a
+/// single-sig account key goes through this function.
+pub fn bip44_coin_type(is_mainnet: bool) -> u32 {
+    if is_mainnet {
+        0
+    } else {
+        1
+    }
+}
+
 const LIQUID_TESTNET_POLICY_ASSET: &AssetId = &AssetId::from_inner(sha256::Midstate([
     0x49, 0x9a, 0x81, 0x85, 0x45, 0xf6, 0xba, 0xe3, 0x9f, 0xc0, 0x3b, 0x63, 0x7f, 0x2a, 0x4e, 0x1e,
     0x64, 0xe5, 0x90, 0xca, 0xc1, 0xbc, 0x3a, 0x6f, 0x6d, 0x71, 0xaa, 0x44, 0x43, 0x65, 0x4c, 0x14,
