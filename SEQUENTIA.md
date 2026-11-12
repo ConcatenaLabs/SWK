@@ -237,6 +237,13 @@ Changes by file:
     accepted asset at a given rate, per Sequentia's open fee market (no
     privileged fee asset). Fee-rate units are the chosen asset's own units per
     vByte.
+  - Data outputs: `TxBuilder::add_data_output(data, asset)` adds
+    `OP_RETURN <data>` (at most 80 bytes, `MAX_DATA_OUTPUT_BYTES`) at value 0,
+    explicit, in the asset the caller names. Upstream LWK has no data output.
+    The kit gives the bytes no meaning. The output asks for no coin of its
+    asset, so naming an asset the transaction already moves (the asset sent,
+    or the fee asset) adds no input and no change; the policy asset is used
+    only when the caller names it.
   - RBF/CPFP rescue: `Wollet::bump_fee_of()`, `replace_tx_of()`, `cpfp_of()`,
     `cpfp_suggested_feerate()` build fee-bump/replacement/child transactions,
     any-asset-fee aware. Exercised live by `examples/rescue_test.rs`.
@@ -552,7 +559,7 @@ The fork is not published to npm; consumers build `pkg/` with `wasm-pack`.
 - `src/seqdex_htlc.rs`: `generateSwapSecret`, `htlcKeypair`,
   `buildSeqHtlcRedeemScript`, `buildSeqHtlcClaimTx`, `buildSeqHtlcRefundTx`.
 - `src/tx_builder.rs`: `feeAsset()` (any-asset fees), `addExplicitRecipient()`,
-  `addStakeOutput()`, `sequentiaStakeScript()`, `addRecordAuthorization()`,
+  `addDataOutput()`, `addStakeOutput()`, `sequentiaStakeScript()`, `addRecordAuthorization()`,
   `addDelegationOutput()`.
 - `src/wollet.rs`: explicit-UTXO and rescue (bump/replace/CPFP) bindings.
 - `src/network.rs`: `Network.regtestWithGenesis(policyAsset, genesisHash)`, a

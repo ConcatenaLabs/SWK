@@ -131,6 +131,16 @@ impl TxBuilder {
             .into()
     }
 
+    /// Add a data output: `OP_RETURN <data>`, value 0, explicit, in `asset`. `data` is at most
+    /// 80 bytes, the caller's own; the builder gives them no meaning. The output asks for no
+    /// coin of `asset`, so naming an asset the transaction already moves (the asset sent, or the
+    /// fee asset) adds no input and no change. A node's default policy relays one data output
+    /// per transaction.
+    #[wasm_bindgen(js_name = addDataOutput)]
+    pub fn add_data_output(self, data: &[u8], asset: &AssetId) -> Result<TxBuilder, Error> {
+        Ok(self.inner.add_data_output(data, (*asset).into())?.into())
+    }
+
     /// Add explicit recipient
     #[wasm_bindgen(js_name = addExplicitRecipient)]
     pub fn add_explicit_recipient(

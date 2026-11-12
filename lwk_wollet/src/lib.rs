@@ -186,7 +186,9 @@ pub use crate::tx_details::{TxDetails, TxOpt, TxOutDetails, TxsOpt};
 pub use crate::wollet::DirectoryIdHash;
 
 // Re-export store types from lwk_common
-pub use crate::tx_builder::{BuiltTx, TxBuilder, WolletTxBuilder};
+pub use crate::tx_builder::{
+    data_output_script, BuiltTx, TxBuilder, WolletTxBuilder, MAX_DATA_OUTPUT_BYTES,
+};
 #[cfg(feature = "sequentia")]
 pub use crate::sequentia_delegation::{
     build_delegation_create_tx, build_delegation_spend_tx, parse_delegation_script,
