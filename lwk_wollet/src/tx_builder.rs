@@ -181,6 +181,24 @@ pub(crate) fn add_input_inner(
     Ok(idx)
 }
 
+/// The most bytes [`TxBuilder::add_data_output`] carries: `OP_RETURN OP_PUSHDATA1 <len> <80 bytes>`
+/// is 83 bytes, a node's default data-carrier limit.
+pub const MAX_DATA_OUTPUT_BYTES: usize = 80;
+
+/// The script of a data output: `OP_RETURN` and one push of `data`.
+pub fn data_output_script(data: &[u8]) -> Result<Script, Error> {
+    if data.len() > MAX_DATA_OUTPUT_BYTES {
+        return Err(Error::Generic(format!(
+            "a data output carries at most {MAX_DATA_OUTPUT_BYTES} bytes, not {}",
+            data.len()
+        )));
+    }
+    Ok(elements::script::Builder::new()
+        .push_opcode(elements::opcodes::all::OP_RETURN)
+        .push_slice(data)
+        .into_script())
+}
+
 /// A transaction builder
 ///
 /// See [`WolletTxBuilder`] for usage from rust.
@@ -311,6 +329,27 @@ impl TxBuilder {
     pub fn add_burn(self, satoshi: u64, asset_id: AssetId) -> Result<Self, Error> {
         let rec = UnvalidatedRecipient::burn(asset_id.to_string(), satoshi);
         self.add_unvalidated_recipient(&rec)
+    }
+
+    /// Add a data output: `OP_RETURN <data>`, value 0, explicit, in `asset`.
+    ///
+    /// The builder gives the bytes no meaning; they are the caller's. `data` holds at most
+    /// [`MAX_DATA_OUTPUT_BYTES`] bytes, which keeps the script within a node's default
+    /// data-carrier limit of 83 bytes. A node's default policy relays at most one data output
+    /// per transaction.
+    ///
+    /// The output asks for no coin of `asset`: coin selection counts it as a recipient of 0, so
+    /// an asset the transaction already moves (the asset sent, or the fee asset) gains no input
+    /// and no change from it. Consensus accepts a zero-value output only when its script is
+    /// provably unspendable, which an `OP_RETURN` script is.
+    pub fn add_data_output(mut self, data: &[u8], asset: AssetId) -> Result<Self, Error> {
+        self.recipients.push(Recipient {
+            satoshi: 0,
+            script_pubkey: data_output_script(data)?,
+            blinding_pubkey: None,
+            asset,
+        });
+        Ok(self)
     }
 
     /// Add explicit output
@@ -1834,6 +1873,14 @@ impl<'a> WolletTxBuilder<'a> {
         })
     }
 
+    /// Wrapper of [`TxBuilder::add_data_output()`]
+    pub fn add_data_output(self, data: &[u8], asset: AssetId) -> Result<Self, Error> {
+        Ok(Self {
+            wollet: self.wollet,
+            inner: self.inner.add_data_output(data, asset)?,
+        })
+    }
+
     /// Wrapper of [`TxBuilder::add_explicit_recipient()`]
     pub fn add_explicit_recipient(
         self,
@@ -2067,5 +2114,206 @@ mod tests {
 
         assert_eq!(update.last_unused.external, 7);
         assert_eq!(update.last_unused.internal, 11);
+    }
+}
+
+#[cfg(all(test, feature = "sequentia"))]
+mod data_output_tests {
+    use std::sync::Arc;
+
+    use elements::bitcoin::bip32::ChildNumber;
+    use elements::confidential;
+    use elements::hashes::Hash;
+    use elements::{AssetId, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
+
+    use super::{data_output_script, TxBuilder, MAX_DATA_OUTPUT_BYTES};
+    use crate::clients::LastUnused;
+    use crate::descriptor::Chain;
+    use crate::update::{default_blockheader, DownloadTxResult, Update};
+    use crate::{Wollet, WolletBuilder, WolletDescriptor};
+
+    const DESC: &str = "ct(slip77(ac53739ddde9fdf6bba3dbc51e989b09aa8c9cdce7b7d7eddd49cec86ddf71f7),elwpkh([93970d14/84'/1'/0']tpubDC3BrFCCjXq4jAceV8k6UACxDDJCFb1eb7R7BiKYUGZdNagEhNfJoYtUrRdci9JFs1meiGGModvmNm8PrqkrEjJ6mpt6gA1DRNU8vu7GqXH/<0;1>/*))#u0y4axgs";
+
+    fn asset(b: u8) -> AssetId {
+        AssetId::from_slice(&[b; 32]).unwrap()
+    }
+    const SENT: u8 = 0x11; // the asset the transaction sends
+    const FEE: u8 = 0x22; // the asset that pays the fee
+    const ELSE: u8 = 0x33; // an asset the wallet does not hold
+
+    fn wollet() -> Wollet {
+        let desc: WolletDescriptor = DESC.parse().unwrap();
+        let mut w = WolletBuilder::new(crate::Network::default_regtest(), desc)
+            .with_stores(Arc::new(lwk_common::MemoryStore::default()))
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut scripts = vec![];
+        for i in 0..3 {
+            let child = ChildNumber::from_normal_idx(i).unwrap();
+            let r = w.address(Some(i)).unwrap().address().script_pubkey();
+            let c = w.change(Some(i)).unwrap().address().script_pubkey();
+            scripts.push((Chain::External, child, r, None));
+            scripts.push((Chain::Internal, child, c, None));
+        }
+        w.apply_update(Update {
+            version: 4,
+            wollet_status: w.status(),
+            new_txs: DownloadTxResult::default(),
+            txid_height_new: vec![],
+            txid_height_delete: vec![],
+            timestamps: vec![],
+            scripts_with_blinding_pubkey: scripts,
+            tip: default_blockheader(),
+            unspent: vec![],
+            last_unused: LastUnused::default(),
+        })
+        .unwrap();
+        // Explicit coins of the sent asset and of the fee asset; none of the policy asset.
+        for (i, a, salt) in [(0u32, SENT, 1u8), (1, FEE, 2)] {
+            let addr = w.address(Some(i)).unwrap().address().clone();
+            let tx = Transaction {
+                version: 2,
+                lock_time: elements::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::new(Txid::from_byte_array([salt; 32]), 0),
+                    ..Default::default()
+                }],
+                output: vec![TxOut {
+                    asset: confidential::Asset::Explicit(asset(a)),
+                    value: confidential::Value::Explicit(100_000),
+                    nonce: confidential::Nonce::Null,
+                    script_pubkey: addr.script_pubkey(),
+                    witness: Default::default(),
+                }],
+            };
+            w.apply_transaction(tx).unwrap();
+        }
+        w
+    }
+
+    /// A send of 1,000 of the sent asset, the fee in the fee asset, plus a data output.
+    fn build(
+        w: &Wollet,
+        data: &[u8],
+        data_asset: AssetId,
+    ) -> elements::pset::PartiallySignedTransaction {
+        let to = w.address(Some(2)).unwrap().address().to_unconfidential();
+        TxBuilder::new(w.network())
+            .add_explicit_recipient(&to, 1_000, asset(SENT))
+            .unwrap()
+            .add_data_output(data, data_asset)
+            .unwrap()
+            .fee_asset(asset(FEE), 100_000_000)
+            .fee_rate(Some(100.0))
+            .finish(w)
+            .unwrap()
+    }
+
+    fn data_outputs(
+        pset: &elements::pset::PartiallySignedTransaction,
+    ) -> Vec<&elements::pset::Output> {
+        pset.outputs()
+            .iter()
+            .filter(|o| o.script_pubkey.as_bytes().first() == Some(&0x6a))
+            .collect()
+    }
+
+    fn input_assets(w: &Wollet, pset: &elements::pset::PartiallySignedTransaction) -> Vec<AssetId> {
+        let utxos = w.utxos_map().unwrap();
+        pset.inputs()
+            .iter()
+            .map(|i| {
+                utxos[&OutPoint::new(i.previous_txid, i.previous_output_index)]
+                    .unblinded
+                    .asset
+            })
+            .collect()
+    }
+
+    #[test]
+    fn data_output_script_bounds() {
+        let s = data_output_script(&[7u8; 59]).unwrap();
+        assert_eq!(s.len(), 61);
+        assert_eq!(&s.as_bytes()[..2], &[0x6a, 59]);
+        assert!(s.is_provably_unspendable());
+        // 80 bytes is the most: OP_RETURN OP_PUSHDATA1 80 <80 bytes> = 83 bytes.
+        let s = data_output_script(&[7u8; MAX_DATA_OUTPUT_BYTES]).unwrap();
+        assert_eq!(s.len(), 83);
+        assert_eq!(&s.as_bytes()[..3], &[0x6a, 0x4c, 80]);
+        let e = data_output_script(&[7u8; MAX_DATA_OUTPUT_BYTES + 1]).unwrap_err();
+        assert!(e.to_string().contains("at most 80 bytes, not 81"), "{e}");
+        assert_eq!(
+            data_output_script(&[]).unwrap(),
+            Script::from(vec![0x6a, 0x00])
+        );
+    }
+
+    #[test]
+    fn data_output_in_the_fee_asset() {
+        let w = wollet();
+        let note = [0xabu8; 59];
+        let pset = build(&w, &note, asset(FEE));
+        let data = data_outputs(&pset);
+        assert_eq!(data.len(), 1);
+        let o = data[0];
+        assert_eq!(o.script_pubkey, data_output_script(&note).unwrap());
+        assert_eq!(o.amount, Some(0));
+        assert_eq!(o.asset, Some(asset(FEE)));
+        assert!(o.blinding_key.is_none());
+        // One coin of each asset the transaction moves; the policy asset is not touched.
+        let mut ins = input_assets(&w, &pset);
+        ins.sort();
+        assert_eq!(ins, vec![asset(SENT), asset(FEE)]);
+        let policy = *w.network().policy_asset();
+        assert!(pset.outputs().iter().all(|o| o.asset != Some(policy)));
+    }
+
+    #[test]
+    fn data_output_asks_for_no_coin_of_its_asset() {
+        let w = wollet();
+        // In the sent asset: the same inputs, and the sent asset's change is unchanged.
+        let with = build(&w, &[1u8; 59], asset(SENT));
+        let without = {
+            let to = w.address(Some(2)).unwrap().address().to_unconfidential();
+            TxBuilder::new(w.network())
+                .add_explicit_recipient(&to, 1_000, asset(SENT))
+                .unwrap()
+                .fee_asset(asset(FEE), 100_000_000)
+                .fee_rate(Some(100.0))
+                .finish(&w)
+                .unwrap()
+        };
+        assert_eq!(with.inputs().len(), without.inputs().len());
+        let change = |p: &elements::pset::PartiallySignedTransaction| -> Vec<u64> {
+            p.outputs()
+                .iter()
+                .filter(|o| {
+                    o.asset == Some(asset(SENT)) && !o.script_pubkey.is_provably_unspendable()
+                })
+                .map(|o| o.amount.unwrap())
+                .collect()
+        };
+        assert_eq!(change(&with), change(&without));
+        assert_eq!(data_outputs(&with)[0].asset, Some(asset(SENT)));
+        // In an asset the wallet does not hold: still no input of it, and no change of it.
+        let other = build(&w, &[2u8; 59], asset(ELSE));
+        assert!(!input_assets(&w, &other).contains(&asset(ELSE)));
+        let of_else: Vec<_> = other
+            .outputs()
+            .iter()
+            .filter(|o| o.asset == Some(asset(ELSE)))
+            .collect();
+        assert_eq!(of_else.len(), 1);
+        assert_eq!(of_else[0].amount, Some(0));
+    }
+
+    #[test]
+    fn data_output_refuses_more_than_80_bytes() {
+        let w = wollet();
+        let e = TxBuilder::new(w.network())
+            .add_data_output(&[0u8; 81], asset(FEE))
+            .unwrap_err();
+        assert!(e.to_string().contains("at most 80 bytes"), "{e}");
     }
 }

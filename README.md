@@ -179,6 +179,7 @@ lwk_wollet = { features = ["btc-async"] }      # wasm / async apps
 `Network.sequentiaTestnet()`, `Network.isSequentia()`, the dual-chain
 `BtcWallet`, the `xchain*` helpers for cross-chain swaps,
 `TxBuilder.feeAsset()` / `addStakeOutput()` / `addExplicitRecipient()` /
+`addDataOutput()` /
 `addRecordAuthorization()`, `Signer.stakerPublicKey()`, `buildCovenantFillTx()`,
 `buildDelegationCreateTx()` / `buildDelegationSpendTx()`, `buildUnbondTx()` /
 `buildUnbondClaimTx()`, `coinjoinSignInputs()`, the `Openamp` client, the
