@@ -2,6 +2,7 @@ on:
   push:
     branches:
       - master
+      - sequentia
     tags:
       - 'bindings_*'
   pull_request: {}
