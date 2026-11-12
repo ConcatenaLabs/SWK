@@ -19,9 +19,9 @@ Node and consensus conventions live in the
 **The default and development branch is `sequentia`.** There is no `origin/master`; the local
 `master` is a frozen pointer at the upstream fork point.
 
-The GitHub workflows trigger on pushes to `master` and on pull requests. Since `master` is frozen,
-**a direct push to `sequentia` runs no CI at all — only a PR does.** That is a concrete reason to
-route every change through a PR, beyond the recorded-reasoning one.
+The GitHub workflows run on pull requests and on pushes to `sequentia` (and to the frozen
+`master`). A pull request is judged against the default branch's own results, which the Actions
+tab shows for every merge.
 
 ## Build and test
 

@@ -2,6 +2,7 @@ on:
   push:
     branches:
       - master
+      - sequentia
   pull_request: {}
 
 name: Build bindings
