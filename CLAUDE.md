@@ -20,9 +20,8 @@ Node and consensus conventions live in the
 `master` is a frozen pointer at the upstream fork point.
 
 The GitHub workflows run on pull requests and on pushes to `sequentia` (and to the frozen
-`master`), so each merge shows the default branch's own state in the Actions tab. The library tests
-on the default branch carry known failures (#54, #65); a pull request is judged against the same
-failures on its base.
+`master`). A pull request is judged against the default branch's own results, which the Actions
+tab shows for every merge.
 
 ## Build and test
 
