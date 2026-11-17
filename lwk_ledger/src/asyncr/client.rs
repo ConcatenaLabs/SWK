@@ -36,7 +36,7 @@ pub struct LiquidClient<T: Transport> {
     // Should we move to a more generic Mutex<HashMap<DerivationPath, Xpub>> ? Maybe but it can cause deadlocks, so let's start
     /// m/84h/1h/0h
     xpub_wpkh_testnet: OnceLock<Xpub>,
-    /// m/84h/1776h/0h
+    /// m/84h/0h/0h
     xpub_wpkh_mainnet: OnceLock<Xpub>,
 }
 
@@ -154,8 +154,8 @@ impl<T: Transport> LiquidClient<T> {
         match path.to_string().as_str() {
             // m/84h/1h/0h (testnet)
             "84'/1'/0'" => self.xpub_wpkh_testnet.get().copied(),
-            // m/84h/1776h/0h (mainnet)
-            "84'/1776'/0'" => self.xpub_wpkh_mainnet.get().copied(),
+            // m/84h/0h/0h (mainnet)
+            "84'/0'/0'" => self.xpub_wpkh_mainnet.get().copied(),
             _ => None,
         }
     }
@@ -166,8 +166,8 @@ impl<T: Transport> LiquidClient<T> {
             "84'/1'/0'" => {
                 let _ = self.xpub_wpkh_testnet.set(xpub);
             }
-            // m/84h/1776h/0h (mainnet)
-            "84'/1776'/0'" => {
+            // m/84h/0h/0h (mainnet)
+            "84'/0'/0'" => {
                 let _ = self.xpub_wpkh_mainnet.set(xpub);
             }
             _ => {}
@@ -255,11 +255,7 @@ impl<T: Transport> LiquidClient<T> {
             LiquidClientError::ClientError(format!("{message} {e}"))
         };
         let version = Version::V2;
-        let coin_type = if self.network == lwk_common::Network::Liquid {
-            1776
-        } else {
-            1
-        };
+        let coin_type = lwk_common::bip44_coin_type(self.network.is_mainnet());
         let purpose = match variant {
             lwk_common::Singlesig::Wpkh => 84,
             lwk_common::Singlesig::ShWpkh => 49,
@@ -679,7 +675,7 @@ impl<T: Transport> LiquidClient<T> {
         let fingerprint = self.get_master_fingerprint().await?;
 
         let path: DerivationPath = match self.network {
-            lwk_common::Network::Liquid => "84'/1776'/0'",
+            lwk_common::Network::Liquid => "84'/0'/0'",
             _ => "84'/1'/0'",
         }
         .parse()

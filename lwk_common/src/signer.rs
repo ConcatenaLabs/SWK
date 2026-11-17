@@ -47,7 +47,7 @@ pub trait Signer {
 
     /// Return keyorigin and xpub, like "[73c5da0a/84h/1h/0h]tpub..."
     fn keyorigin_xpub(&self, bip: Bip, is_mainnet: bool) -> Result<String, Self::Error> {
-        let coin_type = if is_mainnet { 1776 } else { 1 };
+        let coin_type = crate::bip44_coin_type(is_mainnet);
         let purpose = match bip {
             Bip::Bip84 => 84,
             Bip::Bip49 => 49,

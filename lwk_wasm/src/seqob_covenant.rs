@@ -127,10 +127,10 @@ fn hexbytes(s: &str, what: &str) -> Result<Vec<u8>, Error> {
 pub fn build_covenant_fill_tx_js(recipe: JsValue, network: &Network) -> Result<JsValue, Error> {
     let r: CovenantFillRecipeJson = serde_wasm_bindgen::from_value(recipe)?;
 
-    // Re-derive the taker signing keys from the seed. BIP84 coin type: 1 on
-    // testnet/regtest, 1776 on mainnet (matches lwk_common::singlesig_desc).
+    // Re-derive the taker signing keys from the seed, at the BIP84 account's
+    // coin type as in lwk_common::singlesig_desc.
     let signer = crate::Signer::new(&crate::Mnemonic::new(&r.mnemonic)?, network)?;
-    let coin: u32 = if network.is_mainnet() { 1776 } else { 1 };
+    let coin: u32 = lwk_common::bip44_coin_type(network.is_mainnet());
 
     let mut taker_inputs = Vec::with_capacity(r.taker_funding_utxos.len());
     for u in &r.taker_funding_utxos {
@@ -262,7 +262,7 @@ pub fn build_covenant_refund_tx_js(recipe: JsValue, network: &Network) -> Result
     let r: CovenantRefundRecipeJson = serde_wasm_bindgen::from_value(recipe)?;
 
     let signer = crate::Signer::new(&crate::Mnemonic::new(&r.mnemonic)?, network)?;
-    let coin: u32 = if network.is_mainnet() { 1776 } else { 1 };
+    let coin: u32 = lwk_common::bip44_coin_type(network.is_mainnet());
 
     // The maker key the REFUND leaf commits to. `makerKeyPath` is the full BIP32
     // path (e.g. `m/86'/1'/0'/0/0`); its x-only pubkey must equal the leaf's
@@ -366,7 +366,7 @@ impl Signer {
         index: u32,
     ) -> Result<JsValue, Error> {
         use lwk_wollet::bitcoin::secp256k1::Secp256k1;
-        let coin: u32 = if network.is_mainnet() { 1776 } else { 1 };
+        let coin: u32 = lwk_common::bip44_coin_type(network.is_mainnet());
         let path = bip32::DerivationPath::from(vec![
             bip32::ChildNumber::Hardened { index: 86 },
             bip32::ChildNumber::Hardened { index: coin },

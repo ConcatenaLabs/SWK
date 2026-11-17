@@ -51,9 +51,9 @@
 >
 > **Not built (still open)**
 > - Phase 5 entirely: hardware-signer BTC routing, CPFP rescue for the BTC
->   side, mainnet wiring (there is no Sequentia mainnet; the inherited Liquid
->   coin_type `1776` in `lwk_common` (`signer.rs`, `descriptor.rs`) is still
->   unfixed, though `ChainAddressParams::mainnet()` already uses coin_type 0).
+>   side, mainnet wiring (there is no Sequentia mainnet). The mainnet coin type
+>   is already Bitcoin's 0 on both sides: `lwk_common::bip44_coin_type` for the
+>   Sequentia accounts and `ChainAddressParams::mainnet()` for the Bitcoin one.
 > - The full claim/refund golden-vector suite regenerated from a running
 >   daemon (requirement 6) beyond the redeemScript and determinism parity
 >   tests that do exist.
@@ -111,10 +111,11 @@ both testnet and mainnet:
 Consequences for the implementation:
 - `coin_type` selects which account xprv is derived (`m/84'/{coin_type}'/0'`); on each network
   both chains use Bitcoin's coin_type, so there is ONE account and ONE address.
-- The inherited Liquid coin_type `1776` in `lwk_common` (`keyorigin_xpub` mainnet branch) is
-  L-BTC's SLIP-44 value, not Sequentia's. It MUST be set to `0` for Sequentia mainnet so the
-  mainnet address stays shared with Bitcoin. Do not introduce a "two namespaces on mainnet"
-  branch; there is one namespace by design.
+- Every Sequentia single-sig account takes its coin type from `lwk_common::bip44_coin_type`:
+  `0` on mainnet, `1` elsewhere. Liquid's SLIP-44 value `1776`, which the kit inherited from
+  LWK, is never used for these accounts, because it would give a mainnet Sequentia address
+  different from the Bitcoin one. Do not introduce a "two namespaces on mainnet" branch; there
+  is one namespace by design.
 - The default address is unconfidential and cross-network. It cycles whenever a transaction is
   received on either chain (to discourage reuse), but all prior addresses stay valid and are
   always scanned.
@@ -250,8 +251,7 @@ fixture gate (always runnable) plus a separately-tracked live-testnet acceptance
   spend-tx parity vs the live daemon is green; the old `xswap.js` path is removed only after this
   passes.
 - Phase 5 -- Hardening and mainnet. Hardware-signer (Jade/Ledger) BTC signing via `AnySigner`
-  routing; CPFP rescue; mainnet support (coin_type 0, HRP `bc`, shared `bc1...`); fix the
-  inherited `1776` so it is never used. Exit: a hardware-signed BTC send works; mainnet
+  routing; CPFP rescue; mainnet support (coin_type 0, HRP `bc`, shared `bc1...`). Exit: a hardware-signed BTC send works; mainnet
   derivation produces the shared `bc1...` address; stuck-send rescue demonstrated on testnet4.
 
 ## Migration safety
@@ -273,7 +273,7 @@ check that no `m/3/0`-proposed swaps are in flight.
 ## Closed decisions (recorded)
 
 - Single shared address across both networks: mandatory; Sequentia mirrors Bitcoin's
-  `(coin_type, HRP)` per network. The inherited Liquid `1776` is a bug to fix.
+  `(coin_type, HRP)` per network; Liquid's coin type `1776` is not used.
 - SEQ-leg claim fee: estimated from the any-asset fee market, not hardcoded.
 - BTC esplora: same-origin `/testnet4/api`, no fallback.
 - Confidential addresses: opt-in, Sequentia-only; default is the shared unconfidential address.

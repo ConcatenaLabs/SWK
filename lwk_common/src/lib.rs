@@ -43,7 +43,10 @@ pub use crate::encrypt::{
 pub use crate::error::Error;
 pub use crate::keyorigin_xpub::{keyorigin_xpub_from_str, InvalidKeyOriginXpub};
 pub use crate::model::*;
-pub use crate::network::{ElementsParamsBuilder, Network};
+pub use crate::network::{
+    bip44_coin_type, ElementsParamsBuilder, Network, SEQUENTIA_MAINNET_ADDRESS_PARAMS,
+    SEQUENTIA_TESTNET_ADDRESS_PARAMS,
+};
 pub use crate::precision::Precision;
 pub use crate::pset::{get_genesis_hash, set_genesis_hash};
 pub use crate::qr::*;

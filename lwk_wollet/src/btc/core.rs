@@ -423,6 +423,43 @@ mod tests {
         assert_eq!(btc0, lwk0, "Bitcoin and Sequentia-unconfidential addresses must match");
     }
 
+    // The same property on mainnet: one seed, one `bc1` address on both chains.
+    // The Sequentia side derives through `singlesig_desc` with a mainnet signer
+    // and renders with Sequentia mainnet's address parameters; the Bitcoin side
+    // is the plain BIP84 account at coin type 0. Receive and change, several
+    // indexes, so a coin type other than Bitcoin's cannot pass.
+    #[test]
+    fn bc1_matches_lwk_unconfidential_on_mainnet() {
+        let params = ChainAddressParams::mainnet();
+
+        let sw = SwSigner::new(MNEMONIC, true).unwrap();
+        let desc_str = singlesig_desc(&sw, Singlesig::Wpkh, DescriptorBlindingKey::Slip77).unwrap();
+        assert!(
+            desc_str.contains("/84h/0h/0h]xpub"),
+            "mainnet account must be m/84h/0h/0h, got {desc_str}"
+        );
+        let desc = crate::WolletDescriptor::from_str(&desc_str).unwrap();
+        let seq_params = &lwk_common::SEQUENTIA_MAINNET_ADDRESS_PARAMS;
+
+        for i in 0..5 {
+            let btc = address(&params, MNEMONIC, false, i).unwrap();
+            let seq = desc.address(i, seq_params).unwrap().to_unconfidential().to_string();
+            assert!(btc.starts_with("bc1q"), "expected a bc1 address, got {btc}");
+            assert_eq!(btc, seq, "receive {i}: Bitcoin and Sequentia mainnet addresses must match");
+
+            let btc = address(&params, MNEMONIC, true, i).unwrap();
+            let seq = desc.change(i, seq_params).unwrap().to_unconfidential().to_string();
+            assert_eq!(btc, seq, "change {i}: Bitcoin and Sequentia mainnet addresses must match");
+        }
+
+        // BIP84's published first receive address for this seed: the mainnet
+        // account is Bitcoin's, not a Sequentia-only one.
+        assert_eq!(
+            address(&params, MNEMONIC, false, 0).unwrap(),
+            "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+        );
+    }
+
     // Phase 1's parity property: the blocking and async drivers both call this
     // `build_signed_tx`, so as long as it is deterministic for a given input it is
     // byte-identical across transports. Construct a fixed UTXO set and confirm the

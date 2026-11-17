@@ -1901,11 +1901,13 @@ mod tests {
 
     #[test]
     fn fixed_addresses_test() {
+        // The mainnet (Liquid) rows derive at Bitcoin's coin type 0
+        // (`lwk_common::bip44_coin_type`); the others at coin type 1.
         let expected = [
-            "lq1qqvxk052kf3qtkxmrakx50a9gc3smqad2ync54hzntjt980kfej9kkfe0247rp5h4yzmdftsahhw64uy8pzfe7cpg4fgykm7cv", //  network: Liquid variant: Wpkh blinding_variant: Slip77
-            "lq1qqtmf5e3g4ats3yexwdfn6kfhp9sl68kdl47g75k58rvw2w33zuarwfe0247rp5h4yzmdftsahhw64uy8pzfe7k9s63c7cku58", // network: Liquid variant: Wpkh blinding_variant: Elip151
-            "VJLCQwwG8s7qUGhpJkQpkf7wLoK785TcK2cPqka8675FeJB7NEHLto5MUJyhJURGJCbFHA6sb6rgTwbh", // network: Liquid variant: ShWpkh blinding_variant: Slip77
-            "VJLD3sfRNBrKyQkJp9KpLqSVtD9YWswXctqzdFhsctaDCwLoUcSato1DfspVSGMbk28avytesWFhiv37", // network: Liquid variant: ShWpkh blinding_variant: Elip151
+            "lq1qq00s84ydgaey97y50a8e8s9agtelqehlznant4qlqz63eemcws6knsxwhntv8572336achkx96l92vcwlygwyl7xv68eevt5y", //  network: Liquid variant: Wpkh blinding_variant: Slip77
+            "lq1qqf204tqek9qut40zt9w6d3732l9w39e8g05y84j9k8vde3n2k2wwesxwhntv8572336achkx96l92vcwlygwyvnhczyw08mqn", // network: Liquid variant: Wpkh blinding_variant: Elip151
+            "VJLBUbdCnwWSiyucAYs8bchcwY2zxoAZs7Avn3Lwq1dZMuauME18uT2sbr6QKcgaNArRxG8dzBPUB7yr", // network: Liquid variant: ShWpkh blinding_variant: Slip77
+            "VJLJzsYWTRXVATxRvwwEcLmJGDHZ2aAXBThvJmyRNsxTNUqCE2PnRJXGF27epNfRefoSVq1aVGqLLxRc", // network: Liquid variant: ShWpkh blinding_variant: Elip151
             "tlq1qq2xvpcvfup5j8zscjq05u2wxxjcyewk7979f3mmz5l7uw5pqmx6xf5xy50hsn6vhkm5euwt72x878eq6zxx2z58hd7zrsg9qn", // network: TestnetLiquid variant: Wpkh blinding_variant: Slip77
             "tlq1qqv74shw44vxlpdhtmwqc2zfr5365hm8p6rg8cjnu77w57000dmuc05xy50hsn6vhkm5euwt72x878eq6zxx2z4zm4jus26k72", // network: TestnetLiquid variant: Wpkh blinding_variant: Elip151 i:5
             "vjTwLVioiKrDJ7zZZn9iQQrxP6RPpcvpHBhzZrbdZKKVZE29FuXSnkXdKcxK3qD5t1rYsdxcm9KYRMji", // network: TestnetLiquid variant: ShWpkh blinding_variant: Slip77

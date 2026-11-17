@@ -226,7 +226,7 @@ impl JadeWebSocket {
         let mut paths = HashMap::new();
 
         for purpose in [49, 84, 87] {
-            for coin_type in [1, 1776] {
+            for coin_type in [false, true].map(lwk_common::bip44_coin_type) {
                 let derivation_path_str = format!("m/{purpose}h/{coin_type}h/0h");
                 let derivation_path = DerivationPath::from_str(&derivation_path_str)?;
                 let path = derivation_path_to_vec(&derivation_path);

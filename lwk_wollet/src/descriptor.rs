@@ -949,8 +949,9 @@ mod test {
 
             match network {
                 lwk_common::Network::Liquid => {
-                    assert_eq!(desc_str, "ct(slip77(9c8e4f05c7711a98c838be228bcb84924d4570ca53f35fa1c793e58841d47023),elwpkh([73c5da0a/84h/1776h/0h]xpub6CRFzUgHFDaiDAQFNX7VeV9JNPDRabq6NYSpzVZ8zW8ANUCiDdenkb1gBoEZuXNZb3wPc1SVcDXgD2ww5UBtTb8s8ArAbTkoRQ8qn34KgcY/<0;1>/*))#y8jljyxl","1");
-                    assert_eq!(abandon_dwid, "d41f-fe12-4da1-28d5-9449-5e49-d3f4-42ca", "1");
+                    // Mainnet accounts use Bitcoin's coin type 0, not Liquid's 1776.
+                    assert_eq!(desc_str, "ct(slip77(9c8e4f05c7711a98c838be228bcb84924d4570ca53f35fa1c793e58841d47023),elwpkh([73c5da0a/84h/0h/0h]xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4RHwCD3XyuvPEbvqAQY3rAPshWcMLoP2fMFMKHPJ4ZeZXYVUhLv1VMrjPC7PW6V/<0;1>/*))#t566ym3h","1");
+                    assert_eq!(abandon_dwid, "9740-b8bc-1a4a-0c32-e0a9-3967-234c-610b", "1");
                 }
                 lwk_common::Network::CustomElements(_) => {
                     assert_eq!(desc_str, "ct(slip77(9c8e4f05c7711a98c838be228bcb84924d4570ca53f35fa1c793e58841d47023),elwpkh([73c5da0a/84h/1h/0h]tpubDC8msFGeGuwnKG9Upg7DM2b4DaRqg3CUZa5g8v2SRQ6K4NSkxUgd7HsL2XVWbVm39yBA4LAxysQAm397zwQSQoQgewGiYZqrA9DsP4zbQ1M/<0;1>/*))#xte2lx9x","2");
@@ -1323,7 +1324,15 @@ fn test_elip_dwid() {
     let bip = Bip::Bip84;
     let signer = SwSigner::new(mnemonic, true).unwrap();
     let signer_test = SwSigner::new(mnemonic, false).unwrap();
-    let ko_xpub = signer.keyorigin_xpub(bip, true).unwrap();
+    // ELIP-152's published vectors use Liquid's mainnet account, m/84h/1776h/0h.
+    // This kit's mainnet accounts use Bitcoin's coin type 0
+    // (`lwk_common::bip44_coin_type`), so the vectors' key origin is derived
+    // here at the literal path to keep them reproducible.
+    let liquid_path = "84h/1776h/0h";
+    let liquid_xpub = signer
+        .derive_xpub(&format!("m/{liquid_path}").parse().unwrap())
+        .unwrap();
+    let ko_xpub = format!("[{}/{liquid_path}]{liquid_xpub}", signer.fingerprint());
     let ko_xpub_test = signer_test.keyorigin_xpub(bip, false).unwrap();
     let view = "3e129856c574c66d94023ac98b7f69aca9774d10aee4dc087f0c52a498687189";
     let view_151 = "9fc48763c2aa01aa7b26edb3c8e32f709e4a6b5a83d4379c85864c7e613c5d65";
