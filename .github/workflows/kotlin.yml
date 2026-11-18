@@ -30,6 +30,10 @@ jobs:
         with:
           targets: x86_64-linux-android, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
 
+      # The binding generators are built with the stable toolchain, not the
+      # project's pin (see the justfile).
+      - run: rustup toolchain install stable --profile minimal
+
       - run: brew install just
 
       - name: "Install NDK"

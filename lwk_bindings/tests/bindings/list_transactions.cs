@@ -18,25 +18,21 @@ class Program
         Mnemonic mnemonic = new Mnemonic("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about");
         Console.WriteLine(mnemonic);
 
-        ElectrumClient client = network.DefaultElectrumClient();
-
-        client.Ping();
-
         Signer signer = new Signer(mnemonic, network);
         WolletDescriptor desc = signer.WpkhSlip77Descriptor();
         Console.WriteLine(desc);
 
         Wollet wollet = new Wollet(network, desc, null);
 
-        Update update = client.FullScan(wollet)!;
-        wollet.ApplyUpdate(update);
-
+        // A wallet that has not scanned has no transactions. The default
+        // Electrum server of this network serves Liquid, whose blocks
+        // Sequentia's wire format cannot read, so nothing here goes online.
         WalletTx[] txList = wollet.Transactions();
 
         Console.WriteLine("Transactions {0}:", txList.Length);
 
-        foreach (WalletTx tx in txList) {
-            Console.WriteLine(tx.Txid());
+        if (txList.Length != 0) {
+            throw new Exception("a wallet that has not scanned lists no transactions");
         }
     }
 }

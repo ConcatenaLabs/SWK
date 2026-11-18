@@ -2043,7 +2043,9 @@ mod tests {
         let issuance = &issuances[0];
         assert_eq!(
             issuance.txid.to_string(),
-            "62ea5d0aa7c9f4339b16a6d8e6ff4437ffb244de658222841c74d335324e4219"
+            // the file is named by the transaction's Liquid txid: Sequentia's
+            // issuance carries a denomination byte, which the txid commits to
+            "e8ca4a91cbd392d5a2d4308b21e52c5b278686655608939f6d8c6e55c2947f63"
         );
         assert_eq!(issuance.vin, 0);
         assert_eq!(
