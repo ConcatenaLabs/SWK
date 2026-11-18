@@ -376,6 +376,47 @@ impl BtcChain {
         Ok(None)
     }
 
+    /// The first transaction of the best chain's blocks from `lo` to `hi` with an output
+    /// paying `script_pubkey` at least `min_sat`: what a seller looks for before it
+    /// refunds, since a payment in the lock's heights belongs to a buyer whose claim
+    /// may still come.
+    pub fn paid_to(
+        &self,
+        script_pubkey: &[u8],
+        min_sat: u64,
+        lo: u32,
+        hi: u32,
+    ) -> Result<Option<(String, u32)>, Error> {
+        let want = hex_encode(script_pubkey);
+        for h in lo.max(1)..=hi {
+            let b = self.rpc.call("getblock", json!([self.block_hash(h)?, 2]))?;
+            for tx in b.get("tx").and_then(Value::as_array).into_iter().flatten() {
+                let pays = tx
+                    .get("vout")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|o| {
+                        o.pointer("/scriptPubKey/hex").and_then(Value::as_str)
+                            == Some(want.as_str())
+                            && o.get("value")
+                                .and_then(Value::as_f64)
+                                .map(|v| (v * 1e8).round() as u64 >= min_sat)
+                                .unwrap_or(false)
+                    });
+                if pays {
+                    let id = tx
+                        .get("txid")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    return Ok(Some((id, h)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Whether the daemon's mempool holds the transaction (unconfirmed).
     pub fn pooled(&self, txid: &str) -> Result<bool, Error> {
         match self.rpc.call("getmempoolentry", json!([txid])) {

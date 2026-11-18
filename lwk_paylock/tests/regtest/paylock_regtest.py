@@ -340,6 +340,12 @@ class PayLockRegtest(LostSwapTest):
         j = self.wait_job(s, ["final"])
         self.record("path", "service", "final %.1f s after the payment's block: %s" % (time.time() - t0, j["note"]))
         self.assert_buyer_paid(s, j)
+        # The seller's wallet sees the buyer's payment in the lock's heights and does not refund.
+        to = self.nodes[SELLER].getaddressinfo(self.nodes[SELLER].getnewaddress())["scriptPubKey"]
+        r = self.pl("sign-refund", "--terms", s["tfile"], "--lock", s["lock"], "--key-file", s["skey"],
+                    "--to", to, "--fee", 5000, ok=False)
+        assert "does not refund" in r.get("error", ""), r
+        self.record("path", "seller's refund after a payment", r["error"])
         self.sync_tips(range(N))
 
     def case_unpaid(self):

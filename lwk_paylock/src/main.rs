@@ -15,7 +15,7 @@
 //! paylock sign-claim --terms T --lock TXID:VOUT --key-file F --to SPK --fee N [--top-fee N|auto]
 //! paylock complete   --terms T --lock TXID:VOUT --claim HEX --payment TXID [--send]
 //! paylock cancel     --payment-hex HEX --values V,V --to SPK --fee SAT
-//! paylock sign-refund --terms T --lock TXID:VOUT --key-file F --to SPK --fee N [--send]
+//! paylock sign-refund --terms T --lock TXID:VOUT --key-file F --to SPK --fee N [--send] [--despite-payment]
 //! paylock serve      --data DIR --listen HOST:PORT [--interval SECS]
 //! ```
 //!
@@ -45,7 +45,7 @@ fn parse(args: &[String]) -> Result<Args, Error> {
         let k = args[i]
             .strip_prefix("--")
             .ok_or_else(|| Error(format!("unexpected argument {}", args[i])))?;
-        if k == "send" {
+        if k == "send" || k == "despite-payment" {
             m.insert(k.to_string(), "1".to_string());
             i += 1;
             continue;
@@ -307,6 +307,22 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
             let t = terms_of(a)?;
             let lock = outpoint(arg(a, "lock")?)?;
             let seq = seq()?;
+            // The seller refunds only when no payment to its receiving script is mined in
+            // the lock's heights (section 8.2, step 7): such a payment is a buyer's, and
+            // its claim can still be mined. `--despite-payment` signs anyway.
+            if !a.contains_key("despite-payment") {
+                let btc = btc()?;
+                let hi = t.deadline.min(btc.tip()?);
+                let spk = t.receive_script_pubkey();
+                if let Some((txid, h)) =
+                    btc.paid_to(spk.as_bytes(), t.price_sat, t.floor + 1, hi)?
+                {
+                    return Err(Error(format!(
+                        "a payment to the receiving address ({txid}, Bitcoin block {h}) is in the lock's heights: \
+                         the buyer's claim can still be mined, so this wallet does not refund"
+                    )));
+                }
+            }
             let tx = paylock::sign_refund(
                 &t,
                 lock,

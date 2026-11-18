@@ -49,7 +49,9 @@ transaction index (`-txindex=1`).
    above, the service attaches the proof and submits the claim. The swap is
    done when the claim's block is final.
 7. **Or the refund.** If no claim is mined, the seller's `paylock sign-refund`
-   is valid 60 blocks after the first block anchored at `D`.
+   is valid 60 blocks after the first block anchored at `D`. It refuses to sign
+   while a payment to the receiving address is mined above `F` and at most `D`:
+   that payment is a buyer's, and its claim can still be mined.
 
 ## The completion service
 
