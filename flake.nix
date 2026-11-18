@@ -86,6 +86,7 @@
             path: type:
             (lib.hasSuffix "\.elf" path)
             || (lib.hasSuffix "\.json" path)
+            || (lib.hasSuffix "\.simf" path)
             || (lib.hasSuffix "\.md" path)
             || (lib.hasInfix "/test_data/" path)
             || (lib.hasInfix "/test/data/" path)
