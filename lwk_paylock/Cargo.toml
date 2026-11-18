@@ -1,0 +1,16 @@
+[package]
+name = "lwk_paylock"
+version = "0.1.0"
+edition = "2021"
+description = "Sequentia Wallet Kit - the swap of an asset for an on-chain bitcoin payment: chain readers, completion service and command"
+license = "MIT OR BSD-2-Clause"
+
+[[bin]]
+name = "paylock"
+path = "src/main.rs"
+
+[dependencies]
+lwk_wollet = { version = "0.18.1", default-features = false, features = ["btc"] }
+jsonrpc = { version = "0.18.0" }
+serde_json.workspace = true
+tiny_http = "0.12.0"

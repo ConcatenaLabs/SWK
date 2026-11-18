@@ -474,6 +474,18 @@ Changes by file:
     fee estimates.
   - `htlc.rs`: the BTC-leg HTLC (P2SH from the shared redeemScript, funding,
     and the manual-scriptSig CLTV refund with BIP125 RBF).
+  - `paylock.rs`: the payment lock, the swap of an asset for an ordinary
+    on-chain bitcoin payment with no hash lock (the node's
+    `doc/sequentia/bitcoin-payment-proof.md`, section 8). No I/O: the terms
+    (`F`, `D`, `R = D`, a fresh receiving key per lock), the claim and refund
+    leaves (opcodes `0xe5` to `0xe7`) and the lock's P2TR script, the seller's
+    receiving script `wsh(and_v(v:pk(K),older(1)))`, the buyer's
+    leaf-for-leaf checks on a mined lock, the payment proof (built from a
+    block's header, transaction ids, coinbase and payment, and checked as the
+    node checks it), the claim signed before the payment and completed
+    without a key, the refund with its anchor floor, the buyer's cancel of its
+    own payment, the top fee tier and the timeline states. `lwk_paylock`
+    reads the chains over it.
   - `xchain.rs`: cross-chain (BTC to Sequentia-asset) swap glue for the taker:
     HTLC key derivation (canonical absolute paths outside the receive/change
     branches, plus a legacy relative mode recorded in persisted state), the
@@ -502,6 +514,16 @@ Changes by file:
   `lwk_wasm/tests/node/stake_records.js` when the node package is linked.
 - `examples/rescue_test.rs`: live functional test of bump/replace/CPFP against
   the testnet (needs a funded wallet).
+
+## `lwk_paylock`
+
+A crate of this fork's own, over `lwk_wollet::btc::paylock`: the reads the
+payment lock needs from a Sequentia node and a Bitcoin daemon (JSON-RPC), the
+claim completed with a proof linked to the lowest anchor the chain recorded at
+or above the payment, the activation read from the node's `getdeploymentinfo`
+(`btc_payment` and `lost_blocks`; an entry the node does not report is not
+active), the completion service, and the `paylock` command for every step. Its
+`README.md` says how to run it and its regtest proof.
 
 ## `lwk_contracts`
 

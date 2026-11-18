@@ -24,6 +24,9 @@ compile_error!(
 
 pub mod addr;
 pub mod htlc;
+// The payment lock: an asset released on a node-checked proof of an ordinary
+// bitcoin payment (no hash lock). I/O-free; `lwk_paylock` reads the chains.
+pub mod paylock;
 
 #[cfg(any(feature = "btc-blocking", feature = "btc-async"))]
 mod core;
