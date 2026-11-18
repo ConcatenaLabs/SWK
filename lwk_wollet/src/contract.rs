@@ -361,9 +361,21 @@ mod tests {
         assert_eq!(&asset.to_string(), asset_usdt);
         assert_eq!(&token.to_string(), token_usdt);
 
-        // Error cases
+        // A contract parsed from JSON is hashed from that JSON (the raw value is
+        // kept so OpenAMP contracts verify), so editing a typed field of it does
+        // not change the hash and the ids still verify.
         contract.version = 1;
-        assert!(asset_ids(&tx.input[0], &contract).is_err());
+        assert!(asset_ids(&tx.input[0], &contract).is_ok());
+
+        // Error cases: a different contract, as parsed from its own JSON, does
+        // not commit to the ids in the transaction.
+        let mut other_value = contract_value.clone();
+        other_value["version"] = 1.into();
+        let other = Contract::from_value(&other_value).unwrap();
+        assert!(matches!(
+            asset_ids(&tx.input[0], &other),
+            Err(Error::ContractDoesNotCommitToAssetId)
+        ));
     }
 
     #[test]

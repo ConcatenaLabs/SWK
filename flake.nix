@@ -86,6 +86,7 @@
             path: type:
             (lib.hasSuffix "\.elf" path)
             || (lib.hasSuffix "\.json" path)
+            || (lib.hasSuffix "\.simf" path)
             || (lib.hasSuffix "\.md" path)
             || (lib.hasInfix "/test_data/" path)
             || (lib.hasInfix "/test/data/" path)
@@ -116,7 +117,21 @@
           pname = "lwk_cli";
           version = "0.18.0";
         };
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        # `buildDepsOnly` builds against a copy of the source where every
+        # crate under the workspace is a stub. The vendored rust-elements
+        # (see `[patch.crates-io]` in Cargo.toml) is a real dependency of
+        # elements-miniscript, so its sources are copied back in unaltered.
+        withRealElements =
+          args:
+          args
+          // {
+            extraDummyScript = ''
+              rm -rf $out/rust-elements
+              cp -r ${lib.cleanSource ./rust-elements} $out/rust-elements
+              chmod -R u+w $out/rust-elements
+            '';
+          };
+        cargoArtifacts = craneLib.buildDepsOnly (withRealElements commonArgs);
         # remember, `set1 // set2` does a shallow merge:
         bin = craneLib.buildPackage (
           commonArgs
@@ -135,7 +150,7 @@
           pname = "amp2_mock";
           cargoExtraArgs = "-p amp2_mock";
         };
-        amp2MockCargoArtifacts = craneLib.buildDepsOnly amp2MockArgs;
+        amp2MockCargoArtifacts = craneLib.buildDepsOnly (withRealElements amp2MockArgs);
         amp2Mock = craneLib.buildPackage (
           amp2MockArgs
           // {

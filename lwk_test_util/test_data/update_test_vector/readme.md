@@ -1,4 +1,4 @@
-`000000000000` contains an encrypted update generated before `8cff2915f6838c370b34fe510efb6b5f641ab164` to test that `encrypt_refactor` branch is not breaking backward compatibility
+`000000000000` contains an update encrypted with the key derived from the descriptor `desc`, in the format of a wallet's update file (a random nonce, then the ciphertext). It pins that updates written in that format stay readable.
 
 `desc` contains the descriptor used for encryption of `000000000000`
 

@@ -51,7 +51,8 @@
                     ],
                     "inflation_keys": [
                         0
-                    ]
+                    ],
+                    "denomination": 8
                 },
                 "witness": {
                     "amount_rangeproof": null,
@@ -215,7 +216,8 @@
                     ],
                     "inflation_keys": [
                         0
-                    ]
+                    ],
+                    "denomination": 8
                 },
                 "witness": {
                     "amount_rangeproof": null,
