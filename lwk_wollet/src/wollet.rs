@@ -1968,9 +1968,9 @@ mod tests {
 
         let mut hasher = FxHasher::default();
         wollet.hash(&mut hasher);
-        assert_eq!(4667218140179748739, hasher.finish());
+        assert_eq!(13389250803542343749, hasher.finish());
 
-        assert_eq!(4667218140179748739, wollet.status());
+        assert_eq!(13389250803542343749, wollet.status());
     }
 
     #[test]

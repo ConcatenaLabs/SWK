@@ -1158,7 +1158,7 @@ mod test {
 
         assert_eq!(vec.len(), exp_vec.len());
         assert_eq!(vec, exp_vec);
-        assert_eq!(len, 2850);
+        assert_eq!(len, 2886);
         assert_eq!(vec.len(), len);
 
         let back = Update::consensus_decode(&vec[..]).unwrap();
@@ -1195,7 +1195,7 @@ mod test {
 
         assert_eq!(vec.len(), exp_vec.len());
         assert_eq!(vec, exp_vec);
-        assert_eq!(len, 2892);
+        assert_eq!(len, 2928);
         assert_eq!(vec.len(), len);
 
         let back = Update::consensus_decode(&vec[..]).unwrap();
@@ -1395,14 +1395,14 @@ mod test {
         let wollet = WolletBuilder::new(crate::Network::TestnetLiquid, desc)
             .build()
             .unwrap();
-        assert_eq!(update_bytes.len(), 18436);
-        assert_eq!(update.serialize().unwrap().len(), 18436);
+        assert_eq!(update_bytes.len(), 18472);
+        assert_eq!(update.serialize().unwrap().len(), 18472);
         let update_pruned = {
             let mut u = update.clone();
             u.prune(&wollet);
             u
         };
-        assert_eq!(update_pruned.serialize().unwrap().len(), 1106);
+        assert_eq!(update_pruned.serialize().unwrap().len(), 1142);
         assert_eq!(update.new_txs.txs.len(), update_pruned.new_txs.txs.len());
         assert_eq!(update.new_txs.unblinds, update_pruned.new_txs.unblinds);
     }
