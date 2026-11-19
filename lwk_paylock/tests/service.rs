@@ -202,6 +202,29 @@ fn request(n: u32, floor: u32, deadline: u32, cancel: Option<String>) -> Value {
     request_for(&terms(floor, deadline), lock, &format!("{n:064x}"), cancel)
 }
 
+/// The job a request names, as the service holds it once intake has placed its cancel:
+/// with a payment of the terms spending the cancel's coins, vouched for, the cancel kept.
+/// For the cases that fill a store directly.
+fn holding(v: &Value) -> Job {
+    let j = Job::from_request(v).unwrap();
+    let mut s = j.to_json();
+    if let Some(c) = v["cancel"].as_str() {
+        let cancel: bitcoin::Transaction =
+            bitcoin::consensus::encode::deserialize(&paylock::hex_decode(c).unwrap()).unwrap();
+        let mut pay = cancel.clone();
+        pay.output = vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(j.terms.price_sat),
+            script_pubkey: j.terms.receive_script_pubkey(),
+        }];
+        pay.input
+            .iter_mut()
+            .for_each(|i| i.witness = bitcoin::Witness::new());
+        s["payments"] = json!([{"hex": btc_hex(&pay), "vouched": true,
+            "cancels": [{"hex": c, "fee": 1_000, "vouched": true}]}]);
+    }
+    Job::from_stored(&s).unwrap()
+}
+
 fn tmpdir(name: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("paylock-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -271,21 +294,19 @@ fn a_stalled_round_does_not_hold_back_a_due_cancel() {
         // Forty stale ones whose payment never comes, each reaching 800 blocks back.
         for n in 100..140 {
             st.add(
-                Job::from_request(&request(n, 300, 1_100 + n, Some(btc_hex(&btc_spend(n, 1)))))
-                    .unwrap(),
+                holding(&request(n, 300, 1_100 + n, Some(btc_hex(&btc_spend(n, 1))))),
                 &limits,
             )
             .unwrap();
         }
         // The live one, due two blocks before its deadline at 1,003.
         st.add(
-            Job::from_request(&request_for(
+            holding(&request_for(
                 &live_terms,
                 live_lock,
                 &"ab".repeat(32),
                 Some(live_cancel.clone()),
-            ))
-            .unwrap(),
+            )),
             &limits,
         )
         .unwrap();
@@ -805,10 +826,12 @@ fn a_cancel_already_broadcast_is_kept_with_the_claims() {
         let (code, r) = post(port, "/jobs", &r);
         assert_eq!(code, 200, "{r}");
         assert!(r["notes"].to_string().contains(says), "{r}");
+        // One job for the lock: each payment with its cancel.
         let (_, j) = get(port, &format!("/jobs/{}", r["id"].as_str().unwrap()));
+        let n = if says == "already broadcast" { 1 } else { 2 };
         assert_eq!(
             (j["tiers"].as_u64(), j["cancels"].as_u64()),
-            (Some(2), Some(1)),
+            (Some(2), Some(n)),
             "{j}"
         );
     }
@@ -1212,8 +1235,8 @@ fn intake_with(btc_url: &str, locks: Locks) -> Intake {
 /// What a client posts, checked and added, as the service does.
 fn post_job(st: &mut Store, intake: &Intake, v: &Value) -> Result<(String, Added), String> {
     let mut j = Job::from_request(v).map_err(|e| e.0)?;
-    let held = st.jobs.contains_key(&j.id);
-    service::check_intake(intake, &mut j, held).map_err(|e| e.message().to_string())?;
+    let held = st.jobs.get(&j.id).cloned();
+    service::check_intake(intake, &mut j, held.as_ref()).map_err(|e| e.message().to_string())?;
     st.add(j, &Limits::default())
         .map_err(|e| e.message().to_string())
 }
@@ -1263,8 +1286,9 @@ fn no_client_can_block_a_buyers_job() {
     let top = request_tiers(&t, lock, &pay_id, None, &[9_000]);
     let (id, added) = post_job(&mut st, &intake, &top).unwrap();
     assert_eq!(added, Added::New);
-    // The mempool held the payment: the service took it from there.
-    assert!(st.jobs[&id].payment_hex.is_some());
+    // The mempool held the payment the post named: the service took it from there, as a
+    // payment Bitcoin vouches for.
+    assert!(st.jobs[&id].payments[0].vouched);
     // A claim the buyer did not sign, under the same name: refused.
     let mut forged = request_tiers(&t, lock, &pay_id, None, &[7_000]);
     let mut c: lwk_wollet::elements::Transaction = lwk_wollet::elements::encode::deserialize(
@@ -1282,28 +1306,39 @@ fn no_client_can_block_a_buyers_job() {
     assert_eq!(id2, id);
     assert_eq!(added, Added::Merged(vec!["claims", "cancels"]));
     assert_eq!(st.jobs[&id].claims.len(), 2);
-    assert_eq!(st.jobs[&id].cancels.len(), 1);
-    assert_eq!(st.jobs[&id].cancels[0].hex, cancel);
-    assert_eq!(st.jobs[&id].cancels[0].fee, 10_000);
+    let p = &st.jobs[&id].payments[0];
+    assert_eq!(p.cancels.len(), 1);
+    assert_eq!(p.cancels[0].hex, cancel);
+    assert_eq!(p.cancels[0].fee, 10_000);
     // A second valid cancel of the same coins is kept beside it, highest fee first.
     let mut second = buyer.clone();
     second["cancel"] = json!(btc_hex(&btc_spend(42, 89_000)));
     let (_, added) = post_job(&mut st, &intake, &second).unwrap();
     assert_eq!(added, Added::Merged(vec!["cancels"]));
-    assert_eq!(st.jobs[&id].cancels.len(), 2);
-    assert_eq!(st.jobs[&id].cancels[0].fee, 11_000);
+    assert_eq!(st.jobs[&id].payments[0].cancels.len(), 2);
+    assert_eq!(st.jobs[&id].payments[0].cancels[0].fee, 11_000);
     // The same again: held.
     let (_, again) = post_job(&mut st, &intake, &buyer).unwrap();
     assert_eq!(again, Added::Same);
-    // A cancel with no payment known anywhere: refused, its coins cannot be compared.
+    // The payment id a post names is only a hint: the buyer's cancel under another id is
+    // placed by its coins with the payment held; a cancel of coins no payment held spends
+    // is refused.
     let other_pay = "cd".repeat(32);
-    let e = post_job(
+    let (_, again) = post_job(
         &mut st,
         &intake,
         &request_for(&t, lock, &other_pay, Some(cancel.clone())),
     )
+    .unwrap();
+    assert_eq!(again, Added::Same);
+    let e = post_job(
+        &mut st,
+        &intake,
+        &request_for(&t, lock, &other_pay, Some(btc_hex(&btc_spend(44, 90_000)))),
+    )
     .unwrap_err();
-    assert!(e.contains("beside the payment"), "{e}");
+    assert!(e.contains("exactly the payment's coins"), "{e}");
+    assert_eq!(st.jobs.len(), 1);
     // What anyone reads holds no signed claim, cancel or payment.
     let public = st.jobs[&id].public_json().to_string();
     assert!(!public.contains(&cancel));
@@ -1312,7 +1347,7 @@ fn no_client_can_block_a_buyers_job() {
     assert!(!public.contains(&pay_id));
     // Stored and read back, it is the same job.
     let st = Store::open(&dir).unwrap();
-    assert_eq!(st.jobs[&id].cancels.len(), 2);
+    assert_eq!(st.jobs[&id].payments[0].cancels.len(), 2);
     assert_eq!(st.jobs[&id].claims.len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1434,7 +1469,7 @@ fn a_node_without_a_transaction_index_drops_no_cancel() {
     let mut st = Store::open(&dir).unwrap();
     let cancel = btc_hex(&btc_spend(5, 1_000));
     st.add(
-        Job::from_request(&request(5, 1_000, 1_003, Some(cancel.clone()))).unwrap(),
+        holding(&request(5, 1_000, 1_003, Some(cancel.clone()))),
         &Limits::default(),
     )
     .unwrap();
@@ -1570,8 +1605,9 @@ fn a_bad_witness_copy_never_stands_in_for_the_buyers_cancel() {
         let stored: Value =
             serde_json::from_slice(&std::fs::read(dir.join(format!("{id}.json"))).unwrap())
                 .unwrap();
-        assert_eq!(stored["cancels"][0]["hex"], json!(good), "{stored}");
-        assert_eq!(stored["cancels"][0]["vouched"], json!(true));
+        let held = &stored["payments"][0]["cancels"][0];
+        assert_eq!(held["hex"], json!(good), "{stored}");
+        assert_eq!(held["vouched"], json!(true));
         let n = sent.lock().unwrap().len();
         let w = Instant::now();
         while sent.lock().unwrap()[n..].iter().all(|h| *h != good)
@@ -1595,14 +1631,15 @@ fn cancels_are_held_by_witness_id() {
     let mut st = Store::open(&dir).unwrap();
     let t = terms(1_000, 1_006);
     let lock = OutPoint::new(Txid::from_byte_array([9; 32]), 0);
+    let (pay, _) = payment_for(&t, 71, 1_000);
     let (good, bad) = witnessed_cancel(71);
     let base = Job::from_request(&request_for(&t, lock, &"ab".repeat(32), None))
         .unwrap()
         .to_json();
     let with = |cancels: Value, pending: Value| {
         let mut v = base.clone();
-        v["cancels"] = cancels;
-        v["pending"] = pending;
+        v["payments"] = json!([{"hex": btc_hex(&pay), "vouched": true, "by": "x",
+            "cancels": cancels, "pending": pending}]);
         Job::from_stored(&v).unwrap()
     };
     let l = Limits::default();
@@ -1621,7 +1658,7 @@ fn cancels_are_held_by_witness_id() {
         )
         .unwrap();
     assert_eq!(a, Added::Merged(vec!["pending_cancels"]));
-    assert_eq!(st.jobs[&id].pending.len(), 2);
+    assert_eq!(st.jobs[&id].payments[0].pending.len(), 2);
     // Checked and vouched for: it is kept, and the unchecked copies give way.
     let (_, a) = st
         .add(
@@ -1633,10 +1670,8 @@ fn cancels_are_held_by_witness_id() {
         )
         .unwrap();
     assert_eq!(a, Added::Merged(vec!["cancels"]));
-    assert_eq!(
-        (st.jobs[&id].cancels.len(), st.jobs[&id].pending.len()),
-        (1, 0)
-    );
+    let p = &st.jobs[&id].payments[0];
+    assert_eq!((p.cancels.len(), p.pending.len()), (1, 0));
     // No copy of it, unchecked or unvouched, is taken beside it, nor displaces it.
     for j in [
         with(json!([]), json!([{"hex": btc_hex(&bad), "by": "z"}])),
@@ -1647,11 +1682,11 @@ fn cancels_are_held_by_witness_id() {
     ] {
         assert_eq!(st.add(j, &l).unwrap().1, Added::Same);
     }
-    assert_eq!(st.jobs[&id].cancels[0].hex, btc_hex(&good));
+    assert_eq!(st.jobs[&id].payments[0].cancels[0].hex, btc_hex(&good));
     // Stored and read back, the same.
     let st = Store::open(&dir).unwrap();
-    assert_eq!(st.jobs[&id].cancels[0].hex, btc_hex(&good));
-    assert!(st.jobs[&id].cancels[0].vouched);
+    assert_eq!(st.jobs[&id].payments[0].cancels[0].hex, btc_hex(&good));
+    assert!(st.jobs[&id].payments[0].cancels[0].vouched);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1670,7 +1705,7 @@ fn a_request_names_nothing_the_service_keeps_of_its_own() {
     v["state"] = json!("final");
     v["cancel_sent"] = json!(true);
     let j = Job::from_request(&v).unwrap();
-    assert!(j.pending.is_empty());
+    assert!(j.payments.is_empty() && j.loose.is_empty());
     assert_eq!(j.client, "");
     assert_eq!(j.state, State::Waiting);
     assert!(!j.cancel_sent);
@@ -1683,9 +1718,13 @@ fn a_request_names_nothing_the_service_keeps_of_its_own() {
     w["cancels"] = json!([btc_hex(&btc_spend(42, 90_000))]);
     let j = Job::from_request(&w).unwrap();
     assert_eq!(
-        (j.cancels.len(), j.cancels[0].fee, j.cancels[0].vouched),
+        (j.loose.len(), j.loose[0].fee, j.loose[0].vouched),
         (1, 0, false)
     );
+    // Nor is the stored form of a payment: `payments` is not read from a request.
+    let mut w = request_for(&t, lock, &"ab".repeat(32), None);
+    w["payments"] = json!([{"hex": btc_hex(&payment_for(&t, 9, 1_000).0), "vouched": true}]);
+    assert!(Job::from_request(&w).unwrap().payments.is_empty());
 
     // Through the binary: the post is a job with no unchecked cancel at all.
     let btc_url = judged_daemon(
@@ -1716,63 +1755,195 @@ fn a_request_names_nothing_the_service_keeps_of_its_own() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// One real lock carries a payment and its replacements, a few
-/// jobs, and no more, whoever posts them; jobs on other locks never count, and a post
-/// that merges into a job held starts none. Through the binary.
+/// The seller holds the buyer's signed claims, which verify whatever payment id they are
+/// posted with. Posting them first on the buyer's lock with made-up payment ids, from
+/// many addresses, takes nothing: every post for a lock merges into its one job, and a
+/// payment id is only a hint. Payments nobody can check yet (their parents unknown to the
+/// daemon) are held within a bound and refused beyond it; the buyer's payment, which the
+/// daemon accepts (and the service broadcasts), is taken whatever is held, with its
+/// cancel. Through the binary.
 #[test]
-fn one_lock_carries_a_few_jobs() {
+fn nothing_unverified_holds_a_buyers_lock() {
     const T: u32 = 1_000;
+    let t = terms(T - 1, T + 5);
+    let (pay, cancel) = payment_for(&t, 81, 1_000);
+    let (pay_hex, cancel_hex) = (btc_hex(&pay), btc_hex(&cancel));
+    let (ph, ch) = (pay_hex.clone(), cancel_hex.clone());
+    let sent = Arc::new(Mutex::new(Vec::<String>::new()));
     let btc_url = judged_daemon(
         Arc::new(AtomicU32::new(T)),
-        Default::default(),
-        Box::new(|_| json!({"allowed": true, "fees": {"base": 0.0001}})),
+        sent.clone(),
+        Box::new(move |hex| {
+            if hex == ph || hex == ch {
+                json!({"allowed": true, "fees": {"base": 0.0001}})
+            } else {
+                json!({"allowed": false, "reject-reason": "missing-inputs"})
+            }
+        }),
         Arc::new(true.into()),
     );
-    let t = terms(T - 1, T + 5);
     let locks: Locks = Default::default();
-    for n in 6_000..6_002 {
-        locks
-            .lock()
-            .unwrap()
-            .insert(lock_named(n).txid.to_string(), lock_tx(&t));
-    }
+    let ltx = lock_tx(&t);
+    let lock = OutPoint::new(ltx.txid(), 0);
+    locks.lock().unwrap().insert(lock.txid.to_string(), ltx);
     let seq_url = fake_seq(locks, Arc::new(true.into()));
-    let dir = tmpdir("onelock");
+    let dir = tmpdir("lockheld");
     let (_serve, port) = serve(&dir, &seq_url, &btc_url);
-    let one = lock_named(6_000);
-    for i in 0..service::JOBS_PER_LOCK {
+    // The seller's posts: the buyer's claims, made-up payment ids, many addresses.
+    let mut ids = std::collections::BTreeSet::new();
+    for i in 0..60u32 {
         let (code, r) = post_as(
             port,
             "/jobs",
-            &request_for(&t, one, &format!("{:064x}", 0xab00 + i), None),
-            Some("10.7.7.7"),
+            &request_for(
+                &t,
+                lock,
+                &format!("{:064x}", 0xfeed_0000u64 + u64::from(i)),
+                None,
+            ),
+            Some(&format!("198.51.100.{}", i % 30)),
         );
         assert_eq!(code, 200, "{r}");
+        ids.insert(r["id"].as_str().unwrap().to_string());
     }
-    for who in ["10.7.7.7", "10.7.7.8"] {
-        let (code, r) = post_as(
-            port,
-            "/jobs",
-            &request_for(&t, one, &format!("{:064x}", 0xabff), None),
-            Some(who),
-        );
-        assert_eq!(code, 429, "{r}");
-        assert!(r["error"].as_str().unwrap().contains("this lock"), "{r}");
+    assert_eq!(ids.len(), 1, "one job per lock");
+    let id = ids.into_iter().next().unwrap();
+    // Payments nobody can check yet: eight held (two per address), then refused.
+    let mut codes = vec![];
+    for i in 0..12u32 {
+        let (junk, _) = payment_for(&t, 900 + i, 1_000);
+        let mut r = request_for(&t, lock, &junk.compute_txid().to_string(), None);
+        r["payment_hex"] = json!(btc_hex(&junk));
+        codes.push(post_as(port, "/jobs", &r, Some(&format!("192.0.2.{}", i / 2))).0);
     }
-    // A buyer on another lock, from the same address: taken.
-    let (code, r) = post_as(
-        port,
-        "/jobs",
-        &request_for(&t, lock_named(6_001), &"cd".repeat(32), None),
-        Some("10.7.7.7"),
+    assert_eq!(&codes[..8], &[200; 8]);
+    assert!(codes[8..].iter().all(|c| *c == 429), "{codes:?}");
+    let (_, j) = get(port, &format!("/jobs/{id}"));
+    assert_eq!(j["unvouched_payments"], json!(8), "{j}");
+    // The buyer's payment and cancel, after all that: taken, the payment broadcast.
+    let mut buyer = request_for(
+        &t,
+        lock,
+        &pay.compute_txid().to_string(),
+        Some(cancel_hex.clone()),
     );
+    buyer["payment_hex"] = json!(pay_hex);
+    let (code, r) = post_as(port, "/jobs", &buyer, Some("203.0.113.50"));
     assert_eq!(code, 200, "{r}");
-    // A post into a job held on the full lock merges.
-    let more = request_tiers(&t, one, &format!("{:064x}", 0xab00), None, &[1_000, 9_000]);
-    let (code, r) = post_as(port, "/jobs", &more, Some("10.7.7.8"));
-    assert_eq!(code, 200, "{r}");
-    assert_eq!(r["merged"], json!(["claims"]), "{r}");
+    assert_eq!(r["id"], json!(id));
+    let (_, j) = get(port, &format!("/jobs/{id}"));
+    assert_eq!(
+        (
+            j["payments"].as_u64(),
+            j["unvouched_payments"].as_u64(),
+            j["cancels"].as_u64()
+        ),
+        (Some(9), Some(8), Some(1)),
+        "{j}"
+    );
+    assert!(
+        sent.lock().unwrap().contains(&pay_hex),
+        "the payment was not broadcast"
+    );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The limits on live jobs never refuse a post whose payment Bitcoin vouches for: such a
+/// job is taken past them. A job with nothing verified is refused at them.
+#[test]
+fn a_paying_post_is_never_refused_for_a_limit() {
+    let dir = tmpdir("paying");
+    let mut st = Store::open(&dir).unwrap();
+    let limits = Limits {
+        max_jobs: 1,
+        jobs_per_client: 1,
+        ..Limits::default()
+    };
+    let t = terms(1_000, 1_006);
+    let job = |n: u32, vouched: bool| {
+        let mut id = [0u8; 32];
+        id[..4].copy_from_slice(&n.to_le_bytes());
+        let lock = OutPoint::new(Txid::from_byte_array(id), 0);
+        let mut v = Job::from_request(&request_for(&t, lock, &"ab".repeat(32), None))
+            .unwrap()
+            .to_json();
+        if vouched {
+            v["payments"] =
+                json!([{"hex": btc_hex(&payment_for(&t, n, 1_000).0), "vouched": true}]);
+        }
+        Job::from_stored(&v).unwrap()
+    };
+    st.add(job(1, false), &limits).unwrap();
+    let e = st.add(job(2, false), &limits).unwrap_err();
+    assert_eq!(e.status(), 429);
+    let (_, a) = st.add(job(3, true), &limits).unwrap();
+    assert_eq!(a, Added::New);
+    assert_eq!(st.jobs.len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The payment is whatever Bitcoin mines in the lock's heights paying the terms'
+/// receiving script at least the price: whoever made it, whatever coins it spends, held
+/// or not. A paying transaction at or below the floor, or after the deadline, opens
+/// nothing and hides nothing. A held payment's coins spent by a transaction that does
+/// not pay settle it as cancelled.
+#[test]
+fn the_payment_is_whatever_bitcoin_mines_paying_the_terms() {
+    let t = terms(1_000, 1_006);
+    let (held, cancel) = payment_for(&t, 42, 1_000);
+    let (stranger, _) = payment_for(&t, 77, 1_000);
+    let (early, _) = payment_for(&t, 78, 1_000);
+    let blocks: Arc<Mutex<Vec<Vec<bitcoin::Transaction>>>> = Arc::new(Mutex::new(vec![]));
+    let b2 = blocks.clone();
+    let btc_url = fake_node(Box::new(move |m, p| {
+        let b = b2.lock().unwrap();
+        match m {
+            "getblockcount" => Ok(json!(999 + b.len() as u64)),
+            "getblockhash" => Ok(json!(format!("{:064x}", p[0].as_u64().unwrap()))),
+            "getblock" => {
+                let h = u64::from_str_radix(p[0].as_str().unwrap(), 16).unwrap();
+                Ok(json!(raw_block(&b[(h - 1000) as usize])))
+            }
+            _ => Err((-32601, "no such method".into())),
+        }
+    }));
+    let btc = BtcChain {
+        rpc: rpc(&btc_url, 3),
+    };
+    let coins = vec![held
+        .input
+        .iter()
+        .map(|i| i.previous_output)
+        .collect::<Vec<_>>()];
+    let far = Instant::now() + Duration::from_secs(30);
+    // Block 1000 (= F): a paying transaction at the floor; 1001: the held payment's
+    // cancel; 1002: a stranger's payment.
+    *blocks.lock().unwrap() = vec![vec![early], vec![cancel.clone()], vec![stranger.clone()]];
+    let mut scan = lwk_paylock::PaymentScan::default();
+    let mut settled = vec![None];
+    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
+        .unwrap();
+    let f = scan
+        .found
+        .clone()
+        .expect("the stranger's payment opens the lock");
+    assert_eq!(
+        (f.height, f.txid),
+        (1002, stranger.compute_txid().to_string())
+    );
+    let s = settled[0].clone().expect("the held payment is settled");
+    assert_eq!((s.at.height, s.paid), (1001, false));
+    // Mined after the deadline only: noted late, nothing found.
+    *blocks.lock().unwrap() = (0..8)
+        .map(|h| if h == 7 { vec![held.clone()] } else { vec![] })
+        .collect();
+    let mut scan = lwk_paylock::PaymentScan::default();
+    let mut settled = vec![None];
+    btc.scan_lock(&t, &coins, &mut settled, false, &mut scan, 100, far)
+        .unwrap();
+    assert!(scan.found.is_none());
+    assert_eq!(scan.late.map(|f| f.height), Some(1007));
+    assert_eq!(settled[0].clone().map(|s| s.paid), Some(true));
 }
 
 /// A connection from `source` (a loopback address of its own) to the service.

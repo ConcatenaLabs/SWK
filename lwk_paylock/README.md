@@ -78,7 +78,7 @@ transaction index (`-txindex=1`).
 PAYLOCK_SEQ_URL=http://127.0.0.1:<port> PAYLOCK_SEQ_COOKIE=<datadir>/<chain>/.cookie \
 PAYLOCK_BTC_URL=http://127.0.0.1:<port> PAYLOCK_BTC_COOKIE=<datadir>/.cookie \
   paylock serve --data <dir> --listen 127.0.0.1:<port> [--token-file <file>] [--max-jobs 1000] \
-    [--jobs-per-client 50] [--jobs-per-lock 4] [--watch-depth 6] [--watch-every 30]
+    [--jobs-per-client 50] [--watch-depth 6] [--watch-every 30]
 ```
 
 Beyond loopback it refuses to start without `--token-file`; every request then
@@ -102,40 +102,66 @@ answer the client reads: what it sent is read before the connection closes.
 So a slow or crowding client holds only its own connections, and reads and
 other posts are answered meanwhile.
 
-It holds no key. A buyer's wallet posts one job:
+It holds no key. A buyer's wallet hands its job over before it broadcasts its
+payment:
 
 ```json
 {"terms": {...}, "lock": "<txid>:<vout>", "claims": ["<going tier>", "<top tier>"],
- "cancel": "<signed Bitcoin transaction>", "payment": "<Bitcoin txid>",
- "payment_hex": "<signed payment>"}
+ "payment_hex": "<signed payment>", "cancel": "<signed Bitcoin transaction>"}
 ```
 
 to `POST /jobs`, and reads its state at `GET /jobs/<id>` (`waiting`, `pooled`,
 `mined`, `final`, `cancelled`, `never`, `refunded`). The claims may be tiers in
-two fee assets.
+two fee assets. `cancels` may carry several cancels. `payment` (a Bitcoin
+transaction id) may stand in for `payment_hex` once the payment is broadcast:
+it is only a hint, to take the payment from the daemon's mempool.
+
+There is one job per lock, named by the lock. Every post for a lock merges into
+its job and never takes a place of its own: claims it lacks are added, and so
+are payments and cancels. So a client that posts the buyer's claims first, with
+a made-up payment id, no payment, a subset of the claims or no cancel, holds
+nothing of the buyer's out.
+
+The claim needs nothing a client posts besides the claims. The payment is
+whatever Bitcoin mines above `F` and at or below `D` that pays the terms'
+receiving script at least the price, whoever made it and whatever coins it
+spends, since that is what the claim's script accepts. A payment handed over is
+held so that its cancels are: a cancel spends exactly the coins of a payment
+held.
 
 Intake checks what it is handed against the chains before holding any of it,
 and refuses what fails, whoever posts it:
 
 - a new job's lock must be an unspent output of the Sequentia chain paying the
   terms' lock script, asset and atoms (or already spent by one of the job's own
-  claims): a job costs a real lock;
+  claims): a job costs a real lock. A post for a held lock must name terms that
+  make the same lock;
 - every claim must spend the lock through the terms' claim leaf and carry the
   buyer's signature over that very transaction; a fee coin's input must be a
   signed P2WPKH spend;
-- the signed payment must hash to `payment`, and the Bitcoin daemon must not
-  find its signatures failing. Without one, the service takes the payment from
-  the daemon's mempool once it is broadcast;
-- a cancel must spend exactly the payment's coins, and the daemon judges it
-  (`testmempoolaccept`). Valid now, or already broadcast or mined, it is kept.
-  If the daemon does not know the coins it spends yet (the payment's parent is
-  not broadcast), it says only that: such a cancel is kept unchecked (up to 16
-  in a job, two from one client), checked again on every round until the daemon
-  knows its coins, and sent with the others when they are due; it is dropped
-  only if its signatures then fail. A cancel whose signatures fail, or that the
-  daemon will not take as it stands (too low a fee to replace the payment, say),
-  is refused. A cancel whose payment the service does not know yet is refused:
-  give `payment_hex`. The answer's `notes` say what was kept and how;
+- a signed payment must pay the terms' receiving script at least the price.
+  The Bitcoin daemon judges it: one whose signatures fail is refused; one it
+  accepts is broadcast at once (the buyer is about to), and is then held as
+  vouched for, as is one the daemon already pools or has mined. Such a payment
+  is real coins paying the seller, and a post carrying one is never refused for
+  a limit. One the daemon cannot check yet (its parent is not broadcast) is held
+  unvouched, up to eight in a job and two from one client; beyond that the
+  answer is `429`, and the wallet posts it again once the parent is broadcast,
+  when it is checked and held whatever else the job holds. Every round checks
+  an unvouched payment again: once the daemon's mempool holds a paying
+  transaction spending its coins, or accepts the copy held, it is vouched for;
+  a copy whose signatures fail never takes its payment's cancels with it;
+- a cancel must spend exactly the coins of the post's payment, or of a payment
+  the job holds, and the daemon judges it (`testmempoolaccept`). Valid now, or
+  already broadcast or mined, it is kept with that payment (up to four; a
+  further one takes the place of the cheapest when it pays more). If the daemon
+  does not know the coins it spends yet, such a cancel is kept unchecked (up to
+  16 for a payment, two from one client), checked again on every round until
+  the daemon knows its coins, and sent with the others when they are due; it is
+  dropped only if its signatures then fail. A cancel whose signatures fail, or
+  that the daemon will not take as it stands (too low a fee to replace the
+  payment, say), is refused, and so is one of coins no payment held spends. The
+  answer's `notes` say what was kept and how;
 - a cancel is known by its witness id, not its transaction id alone, which does
   not cover the witness. A copy of the buyer's cancel with another witness is
   held as a copy of its own beside the buyer's, never in its place: while
@@ -145,30 +171,25 @@ and refuses what fails, whoever posts it:
 - a cancel or a signed payment is at most 32 KiB, and a claim is kept without
   the witness parts its signature does not cover (the payment's output index
   and the proof, which completing it writes). A post carries at most eight
-  claims, spending at most 16 fee coins between them;
-- a signed payment the daemon could not vouch for at intake is checked again on
-  every round: the daemon's pooled copy takes its place, and one whose
-  signatures fail is dropped.
+  claims, spending at most 16 fee coins between them, and four cancels.
+
+Only the payment's signer can make a payment of its coins or a valid cancel of
+it, so nobody crowds out the buyer's; what anyone can make up (a payment id, a
+payment of coins the daemon has never seen) is bounded, and the buyer's own
+gets in as soon as Bitcoin can check it.
 
 A request names only what a wallet hands over (`terms`, `lock`, `claims`,
-`cancel` or `cancels` as raw transactions, `payment`, `payment_hex`). Nothing
-the service keeps of its own (the unchecked cancels, a cancel's fee, the
-client, the job's progress) is read from it.
+`payment`, `payment_hex`, `cancel` or `cancels` as raw transactions). Nothing
+the service keeps of its own (the payments held, the unchecked cancels, a
+cancel's fee, the client, the job's progress) is read from it.
 
-A job is named by its terms, its lock and its payment's id. Whatever is posted
-under that name is merged into the one job and never refused for coming
-second: claims it lacks are added, each cancel is kept (up to four; a further
-one takes the place of the cheapest when it pays more), and so is a signed
-payment it lacked. So a client that posts the buyer's claims first, with no
-payment, a subset of the claims or no cancel, holds nothing of the buyer's out.
-One lock carries at most `--jobs-per-lock` live jobs (a payment and its
-replacements; the job follows a replacement of the payment by its coins, so it
-needs no job of its own), so every few jobs cost a real lock; jobs on other
-locks never count. The answer is `200` with the job's `id` (and `merged` or
-`held`), `400` for a request that fails a check, `429` when a limit is reached
-(the client's live jobs, the lock's, the service's, a job's unchecked cancels),
-`503` when a chain does not answer (try again). A read returns where a job stands and never its signed
-claims, cancels, payment or terms.
+The answer is `200` with the job's `id` (and `merged` or `held`), `400` for a
+request that fails a check, `429` when a limit is reached (the client's live
+jobs or the service's, for a job with no payment the daemon vouches for; a
+job's unvouched payments or unchecked cancels), `503` when a chain does not
+answer (try again). A wallet that gets `429` posts again later, at the latest
+once its payment's parent is broadcast. A read returns where a job stands and
+never its signed claims, cancels, payments or terms.
 
 On every round the service reads both chains as they are now:
 
@@ -178,17 +199,20 @@ On every round the service reads both chains as they are now:
   was first seen pooled, by whoever pooled it, leaves it out;
 - it submits the tiers of the first fee asset the node still accepts whose fee
   coin is unspent;
-- it knows the payment by the coins it spends: a transaction mined on Bitcoin
-  that spends them and pays the receiving script at least the price is the
-  payment, whatever its id, so the buyer's fee bump completes the claim (or, mined
-  after `D`, ends the job `never`); one that spends them and does not pay so is
-  the cancel, and the job is `cancelled` at its block. A coin that is merely
+- it completes the claim with whatever paying transaction Bitcoin mines in the
+  lock's heights, so the buyer's fee bump completes it too; a paying
+  transaction mined only after `D` ends the job `never`;
+- it knows each payment it holds by the coins it spends: a confirmed spend of
+  them that does not pay is its cancel. Once every payment Bitcoin has shown
+  real is spent so, the job is `cancelled` at the latest of those blocks; a
+  payment held that later becomes known reopens it. A coin that is merely
   missing from the UTXO set decides nothing;
-- it sends the buyer's payment again if a reorganization evicted it before `D`;
-- it broadcasts every cancel it holds, the checked ones highest fee first and
-  then those not checkable yet, if the payment is still unconfirmed two blocks
-  before `D`, whatever its Sequentia node says of the lock, and sends them again
-  until a spend of the payment's coins is confirmed;
+- it sends a payment it holds vouched for again if a reorganization evicted it
+  before `D`;
+- it broadcasts every cancel of every payment held that is not settled, the
+  checked ones highest fee first and then those not checkable yet, if no payment
+  is mined two blocks before `D`, whatever its Sequentia node says of the lock,
+  and sends them again until a spend of that payment's coins is confirmed;
 - it shows the swap done (`final`) as soon as the claim's block is final, and
   goes on watching in the background (`watching: true`) until the Bitcoin block
   that decided it is `--watch-depth` blocks deep: a Bitcoin reorganization
@@ -200,25 +224,27 @@ own that give up on a call after 3 seconds. Each pass sends for at most 2
 seconds, after at most 1 second of looking up locks the node has not answered
 for. The node's answer orders the sends and never withholds one: jobs whose lock
 it knows go first, then those it has not answered for, then those it says it does
-not know. Within each, the clients that started the jobs take turns, so one
-client's many jobs get one send per turn like any other's; and each client's
-cancels never tried go first, nearest deadline first, then those tried before,
-the longest ago first, so what one pass does not reach the next one does. A cancel is sent until 144 blocks past `D`. The rest runs live
+not know. Within each, the clients that handed the payments over take turns, so
+one client's many payments get one send per turn like any other's; and each
+client's cancels never tried go first, nearest deadline first, then those tried
+before, the longest ago first, so what one pass does not reach the next one does. A cancel is sent until 144 blocks past `D`. The rest runs live
 jobs nearest deadline first, each within a time and block budget and the round
 within its own, and watched jobs after them; the search for the payment keeps
 its place between rounds and reads each Bitcoin block once, from `F` to six
-blocks past `D` (on to Bitcoin's tip, up to 144 blocks past `D`, while the
-payment's coins are known and no spend of them is mined). A failing job backs
-off, up to a minute. Intake caps a request at 512 KiB, a job at eight claims and
-four cancels (and 16 not yet checkable), a lock at 1,008 Bitcoin blocks from `F`
-to `D`, the service at `--max-jobs` live jobs, each client at
-`--jobs-per-client` live jobs it started and each lock at `--jobs-per-lock`
-(`0` for no limit); a job whose outcome is decided no longer counts, and a post
-that merges into a job held starts none.
+blocks past `D` (on to Bitcoin's tip, up to 144 blocks past `D`, while a
+payment held with cancels is not settled and no payment is mined). A failing
+job backs off, up to a minute. Intake caps a request at 512 KiB, a job at eight
+claims, eight unvouched payments and, per payment, four cancels (and 16 not yet
+checkable), a lock at 1,008 Bitcoin blocks from `F` to `D`, the service at
+`--max-jobs` live jobs and each client at `--jobs-per-client` live jobs it
+started (`0` for no limit), never for a job whose payment the daemon vouches
+for; a job whose outcome is decided no longer counts, and a post that merges
+into a job held starts none.
 
 Jobs are one JSON file each under `--data`, so a restart carries on. A job that
-has ended and is buried moves to `--data/archive/`, where it is still answered at
-`GET /jobs/<id>`, and is removed after 30 days.
+has ended and is buried (the block that decided it, and for a job that did not
+complete `D` as well, `--watch-depth` deep) moves to `--data/archive/`, where it
+is still answered at `GET /jobs/<id>`, and is removed after 30 days.
 
 ## The regtest proof
 

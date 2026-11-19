@@ -417,6 +417,20 @@ pub struct PaymentScan {
     /// script the price (the buyer's cancel, or any other): the payment can no longer be
     /// mined.
     pub cancel: Option<Found>,
+    /// For [`BtcChain::scan_lock`]: the first transaction paying the receiving script at
+    /// least the price mined after `D`, which opens nothing.
+    pub late: Option<Found>,
+}
+
+/// How a payment the completion service holds was settled on Bitcoin: the first confirmed
+/// spend of its coins, and whether that spend pays the terms (the payment itself, or a
+/// replacement of it) or not (its cancel, or any other spend).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settled {
+    /// Where the spend is.
+    pub at: Found,
+    /// Whether it pays the receiving script at least the price.
+    pub paid: bool,
 }
 
 /// How many blocks above `D` a search reads, to tell a late payment from none.
@@ -571,6 +585,120 @@ impl BtcChain {
         Ok(true)
     }
 
+    /// Moves `scan` on through Bitcoin's best chain for a lock, at most `max_blocks`
+    /// blocks and until `until`, and says whether it reached as far as it reads.
+    ///
+    /// The payment is known by Bitcoin alone: the first transaction mined above `F` and at
+    /// or below `D` that pays the terms' receiving script at least the price
+    /// (`scan.found`), whoever made it and whatever coins it spends, since that is what the
+    /// claim's script accepts. A paying transaction mined after `D` is noted
+    /// (`scan.late`). For each entry of `coins` (the coins of a payment held, to which its
+    /// cancels belong), `settled` records the first confirmed spend of any of them, and
+    /// whether it pays. Nothing is inferred from a coin that is merely missing.
+    ///
+    /// It reads from `F` to [`LATE_SCAN`] blocks past `D`, and on, up to
+    /// [`CANCEL_KEEP_BLOCKS`] past `D`, while `open` (a payment held with cancels is not
+    /// settled yet) and no payment is found. A scan keeps its place, so each block is read
+    /// once; a reorganization below its place, or of a block it found something in,
+    /// starts it again from the floor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn scan_lock(
+        &self,
+        terms: &PayLockTerms,
+        coins: &[Vec<bitcoin::OutPoint>],
+        settled: &mut [Option<Settled>],
+        open: bool,
+        scan: &mut PaymentScan,
+        max_blocks: u32,
+        until: Instant,
+    ) -> Result<bool, Error> {
+        let tip = self.tip()?;
+        let mut gone = false;
+        let kept = |f: &Option<Found>| -> Result<bool, Error> {
+            Ok(match f {
+                Some(f) => f.height <= tip && self.block_hash(f.height)? == f.block,
+                None => true,
+            })
+        };
+        if !kept(&scan.found)? {
+            scan.found = None;
+            gone = true;
+        }
+        if !kept(&scan.late)? {
+            scan.late = None;
+            gone = true;
+        }
+        for s in settled.iter_mut() {
+            if !kept(&s.as_ref().map(|s| s.at.clone()))? {
+                *s = None;
+                gone = true;
+            }
+        }
+        if let Some((h, hash)) = &scan.scanned {
+            if *h > tip || self.block_hash(*h)? != *hash {
+                gone = true;
+            }
+        }
+        if gone {
+            // Read again from the floor: what was found below the change is found again.
+            scan.scanned = None;
+            scan.found = None;
+            scan.late = None;
+            settled.iter_mut().for_each(|s| *s = None);
+        }
+        if scan.found.is_some() {
+            return Ok(true);
+        }
+        let first = terms.floor.max(1);
+        let last = tip.min(terms.deadline.saturating_add(if open {
+            CANCEL_KEEP_BLOCKS
+        } else {
+            LATE_SCAN
+        }));
+        let spk = terms.receive_script_pubkey();
+        let mut h = scan.scanned.as_ref().map(|(h, _)| h + 1).unwrap_or(first);
+        let mut read = 0;
+        while h <= last {
+            if read >= max_blocks || Instant::now() >= until {
+                return Ok(false);
+            }
+            let hash = self.block_hash(h)?;
+            let block = self.block(&hash)?;
+            read += 1;
+            scan.scanned = Some((h, hash.clone()));
+            for tx in block.txdata.iter().skip(1) {
+                let pays = tx
+                    .output
+                    .iter()
+                    .any(|o| o.script_pubkey == spk && o.value.to_sat() >= terms.price_sat);
+                let here = || Found {
+                    height: h,
+                    block: hash.clone(),
+                    txid: tx.compute_txid().to_string(),
+                };
+                for (c, s) in coins.iter().zip(settled.iter_mut()) {
+                    if s.is_none() && tx.input.iter().any(|i| c.contains(&i.previous_output)) {
+                        *s = Some(Settled {
+                            at: here(),
+                            paid: pays,
+                        });
+                    }
+                }
+                if pays && h > terms.floor {
+                    if h <= terms.deadline {
+                        scan.found = Some(here());
+                        return Ok(true);
+                    }
+                    if scan.late.is_none() {
+                        scan.late = Some(here());
+                    }
+                }
+            }
+            h += 1;
+        }
+        Ok(true)
+    }
+
     /// The first transaction of the best chain's blocks from `lo` to `hi` with an output
     /// paying `script_pubkey` at least `min_sat`: what a seller looks for before it
     /// refunds, since a payment in the lock's heights belongs to a buyer whose claim
@@ -610,6 +738,23 @@ impl BtcChain {
             }
         }
         Ok(None)
+    }
+
+    /// The transaction in the daemon's mempool that spends `coin`, if any
+    /// (`gettxspendingprevout`). A daemon without the call answers none.
+    pub fn mempool_spender(&self, coin: &bitcoin::OutPoint) -> Result<Option<String>, Error> {
+        match self.rpc.call(
+            "gettxspendingprevout",
+            json!([[{"txid": coin.txid.to_string(), "vout": coin.vout}]]),
+        ) {
+            Ok(v) => Ok(v
+                .get(0)
+                .and_then(|e| e.get("spendingtxid"))
+                .and_then(Value::as_str)
+                .map(String::from)),
+            Err(RpcError::Rpc { code: -32601, .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Whether the daemon's mempool holds the transaction (unconfirmed).

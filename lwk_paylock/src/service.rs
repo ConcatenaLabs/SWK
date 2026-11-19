@@ -1,12 +1,14 @@
 //! The completion service: it holds a buyer's signed claims, its signed cancels and
 //! its payment, and holds no key. It
 //!
-//! - knows the payment by the coins it spends: a transaction mined on Bitcoin that
-//!   spends them and pays the seller's receiving script at least the price is the
-//!   payment, whatever its id (a fee bump counts); one that spends them and does not
-//!   pay so is the cancel. Nothing is inferred from a coin that is merely missing;
+//! - knows the payment from Bitcoin alone: a transaction mined above `F` and at or
+//!   below `D` that pays the seller's receiving script at least the price is the
+//!   payment, whoever made it and whatever its id or coins, since that is what the
+//!   claim's script accepts. No payment handed over is needed to complete the claim;
+//! - knows each payment it holds by the coins it spends: a confirmed spend of them that
+//!   does not pay is its cancel. Nothing is inferred from a coin that is merely missing;
 //! - completes the claim as soon as a Sequentia block anchors at the payment's
-//!   Bitcoin block or above, with a proof of the buyer's own payment;
+//!   Bitcoin block or above, with a proof of that payment;
 //! - after every reorganization that disconnects the claim, proves it again,
 //!   linked to the lowest anchor the active chain recorded at or above the payment;
 //! - raises the claim to its top fee tier as soon as a block is made after the
@@ -34,29 +36,37 @@
 //! watched come after the live ones. The search for a payment keeps its place between
 //! rounds, so each Bitcoin block is read once per job. A job that fails retries with a
 //! backoff. Intake caps the request's size, the size of each transaction it keeps, the
-//! claims and cancels per job, a lock's span of heights, the number of live jobs, those
-//! each client starts and those each lock carries, and needs a token whenever it listens
+//! claims, payments and cancels per job, a lock's span of heights, the number of live
+//! jobs and those each client starts, and needs a token whenever it listens
 //! beyond loopback. Each request is served on a thread of its own under deadlines, and
 //! no address takes every connection ([`http`]), so a slow or crowding client stalls
 //! nobody else.
 //!
-//! **No client can block a buyer's job.** A job is named by its terms, its lock and its
-//! payment's id, and whatever is posted under that name is merged into it, never refused
-//! for having come second: the claims are checked against the buyer's key and pooled;
-//! each cancel that spends exactly the payment's coins is kept if the Bitcoin daemon
-//! accepts it (its signatures included) or already holds it, up to a few, and every one
-//! is sent; one whose coins the daemon does not know yet is kept unchecked and checked
-//! again until it does; a signed payment is kept once it hashes to the payment's id.
+//! **No client can block a buyer's job.** There is one job per lock, named by the lock
+//! alone, and whatever is posted for that lock is merged into it, never refused for
+//! having come second and never given a place of its own: a payment id a client names
+//! is only a hint. The claims are checked against the buyer's key. Each payment handed
+//! over must pay the terms; the daemon judges it, and one it accepts is broadcast, so a
+//! payment held as vouched for is one Bitcoin pools or has mined: real coins paying the
+//! seller, which open the lock if they are mined in time. Such a post is never refused
+//! for a limit. A payment the daemon cannot check yet (its parent unseen) is unverified
+//! and held only within a bound, beyond which the answer is to post it again once its
+//! parent is broadcast. Each cancel spends exactly the coins of a payment held and is
+//! kept with it if the daemon accepts it (its signatures included) or already holds it,
+//! up to a few per payment, and every one is sent; one whose coins the daemon does not
+//! know yet is kept unchecked and checked again until it does. So nothing unverified
+//! takes what a real buyer needs: completing the claim needs nothing posted, and a paying
+//! payment and its valid cancels are never crowded out, since only the payment's signer
+//! can make them.
 //! A cancel is known by its witness id, never its transaction id alone (which does not
 //! cover the witness): a copy of the buyer's cancel with a bad witness is a copy of its
 //! own, held beside the buyer's, dropped once its signatures can be checked, and never
 //! stands in for the buyer's. What fails a check is refused, whoever posted first. A
 //! request names only what a wallet hands over; nothing the service keeps of its own
-//! (unchecked cancels, a cancel's fee, the client) is read from it. A new job needs a
-//! real lock, an unspent output paying the terms, and one lock carries a few live jobs
-//! (a payment and its replacements), so nobody fills the service with made-up ones. A
-//! read returns where a job stands, never its signed claims, its cancels or its
-//! payment.
+//! (payments held, unchecked cancels, a cancel's fee, the client) is read from it. A new
+//! job needs a real lock, an unspent output paying the terms, so nobody fills the service
+//! with made-up ones. A read returns where a job stands, never its signed claims, its
+//! cancels or its payments.
 //!
 //! Jobs are kept as one JSON file each, so a restart carries on where it stopped;
 //! ended jobs move to `archive/` once buried, and leave it after
@@ -77,7 +87,7 @@ use serde_json::{json, Value};
 pub use crate::CANCEL_KEEP_BLOCKS;
 use crate::{
     http, outpoint, payment_position, prove_claim, Accept, BtcChain, Completion, Error, Found,
-    PaymentScan, Position, SeqChain, TxStatus,
+    PaymentScan, Position, SeqChain, Settled, TxStatus,
 };
 
 /// How often a lock the node did not know is looked up again, in seconds.
@@ -106,9 +116,12 @@ const MAX_FEE_COINS: usize = 16;
 /// payment's size; this is some two hundred inputs.
 pub const MAX_TX_BYTES: usize = 32 << 10;
 
-/// The most live jobs one lock carries: a job is named by its payment's id, so this is a
-/// payment and its replacements. Every few jobs cost a real lock.
-pub const JOBS_PER_LOCK: usize = 4;
+/// The most payments one job holds that the Bitcoin daemon cannot vouch for yet (their
+/// coins are unknown to it: a parent not broadcast), and the most of those one client may
+/// hand over. A payment the daemon pools or has mined is never refused nor given up.
+pub const MAX_UNVOUCHED_PAYMENTS: usize = 8;
+/// See [`MAX_UNVOUCHED_PAYMENTS`].
+pub const UNVOUCHED_PER_CLIENT: usize = 2;
 
 /// A cancel the job keeps: a spend of exactly the payment's coins back to the buyer.
 ///
@@ -146,6 +159,253 @@ impl Cancel {
             vouched: false,
             by: String::new(),
         })
+    }
+}
+
+/// A payment the job holds: a signed Bitcoin transaction that pays the terms' receiving
+/// script at least the price, known by the coins it spends, with the buyer's cancels of
+/// it. Several may be held (the buyer's, a replacement of it, anyone's); none is the
+/// job's name, and none is needed to complete the claim, which the service does for any
+/// payment Bitcoin mines in the lock's heights. A payment is held so that its cancels are:
+/// a cancel spends exactly the coins of a payment held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Payment {
+    /// The coins it spends, sorted: what it is known by.
+    pub coins: Vec<bitcoin::OutPoint>,
+    /// The signed transaction held: the copy the daemon vouched for, when there is one.
+    pub hex: String,
+    /// Its id.
+    pub txid: String,
+    /// Whether the Bitcoin daemon pools it or has mined it: real coins, validly signed,
+    /// paying the seller. Until then (its parent unknown to the daemon) it is unverified,
+    /// and held within [`MAX_UNVOUCHED_PAYMENTS`].
+    pub vouched: bool,
+    /// The client that handed it over.
+    pub by: String,
+    /// The cancels of it the daemon judged valid, highest fee first; at most
+    /// [`MAX_CANCELS`], each copy known by its witness id.
+    pub cancels: Vec<Cancel>,
+    /// The cancels of it the daemon could not check yet; at most [`MAX_PENDING_CANCELS`],
+    /// [`PENDING_PER_CLIENT`] from one client.
+    pub pending: Vec<Cancel>,
+    /// The first confirmed spend of its coins, once Bitcoin has one.
+    pub settled: Option<Settled>,
+}
+
+impl Payment {
+    /// A payment from its signed transaction, if it pays the terms' receiving script at
+    /// least the price; not vouched for, handed over by `by`.
+    fn new(hex: &str, terms: &PayLockTerms, by: &str) -> Result<Payment, Error> {
+        let t = btc_tx(hex, "signed payment")?;
+        let spk = terms.receive_script_pubkey();
+        if !t
+            .output
+            .iter()
+            .any(|o| o.script_pubkey == spk && o.value.to_sat() >= terms.price_sat)
+        {
+            return Err(Error(
+                "the signed payment does not pay the terms' receiving script the price".into(),
+            ));
+        }
+        Ok(Payment {
+            coins: inputs_of(&t),
+            hex: hex.to_string(),
+            txid: t.compute_txid().to_string(),
+            vouched: false,
+            by: by.to_string(),
+            cancels: vec![],
+            pending: vec![],
+            settled: None,
+        })
+    }
+
+    /// Whether Bitcoin has shown its coins real: the daemon vouched for the payment, or for
+    /// a cancel of it (a valid spend of exactly these coins, signed by their owner).
+    fn real(&self) -> bool {
+        self.vouched || self.cancels.iter().any(|c| c.vouched)
+    }
+
+    /// Whether it holds a cancel, checked or not.
+    fn has_cancel(&self) -> bool {
+        !self.cancels.is_empty() || !self.pending.is_empty()
+    }
+
+    /// Keeps a checked cancel, by its `wtxid`: a new one is added, up to [`MAX_CANCELS`],
+    /// beyond which it takes the place of the cheapest when it pays more. A copy vouched
+    /// for takes the place of an unvouched copy of the same transaction, and makes the
+    /// unchecked copies of it redundant; a copy of a transaction held vouched for adds
+    /// nothing. Only the payment's signer can make a valid cancel of it, so nobody else
+    /// can crowd these out. Says whether it kept it.
+    fn keep_cancel(&mut self, c: Cancel) -> bool {
+        if self.cancels.iter().any(|h| h.wtxid == c.wtxid) {
+            return false;
+        }
+        // The same transaction held vouched for: this copy adds nothing. (Unvouched copies
+        // of one transaction are each kept, and each judged by the daemon when sent.)
+        if self.cancels.iter().any(|h| h.txid == c.txid && h.vouched) {
+            return false;
+        }
+        // An unvouched copy of the same transaction gives way to a vouched one.
+        let gives_way = |h: &Cancel| c.vouched && h.txid == c.txid && !h.vouched;
+        let staying = self.cancels.iter().filter(|h| !gives_way(h)).count();
+        if staying >= MAX_CANCELS {
+            let (i, low) = self
+                .cancels
+                .iter()
+                .enumerate()
+                .filter(|(_, h)| !gives_way(h))
+                .min_by_key(|(_, h)| (h.fee, h.vouched))
+                .map(|(i, h)| (i, h.fee))
+                .expect("full");
+            if c.fee <= low {
+                return false;
+            }
+            self.cancels.remove(i);
+        }
+        if c.vouched {
+            // Kept: the unvouched and unchecked copies of it are redundant.
+            self.cancels.retain(|h| !gives_way(h));
+            self.pending.retain(|p| p.txid != c.txid);
+        }
+        self.pending.retain(|p| p.wtxid != c.wtxid);
+        self.cancels.push(Cancel {
+            by: String::new(),
+            ..c
+        });
+        self.cancels.sort_by(|a, b| b.fee.cmp(&a.fee));
+        true
+    }
+
+    /// Keeps a cancel the daemon could not check yet, by its `wtxid`, up to
+    /// [`MAX_PENDING_CANCELS`] and [`PENDING_PER_CLIENT`] from its client; says whether it
+    /// is new. A copy that differs from one held only in its witness is a copy of its own:
+    /// one with a bad witness never stands in for the buyer's. A copy of a transaction held
+    /// vouched for adds nothing. Beyond those limits it is refused, and the answer says to
+    /// post it again once the payment's parent is broadcast, when it can be checked and
+    /// kept with the checked ones.
+    fn keep_pending(&mut self, c: Cancel) -> Result<bool, Refused> {
+        if self
+            .cancels
+            .iter()
+            .chain(&self.pending)
+            .any(|h| h.wtxid == c.wtxid)
+            || self.cancels.iter().any(|h| h.txid == c.txid && h.vouched)
+        {
+            return Ok(false);
+        }
+        let mine = self.pending.iter().filter(|p| p.by == c.by).count();
+        if self.pending.len() >= MAX_PENDING_CANCELS || mine >= PENDING_PER_CLIENT {
+            return Err(Refused::Limit(Error(
+                "the job holds as many cancels of this payment as it keeps before their coins can be checked: post this one again once the payment's parent is broadcast".into(),
+            )));
+        }
+        self.pending.push(c);
+        Ok(true)
+    }
+
+    /// Takes in what another copy of the same payment (the same coins) adds: a vouched
+    /// copy in place of an unvouched one, its cancels and its unchecked cancels. Returns
+    /// what it took in.
+    fn take_in(&mut self, new: Payment) -> Result<Vec<&'static str>, Refused> {
+        let mut what = vec![];
+        if (new.vouched && !self.vouched) || (self.hex.is_empty() && !new.hex.is_empty()) {
+            self.hex = new.hex;
+            self.txid = new.txid;
+            self.vouched = new.vouched;
+            what.push("payment");
+        }
+        let mut took = false;
+        for c in new.cancels {
+            took |= self.keep_cancel(c);
+        }
+        if took {
+            what.push("cancels");
+        }
+        let mut took = false;
+        for c in new.pending {
+            took |= self.keep_pending(c)?;
+        }
+        if took {
+            what.push("pending_cancels");
+        }
+        Ok(what)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "coins": self.coins.iter().map(|c| format!("{}:{}", c.txid, c.vout)).collect::<Vec<_>>(),
+            "txid": self.txid,
+            "hex": self.hex,
+            "vouched": self.vouched,
+            "by": self.by,
+            "cancels": self.cancels.iter().map(|c| json!({"hex": c.hex, "fee": c.fee, "vouched": c.vouched})).collect::<Vec<_>>(),
+            "pending": self.pending.iter().map(|c| json!({"hex": c.hex, "by": c.by})).collect::<Vec<_>>(),
+            "settled": self.settled.as_ref().map(|s| json!({"height": s.at.height, "block": s.at.block, "txid": s.at.txid, "paid": s.paid})),
+        })
+    }
+
+    fn from_stored(v: &Value, terms: &PayLockTerms) -> Result<Payment, Error> {
+        let by = v.get("by").and_then(Value::as_str).unwrap_or_default();
+        let mut p = match v.get("hex").and_then(Value::as_str).unwrap_or_default() {
+            "" => Payment {
+                coins: v
+                    .get("coins")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c.as_str()?.parse().ok())
+                    .collect(),
+                hex: String::new(),
+                txid: v
+                    .get("txid")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                vouched: false,
+                by: by.to_string(),
+                cancels: vec![],
+                pending: vec![],
+                settled: None,
+            },
+            h => Payment::new(h, terms, by)?,
+        };
+        p.vouched = v.get("vouched").and_then(Value::as_bool).unwrap_or(false);
+        for c in v
+            .get("cancels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let mut k = Cancel::new(c.get("hex").and_then(Value::as_str).unwrap_or_default())?;
+            k.fee = c.get("fee").and_then(Value::as_u64).unwrap_or(0);
+            k.vouched = c.get("vouched").and_then(Value::as_bool).unwrap_or(false);
+            p.cancels.push(k);
+        }
+        for c in v
+            .get("pending")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let mut k = Cancel::new(c.get("hex").and_then(Value::as_str).unwrap_or_default())?;
+            k.by = c
+                .get("by")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            p.pending.push(k);
+        }
+        p.settled = v.get("settled").and_then(|s| {
+            Some(Settled {
+                at: Found {
+                    height: s.get("height")?.as_u64()? as u32,
+                    block: s.get("block")?.as_str()?.to_string(),
+                    txid: s.get("txid")?.as_str()?.to_string(),
+                },
+                paid: s.get("paid")?.as_bool()?,
+            })
+        });
+        Ok(p)
     }
 }
 
@@ -211,8 +471,9 @@ impl State {
 /// carrying up to a thousand swaps at once beside one node and one Bitcoin daemon.
 #[derive(Debug, Clone)]
 pub struct Limits {
-    /// Live jobs (not yet decided) carried at once; intake refuses more. A decided job
-    /// still watched does not count.
+    /// Live jobs (not yet decided) carried at once; intake refuses more, but never a job
+    /// whose payment the Bitcoin daemon vouches for. A decided job still watched does not
+    /// count.
     pub max_jobs: usize,
     /// A request's body, in bytes.
     pub max_body: usize,
@@ -239,11 +500,9 @@ pub struct Limits {
     /// Days an archived job is kept.
     pub archive_days: u64,
     /// Live jobs one client may have started (a post that merges into a job held starts
-    /// none); intake refuses it more. 0: no limit.
+    /// none); intake refuses it more, but never a job whose payment the Bitcoin daemon
+    /// vouches for. 0: no limit.
     pub jobs_per_client: usize,
-    /// Live jobs one lock may carry (a payment and its replacements); intake refuses it
-    /// more, so every few jobs cost a real lock. Jobs on other locks never count.
-    pub jobs_per_lock: usize,
 }
 
 impl Default for Limits {
@@ -262,15 +521,16 @@ impl Default for Limits {
             watch_every: Duration::from_secs(30),
             archive_days: 30,
             jobs_per_client: 50,
-            jobs_per_lock: JOBS_PER_LOCK,
         }
     }
 }
 
-/// One swap the service carries.
+/// One swap the service carries: one per lock.
 #[derive(Debug, Clone)]
 pub struct Job {
-    /// The job's name: a hash of its terms, its lock and its payment's id.
+    /// The job's name: a hash of its lock. Nothing a client chooses (a payment's id, say)
+    /// names a job, so every post for a lock merges into the one job, and none takes a
+    /// place of its own.
     pub id: String,
     /// The swap's terms.
     pub terms: PayLockTerms,
@@ -278,26 +538,17 @@ pub struct Job {
     pub lock: OutPoint,
     /// The signed claims: every tier, in every fee asset the buyer signed.
     pub claims: Vec<Transaction>,
-    /// The buyer's signed cancels of its payment, checked by the Bitcoin daemon, cheapest
-    /// last; at most [`MAX_CANCELS`].
-    pub cancels: Vec<Cancel>,
-    /// Cancels the daemon could not check yet, for it does not know the coins they spend;
-    /// at most [`MAX_PENDING_CANCELS`], each copy (by `wtxid`) on its own. Each is checked
-    /// again until it can be, and sent at `D - 2` meanwhile (a daemon refuses an invalid
-    /// one). Only intake's checks put one here: a request never names them.
-    pub pending: Vec<Cancel>,
+    /// The payments held, each with its cancels. None is needed to complete the claim.
+    pub payments: Vec<Payment>,
     /// The client that started the job (its address), for [`Limits::jobs_per_client`].
     /// Set by the service from the connection, never read from a request.
     pub client: String,
-    /// The payment's Bitcoin transaction id, as the buyer named it.
-    pub payment: String,
-    /// The signed payment itself, when the buyer hands it over or the Bitcoin daemon's
-    /// mempool holds it: it names the payment's coins, and the service sends it again if
-    /// a Bitcoin reorganization evicts it before `D`.
-    pub payment_hex: Option<String>,
-    /// Whether the daemon has vouched for `payment_hex` (accepted it, or pooled it):
-    /// its witness, which its id does not cover, is then the one that relays.
-    pub payment_checked: bool,
+    /// A request's payment id: only a hint, to take the payment from the daemon's
+    /// mempool. Never stored, never a name.
+    pub hint: Option<String>,
+    /// A request's cancels, until intake places each with the payment whose coins it
+    /// spends exactly. Never stored.
+    pub loose: Vec<Cancel>,
     /// Where it stands.
     pub state: State,
     /// The claim in use (an index into `claims`).
@@ -345,19 +596,10 @@ fn is_txid(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// A job's name: its terms, its lock and its payment's id, hashed. Whatever else is
-/// posted under it (claims, cancels, the signed payment) is merged into the one job.
-pub fn job_id(terms: &PayLockTerms, lock: &OutPoint, payment_txid: &str) -> String {
-    sha256::Hash::hash(
-        format!(
-            "{}|{}:{}|{payment_txid}",
-            terms.to_json(),
-            lock.txid,
-            lock.vout
-        )
-        .as_bytes(),
-    )
-    .to_string()
+/// A job's name: its lock, hashed. Whatever is posted for that lock (claims, payments,
+/// cancels) is merged into the one job.
+pub fn job_id(lock: &OutPoint) -> String {
+    sha256::Hash::hash(format!("paylock|{}:{}", lock.txid, lock.vout).as_bytes()).to_string()
 }
 
 fn btc_tx(hex: &str, what: &str) -> Result<bitcoin::Transaction, Error> {
@@ -410,55 +652,15 @@ fn request_cancels(v: &Value) -> Result<Vec<Cancel>, Error> {
     Ok(out)
 }
 
-/// The cancels a stored job holds: `cancels`, each `{hex, fee, vouched}` (a job stored
-/// before `vouched` was kept counts its checked cancels vouched for, as they were judged
-/// valid).
-fn stored_cancels(v: &Value) -> Result<Vec<Cancel>, Error> {
-    let mut out = vec![];
-    for c in v
-        .get("cancels")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let mut k = Cancel::new(c.get("hex").and_then(Value::as_str).unwrap_or_default())?;
-        k.fee = c.get("fee").and_then(Value::as_u64).unwrap_or(0);
-        k.vouched = c.get("vouched").and_then(Value::as_bool).unwrap_or(true);
-        out.push(k);
-    }
-    Ok(out)
-}
-
-/// The cancels a stored job holds that could not be checked yet: `pending`, each
-/// `{hex, by}`.
-fn stored_pending(v: &Value) -> Result<Vec<Cancel>, Error> {
-    let mut out = vec![];
-    for c in v
-        .get("pending")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let mut k = Cancel::new(c.get("hex").and_then(Value::as_str).unwrap_or_default())?;
-        k.by = c
-            .get("by")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        out.push(k);
-    }
-    Ok(out)
-}
-
 impl Job {
     /// A job from what a buyer's wallet hands over:
-    /// `{terms, lock: "txid:vout", claims: [hex...], cancel?: hex, cancels?: [hex...],
-    /// payment: txid, payment_hex?: hex}`. Nothing else is read: what the service keeps of
+    /// `{terms, lock: "txid:vout", claims: [hex...], payment?: txid, payment_hex?: hex,
+    /// cancel?: hex, cancels?: [hex...]}`. Nothing else is read: what the service keeps of
     /// its own (unchecked cancels, a cancel's fee, the client, the job's progress) never
-    /// comes from a request. This checks the form only: every claim spends the lock through
-    /// the claim leaf, the signed payment hashes to the payment's id, and each cancel is a
-    /// Bitcoin transaction that is not the payment and spends exactly its coins when they
-    /// are known. [`check_intake`] checks the signatures against the chains.
+    /// comes from a request, and the payment's id is only a hint. This checks the form
+    /// only: every claim spends the lock through the claim leaf, and the signed payment
+    /// pays the terms' receiving script at least the price. [`check_intake`] checks the
+    /// signatures against the chains and places each cancel with its payment.
     pub fn from_request(v: &Value) -> Result<Job, Error> {
         Job::parse(v, false)
     }
@@ -524,44 +726,52 @@ impl Job {
                 return Err(Error("a claim pays no fee in the clear".into()));
             }
         }
-        let payment = v
-            .get("payment")
-            .and_then(Value::as_str)
-            .filter(|p| is_txid(p))
-            .ok_or_else(|| Error("a job needs the payment's Bitcoin transaction id".into()))?
-            .to_lowercase();
-        let payment_hex = v
-            .get("payment_hex")
-            .and_then(Value::as_str)
-            .map(String::from);
-        let (cancels, pending, client) = if stored {
-            (
-                stored_cancels(v)?,
-                stored_pending(v)?,
-                v.get("client")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            )
+        let id = job_id(&lock);
+        let mut payments = vec![];
+        let (mut hint, mut loose, mut client) = (None, vec![], String::new());
+        if stored {
+            for p in v
+                .get("payments")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                payments.push(Payment::from_stored(p, &terms)?);
+            }
+            client = v
+                .get("client")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
         } else {
-            (request_cancels(v)?, vec![], String::new())
-        };
-        if cancels.len() > MAX_CANCELS {
-            return Err(Error(format!(
-                "a job carries at most {MAX_CANCELS} cancels"
-            )));
+            hint = match v.get("payment") {
+                None | Some(Value::Null) => None,
+                Some(p) => Some(
+                    p.as_str()
+                        .filter(|p| is_txid(p))
+                        .ok_or_else(|| Error("payment is a Bitcoin transaction id".into()))?
+                        .to_lowercase(),
+                ),
+            };
+            if let Some(h) = v.get("payment_hex").and_then(Value::as_str) {
+                payments.push(Payment::new(h, &terms, "")?);
+            }
+            loose = request_cancels(v)?;
+            if loose.len() > MAX_CANCELS {
+                return Err(Error(format!(
+                    "a post carries at most {MAX_CANCELS} cancels"
+                )));
+            }
         }
         let mut job = Job {
-            id: job_id(&terms, &lock, &payment),
+            id,
             terms,
             lock,
             claims: vec![],
-            cancels,
-            pending,
+            payments,
             client,
-            payment,
-            payment_hex,
-            payment_checked: false,
+            hint,
+            loose,
             state: State::Waiting,
             tier: 0,
             raised: false,
@@ -597,27 +807,16 @@ impl Job {
         true
     }
 
-    /// The signed payment hashes to the payment's id, and every cancel is not the payment
-    /// and spends exactly its coins when the signed payment is known.
+    /// Every payment held pays the terms; every cancel held spends exactly its payment's
+    /// coins and is not the payment.
     fn check_form(&self) -> Result<(), Error> {
-        let pay = match &self.payment_hex {
-            Some(h) => {
-                let t = btc_tx(h, "signed payment")?;
-                if t.compute_txid().to_string() != self.payment {
-                    return Err(Error(
-                        "the signed payment is not the payment the job names".into(),
-                    ));
+        for p in &self.payments {
+            for c in p.cancels.iter().chain(&p.pending) {
+                let t = btc_tx(&c.hex, "cancel")?;
+                if c.txid == p.txid {
+                    return Err(Error("the cancel is the payment itself".into()));
                 }
-                Some(t)
-            }
-            None => None,
-        };
-        for c in self.cancels.iter().chain(&self.pending) {
-            if c.txid == self.payment {
-                return Err(Error("the cancel is the payment itself".into()));
-            }
-            if let Some(p) = &pay {
-                if inputs_of(p) != inputs_of(&btc_tx(&c.hex, "cancel")?) {
+                if inputs_of(&t) != p.coins {
                     return Err(Error(
                         "the cancel does not spend exactly the payment's coins".into(),
                     ));
@@ -636,20 +835,12 @@ impl Job {
             .iter()
             .map(|c| hex_encode(&serialize(c)))
             .collect::<Vec<_>>());
-        v["cancels"] = json!(self
-            .cancels
+        v["payments"] = json!(self
+            .payments
             .iter()
-            .map(|c| json!({"hex": c.hex, "fee": c.fee, "vouched": c.vouched}))
-            .collect::<Vec<_>>());
-        v["pending"] = json!(self
-            .pending
-            .iter()
-            .map(|c| json!({"hex": c.hex, "by": c.by}))
+            .map(Payment::to_json)
             .collect::<Vec<_>>());
         v["client"] = json!(self.client);
-        v["payment"] = json!(self.payment);
-        v["payment_hex"] = json!(self.payment_hex);
-        v["payment_checked"] = json!(self.payment_checked);
         v["scanned"] = json!(self
             .scan
             .scanned
@@ -661,7 +852,7 @@ impl Job {
                 .map(|f| json!({"height": f.height, "block": f.block, "txid": f.txid})))
         };
         v["found"] = f(&self.scan.found);
-        v["cancel_found"] = f(&self.scan.cancel);
+        v["late"] = f(&self.scan.late);
         v["lock_known"] = json!(self.lock_known);
         v["lock_checked_at"] = json!(self.lock_checked_at);
         v["cancel_at"] = json!(self.cancel_at);
@@ -674,6 +865,13 @@ impl Job {
     /// Where the job stands, as the service answers anyone who reads it: no signed
     /// claim, no cancel, no payment, no terms.
     pub fn public_json(&self) -> Value {
+        let held = |f: fn(&Payment) -> usize| self.payments.iter().map(f).sum::<usize>();
+        let cancelled = self
+            .payments
+            .iter()
+            .filter_map(|p| p.settled.as_ref().filter(|s| !s.paid))
+            .map(|s| s.at.height)
+            .max();
         json!({
             "id": self.id,
             "lock": format!("{}:{}", self.lock.txid, self.lock.vout),
@@ -685,13 +883,16 @@ impl Job {
             "fee": self.claims.get(self.tier).and_then(fee_of).map(|(a, f)| json!({"asset": a.to_string(), "atoms": f})),
             "pooled_at": self.pooled_at,
             "mined_at": self.mined_at,
-            "payment_height": self.scan.found.as_ref().map(|f| f.height),
-            "payment_bumped": self.scan.found.as_ref().map(|f| f.txid != self.payment),
-            "has_cancel": !self.cancels.is_empty() || !self.pending.is_empty(),
-            "cancels": self.cancels.len(),
-            "pending_cancels": self.pending.len(),
+            // Where a payment was mined: in the lock's heights, or else after `D`.
+            "payment_height": self.scan.found.as_ref().or(self.scan.late.as_ref()).map(|f| f.height),
+            "payment_bumped": self.scan.found.as_ref().or(self.scan.late.as_ref()).map(|f| !self.payments.iter().any(|p| p.txid == f.txid)),
+            "payments": self.payments.len(),
+            "unvouched_payments": self.payments.iter().filter(|p| !p.vouched).count(),
+            "has_cancel": self.payments.iter().any(Payment::has_cancel),
+            "cancels": held(|p| p.cancels.len()),
+            "pending_cancels": held(|p| p.pending.len()),
             "cancel_sent": self.cancel_sent,
-            "cancel_height": self.scan.cancel.as_ref().map(|f| f.height),
+            "cancel_height": cancelled,
             "decided_at": self.decided_at,
             "buried": self.buried,
             "failures": self.failures,
@@ -704,21 +905,15 @@ impl Job {
         let mut j = Job::parse(v, true)?;
         let n = |k: &str| v.get(k).and_then(Value::as_u64);
         let b = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
-        let payment = j.payment.clone();
         let found = |k: &str| {
             v.get(k).and_then(|s| {
                 Some(Found {
                     height: s.get("height")?.as_u64()? as u32,
                     block: s.get("block")?.as_str()?.to_string(),
-                    txid: s
-                        .get("txid")
-                        .and_then(Value::as_str)
-                        .unwrap_or(&payment)
-                        .to_string(),
+                    txid: s.get("txid")?.as_str()?.to_string(),
                 })
             })
         };
-        j.payment_checked = b("payment_checked");
         j.state = State::parse(v.get("state").and_then(Value::as_str).unwrap_or_default());
         j.tier = (n("tier").unwrap_or(0) as usize).min(j.claims.len() - 1);
         j.raised = b("raised");
@@ -732,7 +927,8 @@ impl Job {
                 ))
             }),
             found: found("found"),
-            cancel: found("cancel_found"),
+            cancel: None,
+            late: found("late"),
         };
         j.cancel_sent = b("cancel_sent");
         j.cancel_tried = b("cancel_tried");
@@ -752,7 +948,7 @@ impl Job {
         Ok(j)
     }
 
-    /// Whether the payment is known to be mined at a height the claim accepts.
+    /// Whether a payment is known to be mined at a height the claim accepts.
     fn paid_in_window(&self) -> bool {
         self.scan
             .found
@@ -761,20 +957,38 @@ impl Job {
             .unwrap_or(false)
     }
 
-    /// The coins the payment spends, read from the signed payment, else from a cancel
-    /// (which spends exactly them); none while neither is known.
-    fn payment_coins(&self) -> Vec<bitcoin::OutPoint> {
-        self.payment_hex
-            .as_deref()
-            .or(self
-                .cancels
-                .iter()
-                .chain(&self.pending)
-                .next()
-                .map(|c| c.hex.as_str()))
-            .and_then(|h| btc_tx(h, "payment").ok())
-            .map(|t| inputs_of(&t))
-            .unwrap_or_default()
+    /// The payment held that spends exactly `coins`.
+    fn payment_for(&mut self, coins: &[bitcoin::OutPoint]) -> Option<&mut Payment> {
+        self.payments.iter_mut().find(|p| p.coins == coins)
+    }
+
+    /// Takes in a payment (with its cancels): into the payment held with the same coins,
+    /// or as a new one. One the daemon vouches for is always taken; an unvouched one only
+    /// within [`MAX_UNVOUCHED_PAYMENTS`] and [`UNVOUCHED_PER_CLIENT`], beyond which the
+    /// answer is to post it again once its parent is broadcast. Returns what it took in.
+    fn take_payment(&mut self, p: Payment) -> Result<Vec<&'static str>, Refused> {
+        let coins = p.coins.clone();
+        if let Some(held) = self.payment_for(&coins) {
+            return held.take_in(p);
+        }
+        if !p.vouched {
+            let unvouched = self.payments.iter().filter(|h| !h.vouched);
+            let mine = unvouched.clone().filter(|h| h.by == p.by).count();
+            if unvouched.count() >= MAX_UNVOUCHED_PAYMENTS || mine >= UNVOUCHED_PER_CLIENT {
+                return Err(Refused::Limit(Error(
+                    "the job holds as many payments as it keeps before the Bitcoin daemon can check them: post this one again once its parent is broadcast".into(),
+                )));
+            }
+        }
+        let mut what = vec!["payment"];
+        if !p.cancels.is_empty() {
+            what.push("cancels");
+        }
+        if !p.pending.is_empty() {
+            what.push("pending_cancels");
+        }
+        self.payments.push(p);
+        Ok(what)
     }
 
     /// The claims grouped by fee asset, in the order the buyer gave them, each group
@@ -804,78 +1018,6 @@ impl Job {
             Some(true) => false,
             Some(false) => now >= self.lock_checked_at + LOCK_RECHECK_SECS,
         }
-    }
-
-    /// Keeps a checked cancel, by its `wtxid`: a new one is added, up to [`MAX_CANCELS`],
-    /// beyond which it takes the place of the cheapest when it pays more. A copy vouched
-    /// for takes the place of an unvouched copy of the same transaction, and makes the
-    /// unchecked copies of it redundant; a copy of a transaction held vouched for adds
-    /// nothing. Says whether it kept it.
-    fn keep_cancel(&mut self, c: Cancel) -> bool {
-        if self.cancels.iter().any(|h| h.wtxid == c.wtxid) {
-            return false;
-        }
-        // The same transaction held vouched for: this copy adds nothing. (Unvouched copies
-        // of one transaction are each kept, and each judged by the daemon when sent.)
-        if self.cancels.iter().any(|h| h.txid == c.txid && h.vouched) {
-            return false;
-        }
-        // An unvouched copy of the same transaction gives way to a vouched one.
-        let gives_way = |h: &Cancel| c.vouched && h.txid == c.txid && !h.vouched;
-        let staying = self.cancels.iter().filter(|h| !gives_way(h)).count();
-        if staying >= MAX_CANCELS {
-            let (i, low) = self
-                .cancels
-                .iter()
-                .enumerate()
-                .filter(|(_, h)| !gives_way(h))
-                .min_by_key(|(_, h)| (h.fee, h.vouched))
-                .map(|(i, h)| (i, h.fee))
-                .expect("full");
-            if c.fee <= low {
-                return false;
-            }
-            self.cancels.remove(i);
-        }
-        if c.vouched {
-            // Kept: the unvouched and unchecked copies of it are redundant.
-            self.cancels.retain(|h| !gives_way(h));
-            self.pending.retain(|p| p.txid != c.txid);
-        }
-        self.pending.retain(|p| p.wtxid != c.wtxid);
-        self.cancels.push(Cancel {
-            by: String::new(),
-            ..c
-        });
-        self.cancels.sort_by(|a, b| b.fee.cmp(&a.fee));
-        true
-    }
-
-    /// Keeps a cancel the daemon could not check yet, by its `wtxid`, up to
-    /// [`MAX_PENDING_CANCELS`] and [`PENDING_PER_CLIENT`] from its client; says whether it
-    /// is new. A copy that differs from one held only in its witness is a copy of its own:
-    /// one with a bad witness never stands in for the buyer's. A copy of a transaction held
-    /// vouched for adds nothing. Beyond those limits it is refused, and the answer says to
-    /// post it again once the payment's parent is broadcast, when it can be checked and
-    /// kept with the checked ones.
-    fn keep_pending(&mut self, c: Cancel) -> Result<bool, Refused> {
-        if self
-            .cancels
-            .iter()
-            .chain(&self.pending)
-            .any(|h| h.wtxid == c.wtxid)
-            || self.cancels.iter().any(|h| h.txid == c.txid && h.vouched)
-        {
-            return Ok(false);
-        }
-        let mine = self.pending.iter().filter(|p| p.by == c.by).count();
-        if self.pending.len() >= MAX_PENDING_CANCELS || mine >= PENDING_PER_CLIENT {
-            return Err(Refused::Limit(Error(
-                "the job holds as many cancels as it keeps before their coins can be checked: post this one again once the payment's parent is broadcast".into(),
-            )));
-        }
-        self.pending.push(c);
-        Ok(true)
     }
 }
 
@@ -1066,25 +1208,80 @@ fn check_lock_for_intake(seq: &SeqChain, job: &Job) -> Result<(), Refused> {
     )))
 }
 
-/// Checks a job against the chains before the service holds anything of it, and returns
-/// what it kept in a way worth saying, in words. `held` says the service already holds
-/// a job of this name (the post merges into it).
+/// Has the Bitcoin daemon judge a payment handed over, and vouch for it if it can: one
+/// it accepts now is broadcast (as the buyer is about to), so a payment the service holds
+/// as vouched for is one Bitcoin pools or has mined. One whose coins the daemon does not
+/// know yet stays unvouched; one whose signatures fail is refused.
+fn vouch(btc: &BtcChain, p: &mut Payment, notes: &mut Vec<String>) -> Result<(), Refused> {
+    let down = Refused::Unavailable;
+    let a = btc.test_accept(&p.hex).map_err(down)?;
+    let now = matches!(a, Accept::Allowed { .. });
+    match judge_payment(&a) {
+        // Pooled under this witness, or mined.
+        PaymentCheck::Vouched if !now => p.vouched = true,
+        PaymentCheck::Vouched => match btc.send_raw(&p.hex) {
+            Ok(_) => {
+                p.vouched = true;
+                notes.push(format!("the payment {} is broadcast", p.txid));
+            }
+            Err(e) if e.to_string().contains("already") => p.vouched = true,
+            Err(e) => notes.push(format!(
+                "the payment {} is kept unvouched: the Bitcoin daemon does not take it now ({e})",
+                p.txid
+            )),
+        },
+        PaymentCheck::PooledCopy => {
+            if let Some(h) = btc.mempool_tx(&p.txid).map_err(down)? {
+                p.hex = h;
+                p.vouched = true;
+            }
+        }
+        PaymentCheck::Kept => notes.push(format!(
+            "the payment {} is kept unvouched: the Bitcoin daemon does not vouch for it now ({}); it is checked again every round",
+            p.txid,
+            match &a {
+                Accept::Refused(r) => r.as_str(),
+                Accept::Allowed { .. } => "",
+            }
+        )),
+        PaymentCheck::Invalid(m) => return Err(Refused::Bad(Error(m))),
+    }
+    Ok(())
+}
+
+/// Checks a post against the chains before the service holds anything of it, and returns
+/// what it kept in a way worth saying, in words. `held` is the job the service already
+/// holds for this lock, which the post merges into.
 ///
-/// - a new job's lock is an unspent output paying the terms' script, asset and atoms;
+/// - a new job's lock is an unspent output paying the terms' script, asset and atoms; a
+///   post for a held job must name terms that make the same lock;
 /// - every claim is signed by the terms' buyer for this very transaction (and its fee
 ///   coin, if any, by the coin's key): a claim that fails is refused;
-/// - the signed payment, when given, is judged by the Bitcoin daemon ([`judge_payment`]:
-///   a payment whose signatures fail is refused); when not given, the daemon's mempool is
-///   asked for it;
-/// - each cancel spends exactly the payment's coins and is judged by the daemon
-///   ([`judge_cancel`]): valid, already pooled or mined, it is kept; one whose coins the
-///   daemon does not know yet is kept unchecked ([`Job::pending`]) and checked again
-///   until it can be; one that fails is refused. A cancel with no known payment is
-///   refused: its coins cannot be compared.
-pub fn check_intake(intake: &Intake, job: &mut Job, held: bool) -> Result<Vec<String>, Refused> {
+/// - the signed payment, when given, pays the terms' receiving script at least the price,
+///   and is judged by the Bitcoin daemon ([`vouch`]); when not given, the payment id, if
+///   any, is only a hint to take a paying transaction from the daemon's mempool;
+/// - each cancel spends exactly the coins of the post's payment or of one the job holds,
+///   and is judged by the daemon ([`judge_cancel`]): valid, already pooled or mined, it is
+///   kept; one whose coins the daemon does not know yet is kept unchecked
+///   ([`Payment::pending`]) and checked again until it can be; one that fails is refused.
+pub fn check_intake(
+    intake: &Intake,
+    job: &mut Job,
+    held: Option<&Job>,
+) -> Result<Vec<String>, Refused> {
     let down = Refused::Unavailable;
-    if !held {
-        check_lock_for_intake(&intake.seq, job)?;
+    match held {
+        None => check_lock_for_intake(&intake.seq, job)?,
+        Some(h) => {
+            let bad = |e: lwk_wollet::Error| Refused::Bad(e.into());
+            if paylock::lock_txout(&h.terms).map_err(bad)?
+                != paylock::lock_txout(&job.terms).map_err(bad)?
+            {
+                return Err(Refused::Bad(Error(
+                    "these terms do not make the lock the service holds a job for".into(),
+                )));
+            }
+        }
     }
     let genesis = intake.genesis().map_err(down)?;
     // The outputs the claims' fee coins spend, read first: a node that does not answer
@@ -1117,34 +1314,53 @@ pub fn check_intake(intake: &Intake, job: &mut Job, held: bool) -> Result<Vec<St
             .map_err(|e| Refused::Bad(Error(format!("claim {i}: {e}"))))?;
     }
     let mut notes = vec![];
-    match job.payment_hex.clone() {
-        Some(h) => match judge_payment(&intake.btc.test_accept(&h).map_err(down)?) {
-            PaymentCheck::Vouched => job.payment_checked = true,
-            PaymentCheck::PooledCopy => {
-                if let Some(p) = intake.btc.mempool_tx(&job.payment).map_err(down)? {
-                    job.payment_hex = Some(p);
-                    job.payment_checked = true;
+    let client = job.client.clone();
+    for p in job.payments.iter_mut() {
+        p.by = client.clone();
+        vouch(&intake.btc, p, &mut notes)?;
+    }
+    if job.payments.is_empty() {
+        if let Some(h) = job.hint.clone() {
+            if let Some(hex) = intake.btc.mempool_tx(&h).map_err(down)? {
+                match Payment::new(&hex, &job.terms, &client) {
+                    Ok(mut p) if p.txid == h => {
+                        p.vouched = true;
+                        job.payments.push(p);
+                    }
+                    Ok(_) => {}
+                    Err(e) => notes.push(format!("the transaction {h} is not held: {}", e.0)),
                 }
-            }
-            PaymentCheck::Kept => {}
-            PaymentCheck::Invalid(m) => return Err(Refused::Bad(Error(m))),
-        },
-        None => {
-            if let Some(p) = intake.btc.mempool_tx(&job.payment).map_err(down)? {
-                job.payment_hex = Some(p);
-                job.payment_checked = true;
             }
         }
     }
-    if !job.cancels.is_empty() && job.payment_hex.is_none() {
-        return Err(Refused::Bad(Error(
-            "a cancel is kept only beside the payment it cancels: give payment_hex, or post it once the payment is broadcast".into(),
-        )));
-    }
-    job.check_form().map_err(Refused::Bad)?;
-    let mut kept = vec![];
-    let mut unknown = vec![];
-    for mut c in std::mem::take(&mut job.cancels) {
+    // Each cancel goes with the payment whose coins it spends exactly: the post's, or one
+    // the job holds.
+    for mut c in std::mem::take(&mut job.loose) {
+        let spent = inputs_of(&btc_tx(&c.hex, "cancel").map_err(Refused::Bad)?);
+        if job.payment_for(&spent).is_none() {
+            match held.and_then(|h| h.payments.iter().find(|p| p.coins == spent)) {
+                Some(p) => job.payments.push(Payment {
+                    cancels: vec![],
+                    pending: vec![],
+                    by: client.clone(),
+                    ..p.clone()
+                }),
+                None => {
+                    let known = !job.payments.is_empty()
+                        || held.map(|h| !h.payments.is_empty()).unwrap_or(false);
+                    return Err(Refused::Bad(Error(if known {
+                        "the cancel does not spend exactly the payment's coins".into()
+                    } else {
+                        "a cancel is kept only beside the payment it cancels: give payment_hex, or post it once the payment is broadcast".into()
+                    })));
+                }
+            }
+        }
+        if job.payment_for(&spent).map(|p| p.txid == c.txid) == Some(true) {
+            return Err(Refused::Bad(Error(
+                "the cancel is the payment itself".into(),
+            )));
+        }
         match judge_cancel(&intake.btc.test_accept(&c.hex).map_err(down)?) {
             CancelCheck::Valid { fee, vouched, note } => {
                 c.vouched = vouched;
@@ -1155,7 +1371,7 @@ pub fn check_intake(intake: &Intake, job: &mut Job, held: bool) -> Result<Vec<St
                 if let Some(n) = note {
                     notes.push(format!("the cancel {} {n}", c.txid));
                 }
-                kept.push(c);
+                job.payment_for(&spent).expect("placed").keep_cancel(c);
             }
             CancelCheck::PooledCopy => {
                 match intake.btc.mempool_tx(&c.txid).map_err(down)? {
@@ -1171,61 +1387,121 @@ pub fn check_intake(intake: &Intake, job: &mut Job, held: bool) -> Result<Vec<St
                     "the cancel {} is already broadcast with another witness: the broadcast one is kept",
                     c.txid
                 ));
-                kept.push(c);
+                job.payment_for(&spent).expect("placed").keep_cancel(c);
             }
             CancelCheck::Unknown(r) => {
                 notes.push(format!(
                     "the cancel {} is kept unchecked: the Bitcoin daemon does not know the coins it spends yet ({r}); it is checked again until it does, and sent two blocks before the deadline",
                     c.txid
                 ));
-                c.by = job.client.clone();
-                unknown.push(c);
+                c.by = client.clone();
+                job.payment_for(&spent).expect("placed").keep_pending(c)?;
             }
             CancelCheck::Invalid(m) => return Err(Refused::Bad(Error(m))),
         }
     }
-    for c in kept {
-        job.keep_cancel(c);
-    }
-    for c in unknown {
-        job.keep_pending(c)?;
-    }
+    job.check_form().map_err(Refused::Bad)?;
     Ok(notes)
 }
 
-/// Checks a job's unchecked cancels again: one the daemon now accepts (or pools, or has
-/// mined) joins the checked ones; one whose signatures fail is dropped; any other stays
-/// unchecked, and is still sent when the cancels are due.
-fn recheck_pending(btc: &BtcChain, job: &mut Job) -> Result<(), Error> {
-    for c in job.pending.clone() {
-        let a = btc.test_accept(&c.hex)?;
-        match judge_cancel(&a) {
-            CancelCheck::Valid { fee, vouched, .. } => {
-                let fee = match fee {
-                    Some(f) => f,
-                    None => btc.mempool_fee(&c.txid)?.unwrap_or(0),
-                };
-                job.pending.retain(|p| p.wtxid != c.wtxid);
-                job.keep_cancel(Cancel { fee, vouched, ..c });
-            }
-            CancelCheck::PooledCopy => {
-                let fee = btc.mempool_fee(&c.txid)?.unwrap_or(0);
-                job.pending.retain(|p| p.wtxid != c.wtxid);
-                // The daemon's copy is the one that relays; this one adds nothing beside it.
-                if let Some(h) = btc.mempool_tx(&c.txid)? {
-                    let mut k = Cancel::new(&h)?;
-                    k.fee = fee;
-                    k.vouched = true;
-                    job.keep_cancel(k);
+/// Checks the payments a job holds again, each round:
+///
+/// - a payment the daemon could not vouch for is vouched for once Bitcoin's mempool holds
+///   a transaction spending its coins that pays the terms (the buyer broadcast it, or a
+///   replacement), or once the daemon accepts the copy held (which is then broadcast). A
+///   copy whose signatures fail never takes its payment's cancels with it: the payment is
+///   given up only when it holds no cancel;
+/// - a paying transaction in the mempool that spends a held payment's coins with other
+///   coins (a replacement that added an input) is held as a payment of its own;
+/// - a cancel not checked yet joins the checked ones once the daemon accepts it (or pools
+///   it, or has mined it), and is dropped if its signatures fail.
+fn recheck_payments(btc: &BtcChain, job: &mut Job) -> Result<(), Error> {
+    let terms = job.terms.clone();
+    let mut found = vec![];
+    let mut note = None;
+    for p in job.payments.iter_mut() {
+        if p.vouched || p.settled.is_some() {
+            continue;
+        }
+        if let Some(t) = p.coins.first() {
+            if let Some(id) = btc.mempool_spender(t)? {
+                if let Some(hex) = btc.mempool_tx(&id)? {
+                    if let Ok(mut q) = Payment::new(&hex, &terms, &p.by) {
+                        q.vouched = true;
+                        if q.coins == p.coins {
+                            p.hex = q.hex;
+                            p.txid = q.txid;
+                            p.vouched = true;
+                        } else {
+                            found.push(q);
+                        }
+                    }
                 }
             }
-            CancelCheck::Invalid(m) if matches!(&a, Accept::Refused(r) if Accept::scripts_fail(r)) =>
-            {
-                job.pending.retain(|p| p.wtxid != c.wtxid);
-                job.note = format!("an unchecked cancel was dropped: {m}");
-            }
-            _ => {}
         }
+        if p.vouched {
+            continue;
+        }
+        let a = btc.test_accept(&p.hex)?;
+        match judge_payment(&a) {
+            PaymentCheck::Vouched => {
+                if !matches!(a, Accept::Allowed { .. })
+                    || btc.send_raw(&p.hex).is_ok()
+                    || btc.pooled(&p.txid)?
+                {
+                    p.vouched = true;
+                }
+            }
+            PaymentCheck::Invalid(m) => {
+                note = Some(format!("a signed payment held was dropped: {m}"));
+                p.hex.clear();
+            }
+            PaymentCheck::PooledCopy | PaymentCheck::Kept => {}
+        }
+    }
+    for q in found {
+        let _ = job.take_payment(q);
+    }
+    // A copy whose signatures failed is given up with its payment only if that holds no
+    // cancel; otherwise the payment is kept (its coins name its cancels), without a copy.
+    job.payments.retain(|p| !p.hex.is_empty() || p.has_cancel());
+    for p in job.payments.iter_mut() {
+        if p.pending.is_empty() {
+            continue;
+        }
+        for c in p.pending.clone() {
+            let a = btc.test_accept(&c.hex)?;
+            match judge_cancel(&a) {
+                CancelCheck::Valid { fee, vouched, .. } => {
+                    let fee = match fee {
+                        Some(f) => f,
+                        None => btc.mempool_fee(&c.txid)?.unwrap_or(0),
+                    };
+                    p.pending.retain(|x| x.wtxid != c.wtxid);
+                    p.keep_cancel(Cancel { fee, vouched, ..c });
+                }
+                CancelCheck::PooledCopy => {
+                    let fee = btc.mempool_fee(&c.txid)?.unwrap_or(0);
+                    p.pending.retain(|x| x.wtxid != c.wtxid);
+                    // The daemon's copy is the one that relays; this one adds nothing beside it.
+                    if let Some(h) = btc.mempool_tx(&c.txid)? {
+                        let mut k = Cancel::new(&h)?;
+                        k.fee = fee;
+                        k.vouched = true;
+                        p.keep_cancel(k);
+                    }
+                }
+                CancelCheck::Invalid(m) if matches!(&a, Accept::Refused(r) if Accept::scripts_fail(r)) =>
+                {
+                    p.pending.retain(|x| x.wtxid != c.wtxid);
+                    note = Some(format!("an unchecked cancel was dropped: {m}"));
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(n) = note {
+        job.note = n;
     }
     Ok(())
 }
@@ -1400,112 +1676,114 @@ pub fn tick(
     }
     // The payment's coins name it on Bitcoin. Not handed over: the daemon's mempool may
     // hold it (only its own id, which covers its inputs, is trusted).
-    // A signed payment nobody has vouched for yet (its parent was not broadcast when it was
-    // handed over) may be a copy with a bad witness, for its id does not cover the
-    // witness: the daemon's pooled copy takes its place, and one whose signatures fail
-    // once they can be checked is dropped, so that the buyer's (or the mempool's) can be
-    // taken instead.
-    if (job.payment_hex.is_none() || !job.payment_checked) && job.scan.found.is_none() {
-        match btc.mempool_tx(&job.payment)? {
-            Some(p) if btc_tx(&p, "payment")?.compute_txid().to_string() == job.payment => {
-                job.payment_hex = Some(p);
-                job.payment_checked = true;
-            }
-            _ => {
-                if let Some(h) = job.payment_hex.clone() {
-                    match judge_payment(&btc.test_accept(&h)?) {
-                        PaymentCheck::Vouched => job.payment_checked = true,
-                        PaymentCheck::Invalid(m) => {
-                            job.payment_hex = None;
-                            job.note = format!("the signed payment held was dropped: {m}");
-                        }
-                        PaymentCheck::PooledCopy | PaymentCheck::Kept => {}
-                    }
-                }
-            }
-        }
-    }
-    // Cancels the daemon could not check at intake, checked again now that it may know
-    // their coins.
-    if !job.pending.is_empty() && !job.state.ended() {
-        recheck_pending(btc, job)?;
-    }
-    let coins = job.payment_coins();
-    let complete = btc.scan_for(
-        &job.payment,
-        &coins,
+    // The payments held, checked again: vouched for once Bitcoin holds them, their
+    // cancels checked once their coins are known. Ended jobs still watched too, so a
+    // payment that becomes known after a decision reopens it.
+    recheck_payments(btc, job)?;
+    let coins: Vec<Vec<bitcoin::OutPoint>> = job.payments.iter().map(|p| p.coins.clone()).collect();
+    let mut settled: Vec<Option<Settled>> =
+        job.payments.iter().map(|p| p.settled.clone()).collect();
+    let open = job
+        .payments
+        .iter()
+        .any(|p| p.real() && p.settled.is_none() && p.has_cancel());
+    let complete = btc.scan_lock(
         &job.terms,
+        &coins,
+        &mut settled,
+        open,
         &mut job.scan,
         limits.blocks_per_job,
         until,
     )?;
+    for (p, s) in job.payments.iter_mut().zip(settled) {
+        p.settled = s;
+    }
     let btc_tip = btc.tip()?;
-    // A confirmed spend of the payment's coins that does not pay the seller settles it:
-    // the payment can no longer be mined. Decided at that block.
+    let d = job.terms.deadline;
     if job.scan.found.is_none() {
-        if let Some(c) = job.scan.cancel.clone() {
-            let ours = job
-                .cancels
+        // The payments Bitcoin has shown real, or has settled. Unverified ones (coins the
+        // daemon has never seen) decide nothing.
+        let vouched: Vec<&Payment> = job
+            .payments
+            .iter()
+            .filter(|p| p.real() || p.settled.is_some())
+            .collect();
+        // Every one of them is settled: the swap's payment can no longer be mined, unless
+        // another comes (it is then found, and the job reopens), or a payment held becomes
+        // known (the job reopens with it).
+        if !vouched.is_empty() && vouched.iter().all(|p| p.settled.is_some()) {
+            let cancel = vouched
                 .iter()
-                .chain(&job.pending)
-                .any(|x| x.txid == c.txid);
-            end(
-                job,
-                State::Cancelled,
-                c.height,
-                btc_tip,
-                limits,
-                if ours {
-                    format!(
-                        "the cancel {} is confirmed in Bitcoin block {}: the buyer keeps its bitcoin",
-                        c.txid, c.height
-                    )
-                } else {
-                    format!(
-                        "the payment's coins are spent in Bitcoin block {} by {}, which does not pay the seller the price: the payment can no longer be mined",
-                        c.height, c.txid
-                    )
-                },
-            );
+                .filter_map(|p| Some((p, p.settled.as_ref().filter(|s| !s.paid)?)))
+                .max_by_key(|(_, s)| s.at.height);
+            match cancel {
+                Some((p, s)) => {
+                    let ours = p
+                        .cancels
+                        .iter()
+                        .chain(&p.pending)
+                        .any(|c| c.txid == s.at.txid);
+                    let (txid, h) = (s.at.txid.clone(), s.at.height);
+                    end(
+                        job,
+                        State::Cancelled,
+                        h.max(d),
+                        btc_tip,
+                        limits,
+                        if ours {
+                            format!("the cancel {txid} is confirmed in Bitcoin block {h}: the buyer keeps its bitcoin")
+                        } else {
+                            format!("the payment's coins are spent in Bitcoin block {h} by {txid}, which does not pay the seller the price: the payment can no longer be mined")
+                        },
+                    );
+                }
+                None => {
+                    let late = job.scan.late.clone();
+                    let h = late.as_ref().map(|f| f.height).unwrap_or(d);
+                    end(
+                        job,
+                        State::Never,
+                        h.max(d),
+                        btc_tip,
+                        limits,
+                        format!(
+                            "the payment is mined at Bitcoin block {h}, after the deadline {d}"
+                        ),
+                    );
+                }
+            }
             return Ok(());
         }
     }
     match payment_position(&job.terms, &job.scan, complete, btc_tip) {
         Position::Never(why) => {
-            match &job.scan.found {
-                Some(f) => {
-                    let h = f.height;
-                    end(job, State::Never, h, btc_tip, limits, why);
-                }
-                None if !job.cancels.is_empty() || !job.pending.is_empty() => {
-                    // Not mined by D, and cancels to send. The swap has an outcome only once
-                    // a spend of the payment's coins is confirmed (found above), whatever
-                    // the Sequentia node says of the lock: the cancel concerns Bitcoin alone.
-                    if btc_tip > job.terms.deadline.saturating_add(CANCEL_KEEP_BLOCKS) {
-                        let d = job.terms.deadline;
-                        end(
-                            job,
-                            State::Never,
-                            d,
-                            btc_tip,
-                            limits,
-                            format!("{why}; no spend of the payment's coins confirmed in {CANCEL_KEEP_BLOCKS} blocks"),
-                        );
-                    } else {
-                        job.state = State::Waiting;
-                        job.decided_at = None;
-                        job.buried = false;
-                        job.note = if job.cancel_sent {
-                            format!("{why}; the cancel is broadcast and not confirmed yet: it is sent again until a spend of the payment's coins is")
-                        } else {
-                            format!("{why}; the cancel is not accepted yet: it is sent again")
-                        };
-                    }
-                }
-                None => {
-                    let d = job.terms.deadline;
-                    end(job, State::Never, d, btc_tip, limits, why);
-                }
+            let open = job
+                .payments
+                .iter()
+                .any(|p| p.real() && p.settled.is_none() && p.has_cancel());
+            if open && btc_tip <= d.saturating_add(CANCEL_KEEP_BLOCKS) {
+                // Not mined by D, and cancels to send. The swap has an outcome only once a
+                // spend of the payment's coins is confirmed, whatever the Sequentia node
+                // says of the lock: the cancel concerns Bitcoin alone.
+                job.state = State::Waiting;
+                job.decided_at = None;
+                job.buried = false;
+                job.note = if job.cancel_sent {
+                    format!("{why}; the cancel is broadcast and not confirmed yet: it is sent again until a spend of the payment's coins is")
+                } else {
+                    format!("{why}; the cancel is not accepted yet: it is sent again")
+                };
+            } else {
+                let why = match &job.scan.late {
+                    Some(f) => format!(
+                        "the payment is mined at Bitcoin block {}, after the deadline {d}",
+                        f.height
+                    ),
+                    None if open => format!("{why}; no spend of the payment's coins confirmed in {CANCEL_KEEP_BLOCKS} blocks"),
+                    None => why,
+                };
+                end(job, State::Never, d, btc_tip, limits, why);
             }
         }
         Position::Waiting(why) => {
@@ -1513,11 +1791,15 @@ pub fn tick(
             job.decided_at = None;
             job.buried = false;
             job.note = why;
-            // Unmined and not in the daemon's mempool (a reorganization evicted it, say):
-            // send the buyer's payment again while it can still open the lock.
-            if complete && !job.cancel_sent && btc_tip < job.terms.deadline {
-                if let Some(p) = &job.payment_hex {
-                    if !btc.pooled(&job.payment)? && btc.send_raw(p).is_ok() {
+            // A payment Bitcoin vouched for, unmined and not in the daemon's mempool (a
+            // reorganization evicted it, say): sent again while it can still open the lock.
+            if complete && !job.cancel_sent && btc_tip < d {
+                for p in job
+                    .payments
+                    .iter()
+                    .filter(|p| p.vouched && p.settled.is_none() && !p.hex.is_empty())
+                {
+                    if !btc.pooled(&p.txid)? && btc.send_raw(&p.hex).is_ok() {
                         job.note = "the payment was not in the Bitcoin mempool: sent again".into();
                     }
                 }
@@ -1546,11 +1828,10 @@ pub fn tick(
                         job.pooled_at = Some(seq_tip);
                         job.state = State::Pooled;
                         job.note = format!(
-                            "the claim ({}tier, fee {}) is pooled with a proof of the payment {}{} in Bitcoin block {height}",
+                            "the claim ({}tier, fee {}) is pooled with a proof of the payment {} in Bitcoin block {height}",
                             if job.raised { "top " } else { "going " },
                             fee_of(&tx).map(|(a, f)| format!("{f} atoms of {a}")).unwrap_or_default(),
                             found.txid,
-                            if found.txid != job.payment { " (a replacement of the one named, spending its coins)" } else { "" },
                         );
                     }
                     Err(e) => {
@@ -1594,10 +1875,11 @@ pub fn send_due_cancels(
     let tip = btc.tip()?;
     let now = now_secs();
     let due = |j: &Job| {
-        (!j.cancels.is_empty() || !j.pending.is_empty())
+        j.payments
+            .iter()
+            .any(|p| p.settled.is_none() && p.has_cancel())
             && !j.state.ended()
             && !j.paid_in_window()
-            && j.scan.cancel.is_none()
             && paylock::cancel_due(&j.terms, tip, false)
             && tip <= j.terms.deadline.saturating_add(CANCEL_KEEP_BLOCKS)
             && (!j.cancel_tried || now >= j.cancel_at + CANCEL_RESEND_SECS)
@@ -1628,28 +1910,34 @@ pub fn send_due_cancels(
     }
     // The sends have the pass's budget of their own, so a lookup never costs a send.
     let end_at = Instant::now() + limits.cancel_pass_time;
-    let mut due_jobs: Vec<(u8, bool, u64, String, String)> = lock(store)
-        .jobs
-        .values()
-        .filter(|j| due(j))
-        .map(|j| {
-            let rank = match j.lock_known {
-                Some(true) => 0,
-                None => 1,
-                Some(false) => 2,
-            };
-            let key = if j.cancel_tried {
-                j.cancel_at
-            } else {
-                u64::from(j.terms.deadline)
-            };
-            (rank, j.cancel_tried, key, j.id.clone(), j.client.clone())
-        })
-        .collect();
+    // One entry per payment with cancels to send, keyed by the client that handed it over:
+    // whoever started the job, each payment's sender takes its own turns.
+    let mut due_jobs: Vec<Turn> = vec![];
+    for j in lock(store).jobs.values().filter(|j| due(j)) {
+        let rank = match j.lock_known {
+            Some(true) => 0,
+            None => 1,
+            Some(false) => 2,
+        };
+        let key = if j.cancel_tried {
+            j.cancel_at
+        } else {
+            u64::from(j.terms.deadline)
+        };
+        for (i, p) in j.payments.iter().enumerate() {
+            if p.settled.is_none() && p.has_cancel() {
+                due_jobs.push((rank, j.cancel_tried, key, (j.id.clone(), i), p.by.clone()));
+            }
+        }
+    }
     due_jobs.sort();
     let mut sent = 0;
-    for id in take_turns(due_jobs) {
-        let Some(job) = lock(store).jobs.get(&id).cloned() else {
+    for (id, i) in take_turns(due_jobs) {
+        let Some(p) = lock(store)
+            .jobs
+            .get(&id)
+            .and_then(|j| j.payments.get(i).cloned())
+        else {
             continue;
         };
         let mut accepted = false;
@@ -1657,7 +1945,7 @@ pub fn send_due_cancels(
         let mut tried = false;
         // The checked ones, highest fee first; then those not checkable yet, which a
         // daemon refuses if they are not valid.
-        for c in job.cancels.iter().chain(&job.pending) {
+        for c in p.cancels.iter().chain(&p.pending) {
             if Instant::now() >= end_at {
                 break;
             }
@@ -1708,12 +1996,16 @@ pub fn send_due_cancels(
 /// started the jobs take turns, each in its own order (never tried first, nearest
 /// deadline first). So a client with many jobs gets one send per turn, like any other,
 /// and cannot push another client's cancel back. `due` is sorted by rank first.
-fn take_turns(due: Vec<(u8, bool, u64, String, String)>) -> Vec<String> {
+/// A payment's cancels due: lock rank, tried before, its order key, (job, payment), and
+/// the client that handed the payment over.
+type Turn = (u8, bool, u64, (String, usize), String);
+
+fn take_turns<K: Clone>(due: Vec<(u8, bool, u64, K, String)>) -> Vec<K> {
     let mut out = vec![];
     let mut i = 0;
     while i < due.len() {
         let rank = due[i].0;
-        let mut queues: Vec<(String, std::collections::VecDeque<String>)> = vec![];
+        let mut queues: Vec<(String, std::collections::VecDeque<K>)> = vec![];
         while i < due.len() && due[i].0 == rank {
             let (_, _, _, id, client) = &due[i];
             match queues.iter_mut().find(|(c, _)| c == client) {
@@ -1805,14 +2097,15 @@ impl Store {
         Ok(st)
     }
 
-    /// Adds a job, checked by [`check_intake`]. A job already held under the same name
-    /// (terms, lock, payment) takes in what this one adds and keeps all it held: claims
-    /// it lacks, cancels it lacks (up to [`MAX_CANCELS`], the cheapest giving way, and up
-    /// to [`MAX_PENDING_CANCELS`] not checkable yet), and a signed payment it lacks or
-    /// held unvouched. Nothing is refused for having come second. A job that has ended and
-    /// is archived is answered with its id. A new job counts toward the service's live
-    /// jobs and its client's ([`Limits::jobs_per_client`]); a merge counts toward neither.
-    pub fn add(&mut self, job: Job, limits: &Limits) -> Result<(String, Added), Refused> {
+    /// Adds a post, checked by [`check_intake`]. The job held for its lock takes in what
+    /// the post adds and keeps all it held: claims it lacks, payments it lacks (an
+    /// unverified one within [`MAX_UNVOUCHED_PAYMENTS`]) and cancels it lacks. Nothing is
+    /// refused for having come second, and a post for a lock held never takes a place of
+    /// its own. A job that has ended and is archived is answered with its id. A new job
+    /// counts toward the service's live jobs and its client's
+    /// ([`Limits::jobs_per_client`]), except one whose payment the Bitcoin daemon vouches
+    /// for: a buyer whose payment pays the terms is never refused for a limit.
+    pub fn add(&mut self, mut job: Job, limits: &Limits) -> Result<(String, Added), Refused> {
         let id = job.id.clone();
         let io = |e: Error| Refused::Unavailable(e);
         if job.claims.len() > limits.max_claims {
@@ -1840,35 +2133,31 @@ impl Store {
                 limits.max_window
             ))));
         }
-        if limits.jobs_per_lock > 0 {
-            let on_lock = self
-                .jobs
-                .values()
-                .filter(|j| !j.state.ended() && j.lock == job.lock)
-                .count();
-            if on_lock >= limits.jobs_per_lock {
+        let pays = job.payments.iter().any(|p| p.vouched);
+        if !pays {
+            let live = self.jobs.values().filter(|j| !j.state.ended()).count();
+            if live >= limits.max_jobs {
                 return Err(Refused::Limit(Error(format!(
-                    "this lock carries {on_lock} live jobs, the most one lock may (a payment and its replacements); a replacement of the payment needs no job of its own: the job follows the payment's coins"
+                    "the service carries {live} live jobs, its limit; try another service, or post again with a payment the Bitcoin daemon holds"
                 ))));
             }
-        }
-        let live = self.jobs.values().filter(|j| !j.state.ended()).count();
-        if live >= limits.max_jobs {
-            return Err(Refused::Limit(Error(format!(
-                "the service carries {live} live jobs, its limit; try another service or later"
-            ))));
-        }
-        if limits.jobs_per_client > 0 {
-            let mine = self
-                .jobs
-                .values()
-                .filter(|j| !j.state.ended() && j.client == job.client)
-                .count();
-            if mine >= limits.jobs_per_client {
-                return Err(Refused::Limit(Error(format!(
-                    "this client has started {mine} live jobs, the most one client may; try again once some have ended"
-                ))));
+            if limits.jobs_per_client > 0 {
+                let mine = self
+                    .jobs
+                    .values()
+                    .filter(|j| !j.state.ended() && j.client == job.client)
+                    .count();
+                if mine >= limits.jobs_per_client {
+                    return Err(Refused::Limit(Error(format!(
+                        "this client has started {mine} live jobs, the most one client may; try again once some have ended"
+                    ))));
+                }
             }
+        }
+        // A new job holds its payments within the same bounds as a merge.
+        let payments = std::mem::take(&mut job.payments);
+        for p in payments {
+            job.take_payment(p)?;
         }
         self.save(&job).map_err(io)?;
         self.jobs.insert(id.clone(), job);
@@ -1936,9 +2225,9 @@ impl Store {
     }
 }
 
-/// `held` with what `new`, posted under the same name, adds: its claims, its cancels
-/// (checked and not yet checkable) and its signed payment. Returns the merged job and
-/// what it took in.
+/// `held` with what `new`, posted for the same lock, adds: its claims, its payments and
+/// their cancels (checked and not yet checkable). Returns the merged job and what it took
+/// in.
 fn merge(mut held: Job, new: Job, limits: &Limits) -> Result<(Job, Vec<&'static str>), Refused> {
     let mut what = vec![];
     let mut claims = held.claims.clone();
@@ -1958,29 +2247,69 @@ fn merge(mut held: Job, new: Job, limits: &Limits) -> Result<(Job, Vec<&'static 
         held.claims = claims;
         what.push("claims");
     }
-    let vouched = new.payment_checked && !held.payment_checked;
-    if new.payment_hex.is_some() && (held.payment_hex.is_none() || vouched) {
-        held.payment_hex = new.payment_hex;
-        held.payment_checked = new.payment_checked;
-        what.push("payment_hex");
+    for p in new.payments {
+        for w in held.take_payment(p)? {
+            if !what.contains(&w) {
+                what.push(w);
+            }
+        }
     }
-    let mut took = false;
-    for c in new.cancels {
-        took |= held.keep_cancel(c);
-    }
-    if took {
-        what.push("cancels");
-    }
-    let mut took = false;
-    for c in new.pending {
-        took |= held.keep_pending(c)?;
-    }
-    if took {
-        what.push("pending_cancels");
-    }
-    // The cancels held are spends of exactly the payment's coins, now that it is known.
     held.check_form().map_err(Refused::Bad)?;
     Ok((held, what))
+}
+
+/// Takes into `job` (just worked on) what intake added to `cur` (the job as held now)
+/// since `before` (the job as the round began): payments, cancels and unchecked cancels
+/// it did not hold then. What the round itself dropped stays dropped.
+fn fold_in(job: &mut Job, cur: &Job, before: &Value) {
+    let had = |key: &str| -> Vec<String> {
+        before["payments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|p| {
+                let k = key.to_string();
+                p[k.as_str()]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|c| c["hex"].as_str().map(String::from))
+            })
+            .collect()
+    };
+    let (had_cancels, had_pending) = (had("cancels"), had("pending"));
+    let had_coins: Vec<Value> = before["payments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| p["coins"].clone())
+        .collect();
+    for p in &cur.payments {
+        let key = json!(p
+            .coins
+            .iter()
+            .map(|c| format!("{}:{}", c.txid, c.vout))
+            .collect::<Vec<_>>());
+        let new = Payment {
+            cancels: p
+                .cancels
+                .iter()
+                .filter(|c| !had_cancels.contains(&c.hex))
+                .cloned()
+                .collect(),
+            pending: p
+                .pending
+                .iter()
+                .filter(|c| !had_pending.contains(&c.hex))
+                .cloned()
+                .collect(),
+            ..p.clone()
+        };
+        if job.payment_for(&p.coins).is_some() || !had_coins.contains(&key) {
+            let _ = job.take_payment(new);
+        }
+    }
 }
 
 /// One round of work: the live jobs (not ended, not backing off), nearest deadline
@@ -2043,31 +2372,12 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
                 job.lock_known = cur.lock_known;
                 job.lock_checked_at = cur.lock_checked_at;
             }
-            // Intake may have merged claims, cancels or a signed payment meanwhile.
+            // Intake may have merged claims, payments or cancels meanwhile; not what this
+            // round dropped.
             for c in &cur.claims {
                 job.add_claim(c.clone());
             }
-            for c in &cur.cancels {
-                job.keep_cancel(c.clone());
-            }
-            // Unchecked cancels intake added meanwhile; not those this round dropped.
-            let had: Vec<String> = before["pending"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|c| c["hex"].as_str().map(String::from))
-                .collect();
-            for c in &cur.pending {
-                if !had.contains(&c.hex) {
-                    let _ = job.keep_pending(c.clone());
-                }
-            }
-            if cur.payment_hex.is_some()
-                && (job.payment_hex.is_none() || (cur.payment_checked && !job.payment_checked))
-            {
-                job.payment_hex = cur.payment_hex.clone();
-                job.payment_checked = cur.payment_checked;
-            }
+            fold_in(&mut job, cur, &before);
             if cur.cancel_sent && !before["cancel_sent"].as_bool().unwrap_or(false) {
                 job.note = format!("{}; {}", cur.note, job.note);
             }
@@ -2137,10 +2447,17 @@ fn handle(
                     json!({"error": format!("a job carries at most {} signed claims", limits.max_claims)}),
                 );
             }
-            let held = {
+            let (held, archived) = {
                 let st = lock(store);
-                st.jobs.contains_key(&job.id) || st.archived(&job.id).is_some()
+                (
+                    st.jobs.get(&job.id).cloned(),
+                    st.archived(&job.id).is_some(),
+                )
             };
+            // A swap that has ended and is buried: nothing left to take.
+            if archived && held.is_none() {
+                return (200, json!({"id": job.id, "held": true, "notes": []}));
+            }
             let refused = |e: Refused| {
                 let m = match &e {
                     Refused::Unavailable(x) => {
@@ -2150,7 +2467,7 @@ fn handle(
                 };
                 (e.status(), json!({"error": m}))
             };
-            let notes = match check_intake(intake, &mut job, held) {
+            let notes = match check_intake(intake, &mut job, held.as_ref()) {
                 Ok(n) => n,
                 Err(e) => return refused(e),
             };

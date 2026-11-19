@@ -20,7 +20,7 @@
 //! paylock sign-refund --terms T --lock TXID:VOUT --key-file F --to SPK --fee N [--send] [--despite-payment]
 //!                    [--fee-pot | --fee-coin TXID:VOUT [--change SPK] [--wallet-signed HEX]]
 //! paylock serve      --data DIR --listen HOST:PORT [--interval SECS] [--token-file F] [--max-jobs N]
-//!                    [--jobs-per-client 50] [--jobs-per-lock 4] [--watch-depth 6] [--watch-every 30]
+//!                    [--jobs-per-client 50] [--watch-depth 6] [--watch-every 30]
 //! ```
 //!
 //! `T` is a terms file, or the terms' JSON itself.
@@ -653,9 +653,6 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
             if let Some(n) = a.get("jobs-per-client") {
                 limits.jobs_per_client =
                     n.parse().map_err(|_| Error("--jobs-per-client".into()))?;
-            }
-            if let Some(n) = a.get("jobs-per-lock") {
-                limits.jobs_per_lock = n.parse().map_err(|_| Error("--jobs-per-lock".into()))?;
             }
             if let Some(n) = a.get("watch-depth") {
                 limits.watch_depth = n.parse().map_err(|_| Error("--watch-depth".into()))?;

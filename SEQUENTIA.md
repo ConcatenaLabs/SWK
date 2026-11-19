@@ -531,22 +531,21 @@ claim completed with a proof linked to the lowest anchor the chain recorded at
 or above the payment, the activation read from the node's `getdeploymentinfo`
 (`btc_payment` and `lost_blocks`; an entry the node does not report is not
 active), the claim's fee routes judged by the node's `getfeeassetinfo`, the
-completion service (the payment known by the coins it spends, so a fee bump
-completes the claim and a confirmed spend that does not pay is the cancel;
-bounded: cancels on a thread of their own with a time budget per pass, sent
-whatever the node says of the lock and ordered by its answer, jobs worked
-nearest deadline first within time and block budgets, a payment search that
-keeps its place, finished jobs watched until buried and then archived; one job
-per terms, lock and payment into which every post merges, its claims checked
-against the buyer's key and its cancels against the Bitcoin daemon, a cancel
-whose coins the daemon does not know yet kept and checked again, each cancel
-known by its witness id so a bad-witness copy never stands in for the buyer's,
-and nothing the service keeps of its own read from a request, so no client can
-block a buyer's job; a new job only on a real lock, a few live jobs per lock, a
-quota of live jobs per client and the clients taking turns at the cancel sends;
-each request on its own thread under deadlines, connections shared between
-addresses with idle ones giving way, so a slow or crowding client stalls
-nobody; reads without signed transactions, a token beyond loopback),
+completion service (one job per lock, into which every post merges; the
+payment known from Bitcoin alone, any transaction mined in the lock's heights
+paying the receiving script at least the price, so completing the claim needs
+nothing a client posts; payments handed over held by the coins they spend, with
+their cancels, a payment the daemon pools or has mined never refused nor
+crowded out, one it cannot check yet held within a bound and checked again;
+cancels by witness id, checked by the Bitcoin daemon; nothing the service keeps
+of its own read from a request; bounded: cancels on a thread of their own with
+a time budget per pass, sent whatever the node says of the lock, jobs worked
+nearest deadline first within time and block budgets, a scan that keeps its
+place, finished jobs watched until buried and then archived; a new job only on
+a real lock, a quota of live jobs per client, the clients taking turns at the
+cancel sends; each request on its own thread under deadlines, connections
+shared between addresses with idle ones giving way; reads without signed
+transactions, a token beyond loopback),
 and the `paylock` command for every step. Its `README.md` says how to run it
 and its regtest proof.
 
