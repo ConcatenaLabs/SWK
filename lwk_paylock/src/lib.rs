@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use std::time::Instant;
 
+use lwk_wollet::bitcoin;
 use lwk_wollet::btc::paylock::{
     self, attach_proof, fee_pot_vout, hex_decode, hex_encode, payment_state, FeeSource,
     PayLockTerms, PaymentProof, PaymentState, ProofSource,
@@ -398,6 +399,8 @@ pub struct Found {
     pub height: u32,
     /// The block's hash, in display order.
     pub block: String,
+    /// The transaction's id.
+    pub txid: String,
 }
 
 /// How far a search for a payment has read Bitcoin's best chain, kept between ticks.
@@ -405,15 +408,46 @@ pub struct Found {
 pub struct PaymentScan {
     /// The last block read: its height and hash.
     pub scanned: Option<(u32, String)>,
-    /// The payment's block, once found.
+    /// The payment's block, once found: the transaction the buyer named, or any
+    /// transaction that spends the payment's coins and pays the receiving script at
+    /// least the price (a fee bump of the payment, whatever its id).
     pub found: Option<Found>,
-    /// The buyer's cancel's block, once found: a spend of the payment's coins other than
-    /// the payment, confirmed.
+    /// The first confirmed spend of the payment's coins that does not pay the receiving
+    /// script the price (the buyer's cancel, or any other): the payment can no longer be
+    /// mined.
     pub cancel: Option<Found>,
 }
 
 /// How many blocks above `D` a search reads, to tell a late payment from none.
 pub const LATE_SCAN: u32 = 6;
+
+/// How many Bitcoin blocks past `D` a search goes on reading for a spend of the payment's
+/// coins while none is found (and a cancel is still sent): a day. Past it, a payment still
+/// unmined is taken to be gone.
+pub const CANCEL_KEEP_BLOCKS: u32 = 144;
+
+/// What a transaction is to a swap whose payment is `payment` and spends `coins`.
+fn classify(
+    tx: &bitcoin::Transaction,
+    txid: &str,
+    payment: &str,
+    coins: &[bitcoin::OutPoint],
+    terms: &PayLockTerms,
+    spk: &bitcoin::ScriptBuf,
+) -> Option<bool> {
+    let named = txid == payment;
+    let spends = tx.input.iter().any(|i| coins.contains(&i.previous_output));
+    if !named && !spends {
+        return None;
+    }
+    let pays = tx
+        .output
+        .iter()
+        .any(|o| o.script_pubkey == *spk && o.value.to_sat() >= terms.price_sat);
+    // The named payment is the payment, whatever it pays: a claim on it is then refused
+    // for paying too little, never mistaken for a cancel.
+    Some(named || pays)
+}
 
 impl BtcChain {
     /// Bitcoin's tip height.
@@ -429,11 +463,18 @@ impl BtcChain {
         Ok(v.as_str().ok_or_else(|| err("getblockhash"))?.to_string())
     }
 
+    /// A block of the best chain, whole.
+    fn block(&self, hash: &str) -> Result<bitcoin::Block, Error> {
+        let v = self.rpc.call("getblock", json!([hash, 0]))?;
+        bitcoin::consensus::encode::deserialize(&hex_decode(
+            v.as_str().ok_or_else(|| err("getblock"))?,
+        )?)
+        .map_err(|e| err(format!("Bitcoin block {hash} does not parse: {e}")))
+    }
+
     /// Moves `scan` on through the best chain's blocks the payment `txid` can be in, at
-    /// most `max_blocks` blocks and until `until`, and says whether it reached Bitcoin's tip
-    /// (or the last height it watches). A scan keeps its place, so each block is read once;
-    /// a reorganization below its place (the block it stopped at, or the payment's block,
-    /// is no longer in the best chain) starts it again from the floor.
+    /// most `max_blocks` blocks and until `until`, looking for that transaction alone
+    /// (see [`BtcChain::scan_for`]).
     pub fn scan_payment(
         &self,
         txid: &str,
@@ -442,17 +483,26 @@ impl BtcChain {
         max_blocks: u32,
         until: Instant,
     ) -> Result<bool, Error> {
-        self.scan_for(txid, None, terms, scan, max_blocks, until)
+        self.scan_for(txid, &[], terms, scan, max_blocks, until)
     }
 
-    /// [`BtcChain::scan_payment`], looking for the buyer's cancel `cancel` as well. While
-    /// the cancel is named and neither it nor the payment is found, the search reads on
-    /// to Bitcoin's tip, a block at a time as they come, since only a confirmed cancel
-    /// settles that the payment can no longer be mined.
+    /// Moves `scan` on through Bitcoin's best chain, at most `max_blocks` blocks and until
+    /// `until`, and says whether it reached as far as it reads. The payment is the
+    /// transaction named `payment`, or any that spends one of `coins` (the payment's
+    /// inputs) and pays the receiving script at least the price: a fee bump of the
+    /// payment counts, whatever its id. A spend of `coins` that does not pay so is the
+    /// cancel. Nothing is inferred from a coin that is merely missing.
+    ///
+    /// It reads from `F` to a few blocks past `D`; while `coins` are known and neither
+    /// is found, on to Bitcoin's tip, up to [`CANCEL_KEEP_BLOCKS`] past `D`, since only a
+    /// confirmed spend settles that the payment can no longer be mined. A scan keeps its
+    /// place, so each block is read once; a reorganization below its place (the block it
+    /// stopped at, or a found block, is no longer in the best chain) starts it again from
+    /// the floor.
     pub fn scan_for(
         &self,
-        txid: &str,
-        cancel: Option<&str>,
+        payment: &str,
+        coins: &[bitcoin::OutPoint],
         terms: &PayLockTerms,
         scan: &mut PaymentScan,
         max_blocks: u32,
@@ -480,9 +530,10 @@ impl BtcChain {
         }
         let first = terms.floor.max(1);
         let mut last = tip.min(terms.deadline.saturating_add(LATE_SCAN));
-        if cancel.is_some() && scan.cancel.is_none() {
-            last = tip;
+        if !coins.is_empty() && scan.cancel.is_none() {
+            last = tip.min(terms.deadline.saturating_add(CANCEL_KEEP_BLOCKS));
         }
+        let spk = terms.receive_script_pubkey();
         let mut h = scan.scanned.as_ref().map(|(h, _)| h + 1).unwrap_or(first);
         let mut read = 0;
         while h <= last {
@@ -490,24 +541,28 @@ impl BtcChain {
                 return Ok(false);
             }
             let hash = self.block_hash(h)?;
-            let b = self.rpc.call("getblock", json!([hash, 1]))?;
+            let block = self.block(&hash)?;
             read += 1;
-            let ids = b.get("tx").and_then(Value::as_array);
-            let has = |t: &str| ids.map(|a| a.iter().any(|x| x.as_str() == Some(t))).unwrap_or(false);
             scan.scanned = Some((h, hash.clone()));
-            if has(txid) {
-                scan.found = Some(Found {
-                    height: h,
-                    block: hash,
-                });
-                return Ok(true);
-            }
-            if let Some(c) = cancel {
-                if scan.cancel.is_none() && has(c) {
-                    scan.cancel = Some(Found {
-                        height: h,
-                        block: hash,
-                    });
+            for tx in block.txdata.iter().skip(1) {
+                let txid = tx.compute_txid().to_string();
+                match classify(tx, &txid, payment, coins, terms, &spk) {
+                    Some(true) => {
+                        scan.found = Some(Found {
+                            height: h,
+                            block: hash,
+                            txid,
+                        });
+                        return Ok(true);
+                    }
+                    Some(false) if scan.cancel.is_none() => {
+                        scan.cancel = Some(Found {
+                            height: h,
+                            block: hash.clone(),
+                            txid,
+                        });
+                    }
+                    _ => {}
                 }
             }
             h += 1;
@@ -554,13 +609,6 @@ impl BtcChain {
             }
         }
         Ok(None)
-    }
-
-    /// Whether an output is unspent in Bitcoin's best chain, whatever the mempool holds.
-    /// `false` also for an output that does not exist.
-    pub fn unspent_in_chain(&self, txid: &str, vout: u32) -> Result<bool, Error> {
-        let v = self.rpc.call("gettxout", json!([txid, vout, false]))?;
-        Ok(!v.is_null())
     }
 
     /// Whether the daemon's mempool holds the transaction (unconfirmed).
@@ -635,6 +683,66 @@ impl BtcChain {
         self.rpc
             .call("sendrawtransaction", json!([hex]))
             .map(|v| v.as_str().unwrap_or_default().to_string())
+    }
+
+    /// A transaction of the daemon's mempool, raw; `None` when the mempool does not hold it.
+    pub fn mempool_tx(&self, txid: &str) -> Result<Option<String>, Error> {
+        match self.rpc.call("getrawtransaction", json!([txid, false])) {
+            Ok(v) => Ok(v.as_str().map(String::from)),
+            Err(RpcError::Rpc { code: -5, .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// What the daemon would do with a transaction now, without relaying it
+    /// (`testmempoolaccept`): it checks every signature and, against a transaction it
+    /// pools that spends the same coins, the replacement rules.
+    pub fn test_accept(&self, hex: &str) -> Result<Accept, Error> {
+        let v = self.rpc.call("testmempoolaccept", json!([[hex]]))?;
+        let r = v.get(0).ok_or_else(|| err("testmempoolaccept"))?;
+        if r.get("allowed").and_then(Value::as_bool) == Some(true) {
+            let fee = r
+                .pointer("/fees/base")
+                .and_then(Value::as_f64)
+                .map(|b| (b * 1e8).round() as u64)
+                .unwrap_or(0);
+            return Ok(Accept::Allowed { fee });
+        }
+        let reason = r
+            .get("reject-reason")
+            .and_then(Value::as_str)
+            .unwrap_or("refused")
+            .to_string();
+        Ok(Accept::Refused(reason))
+    }
+}
+
+/// [`BtcChain::test_accept`]'s answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Accept {
+    /// The daemon would take it, at this fee in satoshis.
+    Allowed {
+        /// The fee.
+        fee: u64,
+    },
+    /// The daemon would refuse it, for this reason.
+    Refused(String),
+}
+
+impl Accept {
+    /// Whether a refusal is the transaction's own signatures or scripts failing: no later
+    /// state of the chain makes it valid.
+    pub fn scripts_fail(reason: &str) -> bool {
+        reason.contains("script-verify-flag")
+            || reason.contains("bad-witness")
+            || reason.contains("scriptsig")
+            || reason.contains("witness-program")
+    }
+
+    /// Whether a refusal says the coins it spends are not there to spend (already spent in
+    /// a block, or never seen by the daemon).
+    pub fn coins_missing(reason: &str) -> bool {
+        reason.contains("missing-inputs") || reason.contains("missingorspent")
     }
 }
 
@@ -724,23 +832,22 @@ pub fn complete_claim(
             terms,
             lock,
             claim,
-            payment_txid,
             scan.found.as_ref().expect("in window"),
         ),
     }
 }
 
-/// Completes a signed claim with a proof of the payment found in `found`, linked to the
-/// lowest anchor the Sequentia chain recorded at or above it.
+/// Completes a signed claim with a proof of the payment found in `found` (the transaction
+/// it names), linked to the lowest anchor the Sequentia chain recorded at or above it.
 pub fn prove_claim(
     seq: &SeqChain,
     btc: &BtcChain,
     terms: &PayLockTerms,
     lock: &OutPoint,
     claim: &Transaction,
-    payment_txid: &str,
     found: &Found,
 ) -> Result<Completion, Error> {
+    let payment_txid = found.txid.as_str();
     let Some(anchor) = seq.first_anchored_at(found.height)? else {
         return Ok(Completion::Waiting(format!(
             "no Sequentia block has anchored at Bitcoin block {} yet",

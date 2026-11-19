@@ -94,15 +94,33 @@ It holds no key. A buyer's wallet posts one job:
 
 to `POST /jobs`, and reads its state at `GET /jobs/<id>` (`waiting`, `pooled`,
 `mined`, `final`, `cancelled`, `never`, `refunded`). The claims may be tiers in
-two fee assets. The cancel and the signed payment must be Bitcoin transactions:
-the signed payment's id must be `payment`, and the cancel must spend exactly the
-payment's coins.
+two fee assets.
 
-A job is named by its first claim and its payment. Posting the same job again
-returns its id; a post that only adds what the held job lacks (the cancel, the
-signed payment) is merged into it; any other difference from the job held for
-that claim and payment is refused with `409`. A read returns where a job stands
-and never its signed claims, cancel, payment or terms.
+Intake checks what it is handed against the chains before holding any of it,
+and refuses what fails, whoever posts it:
+
+- every claim must spend the lock through the terms' claim leaf and carry the
+  buyer's signature over that very transaction; a fee coin's input must be a
+  signed P2WPKH spend;
+- the signed payment must hash to `payment`, and the Bitcoin daemon must not
+  find its signatures failing. Without one, the service takes the payment from
+  the daemon's mempool once it is broadcast;
+- a cancel must spend exactly the payment's coins, and the daemon must accept it
+  as it stands (`testmempoolaccept`: its signatures, and the replacement of the
+  pooled payment). A cancel whose payment the service does not know yet is
+  refused: give `payment_hex`. One the daemon cannot check because the payment's
+  coins are already spent in a block is not kept, and the answer says so.
+
+A job is named by its terms, its lock and its payment's id. Whatever is posted
+under that name is merged into the one job and never refused for coming
+second: claims it lacks are added, each cancel is kept (up to four; a further
+one takes the place of the cheapest when it pays more), and so is a signed
+payment it lacked. So a client that posts the buyer's claims first, with no
+payment, a subset of the claims or no cancel, holds nothing of the buyer's out.
+The answer is `200` with the job's `id` (and `merged` or `held`), `400` for a
+request that fails a check, `503` when a chain does not answer (try again). A
+read returns where a job stands and never its signed claims, cancels, payment or
+terms.
 
 On every round the service reads both chains as they are now:
 
@@ -112,10 +130,17 @@ On every round the service reads both chains as they are now:
   was first seen pooled, by whoever pooled it, leaves it out;
 - it submits the tiers of the first fee asset the node still accepts whose fee
   coin is unspent;
+- it knows the payment by the coins it spends: a transaction mined on Bitcoin
+  that spends them and pays the receiving script at least the price is the
+  payment, whatever its id, so the buyer's fee bump completes the claim (or, mined
+  after `D`, ends the job `never`); one that spends them and does not pay so is
+  the cancel, and the job is `cancelled` at its block. A coin that is merely
+  missing from the UTXO set decides nothing;
 - it sends the buyer's payment again if a reorganization evicted it before `D`;
-- it broadcasts the cancel if the payment is still unconfirmed two blocks before
-  `D`, and sends it again until a spend of the payment's coins other than the
-  payment is confirmed: only then is the job `cancelled`;
+- it broadcasts every cancel it holds, highest fee first, if the payment is
+  still unconfirmed two blocks before `D`, whatever its Sequentia node says of
+  the lock, and sends them again until a spend of the payment's coins is
+  confirmed;
 - it shows the swap done (`final`) as soon as the claim's block is final, and
   goes on watching in the background (`watching: true`) until the Bitcoin block
   that decided it is `--watch-depth` blocks deep: a Bitcoin reorganization
@@ -123,18 +148,21 @@ On every round the service reads both chains as they are now:
   depth; it only sets how long the service keeps a finished swap in view.
 
 Its work is bounded. Cancels have a thread of their own, with clients of their
-own that give up on a call after 3 seconds. Each pass takes at most 2 seconds:
-cancels never tried go first, nearest deadline first, then those tried before,
-the longest ago first, so what one pass does not reach the next one does. A
-cancel whose lock the node does not know (or whose lock does not pay the terms'
-script), or whose deadline is more than 144 blocks past, is dropped before it
-costs a send. The rest runs live jobs nearest deadline first, each within a time
-and block budget and the round within its own, and watched jobs after them; the
-search for a payment keeps its place between rounds and reads each Bitcoin block
-once, from `F` to six blocks past `D` (to Bitcoin's tip while a broadcast cancel
-is unconfirmed). A failing job backs off, up to a minute. Intake caps a request
-at 512 KiB, a job at eight claims and a lock at 1,008 Bitcoin blocks from `F` to
-`D`.
+own that give up on a call after 3 seconds. Each pass sends for at most 2
+seconds, after at most 1 second of looking up locks the node has not answered
+for. The node's answer orders the sends and never withholds one: jobs whose lock
+it knows go first, then those it has not answered for, then those it says it does
+not know. Within each, cancels never tried go first, nearest deadline first, then
+those tried before, the longest ago first, so what one pass does not reach the
+next one does. A cancel is sent until 144 blocks past `D`. The rest runs live
+jobs nearest deadline first, each within a time and block budget and the round
+within its own, and watched jobs after them; the search for the payment keeps
+its place between rounds and reads each Bitcoin block once, from `F` to six
+blocks past `D` (on to Bitcoin's tip, up to 144 blocks past `D`, while the
+payment's coins are known and no spend of them is mined). A failing job backs
+off, up to a minute. Intake caps a request at 512 KiB, a job at eight claims and
+four cancels, a lock at 1,008 Bitcoin blocks from `F` to `D`, and the service at
+`--max-jobs` live jobs; a job whose outcome is decided no longer counts.
 
 Jobs are one JSON file each under `--data`, so a restart carries on. A job that
 has ended and is buried moves to `--data/archive/`, where it is still answered at
@@ -157,8 +185,9 @@ PAYLOCK_NODE_FUNCTIONAL=<node>/test/functional PAYLOCK_BIN=target/debug/paylock 
 ```
 
 `PAYLOCK_CASES` picks cases (`path,unpaid,late,gone,remined,anchor,wrongamount,
-wrongaddress,unaccepted,feecoin,feepot,twoasset,raise,resend,crowd`; the
-script's docstring says what each shows), and
+wrongaddress,unaccepted,feecoin,feepot,twoasset,raise,resend,crowd,overflow,
+noraise,preempt,cancelstate,afterfinal,unconf,bumplate,bumpin,block,nopayment`;
+the script's docstring says what each shows), and
 `PAYLOCK_RESULTS` names a file for the observed outcomes and refusal reasons.
 
 `tests/regtest/paylock_activation.py` shows that `paylock terms` builds no lock
@@ -171,5 +200,6 @@ PAYLOCK_SEQUENTIAD=<node>/src/sequentiad PAYLOCK_BIN=target/debug/paylock \
   python3 lwk_paylock/tests/regtest/paylock_activation.py <empty dir>
 ```
 
-`cargo test -p lwk_paylock` includes the service's bounds, run against fake
-nodes that stall.
+`cargo test -p lwk_paylock` includes the service's bounds, its intake and its
+search by coins, run against fake nodes. The cases that start the `paylock`
+binary start `PAYLOCK_TEST_BIN` instead when it is set.

@@ -1138,6 +1138,133 @@ pub fn attach_proof(
     Ok(tx)
 }
 
+/// Checks a signed claim the way a node will, short of its proof: input 0 spends `lock`;
+/// every input that spends the lock transaction does so through the terms' claim leaf
+/// and control block, with the buyer's signature over this very transaction (the
+/// default sighash, which commits to every input, every output, every spent output and
+/// the chain's `genesis`); and any other input (a fee coin) is a signed P2WPKH spend.
+/// `coin` returns the output a fee coin spends. A claim that passes can be completed by
+/// anyone; one that fails is nobody's to hold, whoever hands it over.
+pub fn verify_claim(
+    terms: &PayLockTerms,
+    lock: OutPoint,
+    claim: &Transaction,
+    genesis: BlockHash,
+    coin: &mut dyn FnMut(&OutPoint) -> Result<Option<TxOut>, Error>,
+) -> Result<(), Error> {
+    use crate::elements::hashes::hash160;
+    use crate::elements::secp256k1_zkp::{ecdsa, schnorr, PublicKey};
+    use crate::elements::{EcdsaSighashType, PubkeyHash};
+
+    if claim.input.first().map(|i| i.previous_output) != Some(lock) {
+        return Err(gen("the claim does not spend the lock as its first input"));
+    }
+    let tree = terms.tree()?;
+    let leaf = tree.claim.to_bytes();
+    let mut prevouts = Vec::with_capacity(claim.input.len());
+    for i in &claim.input {
+        let op = i.previous_output;
+        let out = if op == lock {
+            lock_txout(terms)?
+        } else if op.txid == lock.txid {
+            let pot = terms.fee_pot.ok_or_else(|| {
+                gen("the claim spends another output of the lock transaction, and the terms have no fee pot")
+            })?;
+            explicit_out(pot.asset, pot.atoms, tree.script_pubkey.clone())
+        } else {
+            coin(&op)?.ok_or_else(|| {
+                gen(format!(
+                    "the claim's fee coin {}:{} is not known to the node",
+                    op.txid, op.vout
+                ))
+            })?
+        };
+        prevouts.push(out);
+    }
+    let secp = Secp256k1::verification_only();
+    let mut cache = SighashCache::new(claim);
+    for (n, input) in claim.input.iter().enumerate() {
+        let w = &input.witness.script_witness;
+        if input.previous_output.txid == lock.txid {
+            if w.len() != 4 || w[2] != leaf {
+                return Err(gen(format!(
+                    "the claim's input {n} spends the lock transaction but not through the terms' claim leaf"
+                )));
+            }
+            if w[3] != tree.claim_control {
+                return Err(gen(format!(
+                    "the claim's input {n} carries a control block that is not the lock's"
+                )));
+            }
+            let sig = schnorr::Signature::from_slice(&w[1]).map_err(|_| {
+                gen(format!(
+                    "the claim's input {n} carries no 64-byte signature of the default sighash"
+                ))
+            })?;
+            let sighash = cache
+                .taproot_script_spend_signature_hash(
+                    n,
+                    &Prevouts::All(&prevouts),
+                    ScriptPath::with_defaults(&tree.claim),
+                    SchnorrSighashType::Default,
+                    genesis,
+                )
+                .map_err(gen)?;
+            secp.verify_schnorr(
+                &sig,
+                &Message::from_digest(sighash.to_byte_array()),
+                &terms.buyer,
+            )
+            .map_err(|_| {
+                gen(format!(
+                    "the claim's input {n} is not signed by the terms' buyer for this transaction"
+                ))
+            })?;
+        } else {
+            let spk = &prevouts[n].script_pubkey;
+            if !spk.is_v0_p2wpkh() {
+                return Err(gen(format!(
+                    "the claim's fee coin (input {n}) is not a P2WPKH output: its signature cannot be checked"
+                )));
+            }
+            if w.len() != 2 || w[1].len() != 33 {
+                return Err(gen(format!(
+                    "the claim's fee coin (input {n}) is not signed"
+                )));
+            }
+            let pkh = hash160::Hash::hash(&w[1]);
+            if pkh.as_byte_array()[..] != spk.as_bytes()[2..22] {
+                return Err(gen(format!(
+                    "the claim's fee coin (input {n}) is signed by a key that is not the coin's"
+                )));
+            }
+            let (ty, der) = w[0]
+                .split_last()
+                .ok_or_else(|| gen(format!("the claim's fee coin (input {n}) is not signed")))?;
+            let ty = EcdsaSighashType::from_standard(u32::from(*ty)).map_err(|_| {
+                gen(format!(
+                    "the claim's fee coin (input {n}) has a non-standard sighash type"
+                ))
+            })?;
+            let code = Script::new_p2pkh(&PubkeyHash::from_raw_hash(pkh));
+            let sighash = cache.segwitv0_sighash(n, &code, prevouts[n].value, ty);
+            let sig = ecdsa::Signature::from_der(der).map_err(|_| {
+                gen(format!(
+                    "the claim's fee coin (input {n}) carries no DER signature"
+                ))
+            })?;
+            let pk = PublicKey::from_slice(&w[1]).map_err(gen)?;
+            secp.verify_ecdsa(&Message::from_digest(sighash.to_byte_array()), &sig, &pk)
+                .map_err(|_| {
+                    gen(format!(
+                        "the claim's fee coin (input {n}) is not signed by its key for this transaction"
+                    ))
+                })?;
+        }
+    }
+    Ok(())
+}
+
 /// The seller's refund: valid once the block 60 below it is anchored at `R` or above.
 pub fn sign_refund(
     terms: &PayLockTerms,
@@ -1293,7 +1420,11 @@ fn payment_fee(pay: &bitcoin::Transaction, prevout_values: &[u64]) -> Result<u64
         .ok_or_else(|| gen("the payment spends less than it pays"))
 }
 
-fn cancel_tx(pay: &bitcoin::Transaction, value: u64, to: bitcoin::ScriptBuf) -> bitcoin::Transaction {
+fn cancel_tx(
+    pay: &bitcoin::Transaction,
+    value: u64,
+    to: bitcoin::ScriptBuf,
+) -> bitcoin::Transaction {
     bitcoin::Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: bitcoin::absolute::LockTime::ZERO,
@@ -1630,6 +1761,117 @@ mod tests {
     }
 
     #[test]
+    fn a_claim_is_checked_like_a_node_checks_it() {
+        use crate::elements::hashes::hash160;
+        use crate::elements::secp256k1_zkp::PublicKey;
+        use crate::elements::{EcdsaSighashType, PubkeyHash, WPubkeyHash};
+        let t = terms();
+        let g = BlockHash::all_zeros();
+        let lock = OutPoint::new(Txid::from_byte_array([7; 32]), 0);
+        let to = Script::from(vec![0x51]);
+        let mut no_coin = |_: &OutPoint| -> Result<Option<TxOut>, Error> { Ok(None) };
+        // The locked asset pays the fee.
+        let c = sign_claim(&t, lock, to.clone(), 1_000, g, &key(1)).unwrap();
+        verify_claim(&t, lock, &c, g, &mut no_coin).unwrap();
+        // Another chain's genesis, another lock, another signer, a changed output, a forged
+        // signature or control block: refused.
+        let other_g = BlockHash::from_byte_array([1; 32]);
+        assert!(verify_claim(&t, lock, &c, other_g, &mut no_coin).is_err());
+        let lock2 = OutPoint::new(Txid::from_byte_array([7; 32]), 1);
+        assert!(verify_claim(&t, lock2, &c, g, &mut no_coin).is_err());
+        let mut x = c.clone();
+        x.output[0].script_pubkey = Script::from(vec![0x52]);
+        assert!(verify_claim(&t, lock, &x, g, &mut no_coin)
+            .unwrap_err()
+            .to_string()
+            .contains("not signed by the terms' buyer"));
+        let mut x = c.clone();
+        x.input[0].witness.script_witness[1] = vec![0x11; 64];
+        assert!(verify_claim(&t, lock, &x, g, &mut no_coin).is_err());
+        let mut x = c.clone();
+        x.input[0].witness.script_witness[3] = t.tree().unwrap().refund_control;
+        assert!(verify_claim(&t, lock, &x, g, &mut no_coin)
+            .unwrap_err()
+            .to_string()
+            .contains("control block"));
+        let mut buyer2 = t.clone();
+        buyer2.buyer = t.seller;
+        assert!(verify_claim(&buyer2, lock, &c, g, &mut no_coin).is_err());
+        // The fee pot pays it: both lock inputs are checked.
+        let pt = t
+            .clone()
+            .with_fee_pot(FeePot {
+                asset: other_asset(),
+                atoms: 50_000,
+            })
+            .unwrap();
+        let pot = FeePlan {
+            source: FeeSource::Pot(1),
+            fee: 1_000,
+            change: None,
+        };
+        let c = sign_claim_with(&pt, lock, to.clone(), &pot, g, &key(1), None).unwrap();
+        verify_claim(&pt, lock, &c, g, &mut no_coin).unwrap();
+        assert!(verify_claim(&t, lock, &c, g, &mut no_coin).is_err());
+        // A fee coin of the buyer's wallet, a P2WPKH spend signed for this transaction.
+        let secp = Secp256k1::new();
+        let wsk = key(9);
+        let wpk = PublicKey::from_secret_key(&secp, &wsk);
+        let h = hash160::Hash::hash(&wpk.serialize());
+        let coin = OutPoint::new(Txid::from_byte_array([8; 32]), 3);
+        let coin_out = explicit_out(
+            other_asset(),
+            9_000,
+            Script::new_v0_wpkh(&WPubkeyHash::from_raw_hash(h)),
+        );
+        let plan = FeePlan {
+            source: FeeSource::Coin {
+                outpoint: coin,
+                txout: coin_out.clone(),
+            },
+            fee: 1_000,
+            change: None,
+        };
+        let template = lock_spend(&t, lock, to.clone(), &plan, CLAIM_SEQUENCE).unwrap();
+        let mut wallet = template.tx.clone();
+        let sighash = SighashCache::new(&template.tx).segwitv0_sighash(
+            1,
+            &Script::new_p2pkh(&PubkeyHash::from_raw_hash(h)),
+            coin_out.value,
+            EcdsaSighashType::All,
+        );
+        let mut sig = secp
+            .sign_ecdsa(&Message::from_digest(sighash.to_byte_array()), &wsk)
+            .serialize_der()
+            .to_vec();
+        sig.push(EcdsaSighashType::All as u8);
+        wallet.input[1].witness.script_witness = vec![sig, wpk.serialize().to_vec()];
+        let c = sign_claim_with(&t, lock, to.clone(), &plan, g, &key(1), Some(&wallet)).unwrap();
+        let mut the_coin = |op: &OutPoint| -> Result<Option<TxOut>, Error> {
+            Ok((*op == coin).then(|| coin_out.clone()))
+        };
+        verify_claim(&t, lock, &c, g, &mut the_coin).unwrap();
+        // The coin unknown, its witness forged or missing, or its amount not the one signed.
+        assert!(verify_claim(&t, lock, &c, g, &mut no_coin).is_err());
+        let mut x = c.clone();
+        x.input[1].witness.script_witness[0][10] ^= 1;
+        assert!(verify_claim(&t, lock, &x, g, &mut the_coin).is_err());
+        let mut x = c.clone();
+        x.input[1].witness.script_witness.clear();
+        assert!(verify_claim(&t, lock, &x, g, &mut the_coin)
+            .unwrap_err()
+            .to_string()
+            .contains("not signed"));
+        let mut more = |op: &OutPoint| -> Result<Option<TxOut>, Error> {
+            Ok((*op == coin).then(|| TxOut {
+                value: confidential::Value::Explicit(9_001),
+                ..coin_out.clone()
+            }))
+        };
+        assert!(verify_claim(&t, lock, &c, g, &mut more).is_err());
+    }
+
+    #[test]
     fn a_claim_pays_its_fee_from_a_coin_the_wallet_signs() {
         let t = terms();
         let lock = OutPoint::new(Txid::from_byte_array([7; 32]), 0);
@@ -1750,7 +1992,11 @@ mod tests {
         far.deadline = 900_000 + MAX_DEADLINE_AHEAD + 1;
         far.refund_at = far.deadline;
         let far_tx = Transaction {
-            output: vec![explicit_out(far.asset, far.atoms, far.tree().unwrap().script_pubkey)],
+            output: vec![explicit_out(
+                far.asset,
+                far.atoms,
+                far.tree().unwrap().script_pubkey,
+            )],
             ..lock_tx.clone()
         };
         let why = check_lock(
@@ -1760,7 +2006,10 @@ mod tests {
                 ..facts(900_000)
             },
         );
-        assert!(why.iter().any(|w| w.contains("above Bitcoin's tip")), "{why:?}");
+        assert!(
+            why.iter().any(|w| w.contains("above Bitcoin's tip")),
+            "{why:?}"
+        );
         assert!(why.iter().any(|w| w.contains("spans")), "{why:?}");
     }
 

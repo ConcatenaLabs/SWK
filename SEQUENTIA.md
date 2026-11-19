@@ -491,7 +491,9 @@ Changes by file:
     its wallet signs (`FeeSource`, `FeePlan`, `lock_spend`). Heights above
     2,147,483,647 are refused, a lock whose deadline is more than 1,008
     Bitcoin blocks ahead is not payable, and the cancel pays at least the BIP125
-    floor (`cancel_fee_floor`). `lwk_paylock` reads the chains over it.
+    floor (`cancel_fee_floor`). `verify_claim` checks a signed claim as a node
+    will, short of its proof: the buyer's signature on every lock input and a
+    fee coin's P2WPKH signature. `lwk_paylock` reads the chains over it.
   - `xchain.rs`: cross-chain (BTC to Sequentia-asset) swap glue for the taker:
     HTLC key derivation (canonical absolute paths outside the receive/change
     branches, plus a legacy relative mode recorded in persisted state), the
@@ -529,13 +531,16 @@ claim completed with a proof linked to the lowest anchor the chain recorded at
 or above the payment, the activation read from the node's `getdeploymentinfo`
 (`btc_payment` and `lost_blocks`; an entry the node does not report is not
 active), the claim's fee routes judged by the node's `getfeeassetinfo`, the
-completion service (bounded: cancels on a thread of their own with a time
-budget per pass that drops stale jobs before they cost a send, jobs worked
+completion service (the payment known by the coins it spends, so a fee bump
+completes the claim and a confirmed spend that does not pay is the cancel;
+bounded: cancels on a thread of their own with a time budget per pass, sent
+whatever the node says of the lock and ordered by its answer, jobs worked
 nearest deadline first within time and block budgets, a payment search that
-keeps its place, a cancelled job only on a confirmed spend of the payment's
-coins, finished jobs watched until buried and then archived, one job per claim
-and payment, reads without signed transactions, capped intake, a token beyond
-loopback),
+keeps its place, finished jobs watched until buried and then archived; one job
+per terms, lock and payment into which every post merges, its claims checked
+against the buyer's key and its cancels against the Bitcoin daemon, so no
+client can block a buyer's job; reads without signed transactions, capped
+intake of live jobs, a token beyond loopback),
 and the `paylock` command for every step. Its `README.md` says how to run it
 and its regtest proof.
 

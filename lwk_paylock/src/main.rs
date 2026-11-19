@@ -659,7 +659,8 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
                 );
             }
             // A slow node is given up on after 15 s, so one job's call cannot hold the
-            // round; the cancel thread gives up after 3 s, so no send holds a cancel back.
+            // round; the cancel thread and intake give up after 3 s, so no send holds a
+            // cancel back and no check holds intake for long.
             let (t, tc) = (Duration::from_secs(15), Duration::from_secs(3));
             service::serve(
                 service::Clients {
@@ -673,6 +674,12 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
                         rpc: rpc_with("SEQ", tc)?,
                     },
                     btc_cancels: BtcChain {
+                        rpc: rpc_with("BTC", tc)?,
+                    },
+                    seq_intake: SeqChain {
+                        rpc: rpc_with("SEQ", tc)?,
+                    },
+                    btc_intake: BtcChain {
                         rpc: rpc_with("BTC", tc)?,
                     },
                 },
