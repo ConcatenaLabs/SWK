@@ -15,7 +15,8 @@ Cases (PAYLOCK_CASES):
   late     the payment does not confirm by D: the service broadcasts the cancel two
            blocks before D; and a payment mined after D, whose claim is refused;
   gone     the payment's block is replaced and the payment double-spent: the claim
-           leaves with it, and its old proof is refused;
+           leaves with it, its old proof is refused, and the job ends cancelled at the
+           double-spend's block;
   remined  the payment's block is replaced and the payment mined again: the service
            proves the same claim again and it completes;
   anchor   the lock's anchor is replaced: the lock comes back first, the seller's
@@ -593,8 +594,12 @@ class PayLockRegtest(LostSwapTest):
         self.wait_lost(s["LC"], HONEST)
         self.record("gone", "reorg", "Bitcoin block %d replaced, the payment double-spent; the claim's block is lost" % s["p"])
         assert self.bbuyer.gettransaction(s["pay"])["confirmations"] <= 0
-        j = self.wait_job(s, ["waiting"], timeout=60)
-        self.record("gone", "service", j["note"])
+        # The double-spend is a confirmed spend of the payment's coins that does not pay the
+        # seller: the payment can never be mined, and the buyer keeps its bitcoin.
+        j = self.wait_job(s, ["cancelled"], timeout=60)
+        assert_equal(j["cancel_height"], s["p"])
+        assert "does not pay the seller" in j["note"], j
+        self.record("gone", "service", "%s: %s" % (j["state"], j["note"]))
         self.force("gone", "the claim with its old proof", [s["old_claim"]], "bad-btcpay-not-in-anchor-chain")
         assert not any(self.mined(t) for t in s["claim_ids"])
         self.realign()
