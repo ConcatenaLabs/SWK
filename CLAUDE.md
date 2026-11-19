@@ -35,8 +35,9 @@ cargo run -p lwk_wollet --example sequentia_sync
 ```
 
 The `elements` dependency is patched workspace-wide to the vendored `rust-elements/` fork with its
-`sequentia` feature on. `README.md` records that this makes a number of upstream fixture tests
-fail; treat those as expected fork behaviour rather than as something you broke.
+`sequentia` feature on. That changes the wire format, so test vectors are Sequentia's, not Liquid's
+(`lwk_test_util/test_data/README.md`); a test that fails to decode a vector is a failure to fix, not
+expected fork behaviour.
 
 ## The WASM build, and who consumes it
 
