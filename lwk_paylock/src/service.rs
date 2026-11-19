@@ -853,6 +853,8 @@ impl Job {
         };
         v["found"] = f(&self.scan.found);
         v["late"] = f(&self.scan.late);
+        v["unprovable"] = f(&self.scan.unprovable);
+        v["unusable"] = json!(self.scan.unusable);
         v["lock_known"] = json!(self.lock_known);
         v["lock_checked_at"] = json!(self.lock_checked_at);
         v["cancel_at"] = json!(self.cancel_at);
@@ -886,6 +888,9 @@ impl Job {
             // Where a payment was mined: in the lock's heights, or else after `D`.
             "payment_height": self.scan.found.as_ref().or(self.scan.late.as_ref()).map(|f| f.height),
             "payment_bumped": self.scan.found.as_ref().or(self.scan.late.as_ref()).map(|f| !self.payments.iter().any(|p| p.txid == f.txid)),
+            // A transaction paying the seller in the lock's heights that no proof can carry:
+            // passed over, it opens nothing and withholds no cancel.
+            "unprovable_payment_height": self.scan.unprovable.as_ref().map(|f| f.height),
             "payments": self.payments.len(),
             "unvouched_payments": self.payments.iter().filter(|p| !p.vouched).count(),
             "has_cancel": self.payments.iter().any(Payment::has_cancel),
@@ -929,6 +934,14 @@ impl Job {
             found: found("found"),
             cancel: None,
             late: found("late"),
+            unprovable: found("unprovable"),
+            unusable: v
+                .get("unusable")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect(),
         };
         j.cancel_sent = b("cancel_sent");
         j.cancel_tried = b("cancel_tried");
@@ -1734,7 +1747,7 @@ pub fn tick(
                         if ours {
                             format!("the cancel {txid} is confirmed in Bitcoin block {h}: the buyer keeps its bitcoin")
                         } else {
-                            format!("the payment's coins are spent in Bitcoin block {h} by {txid}, which does not pay the seller the price: the payment can no longer be mined")
+                            format!("the payment's coins are spent in Bitcoin block {h} by {txid}, which does not pay the seller the price in a form a proof can carry: the payment can no longer be mined")
                         },
                     );
                 }
@@ -1758,6 +1771,13 @@ pub fn tick(
     }
     match payment_position(&job.terms, &job.scan, complete, btc_tip) {
         Position::Never(why) => {
+            let why = match &job.scan.unprovable {
+                Some(u) => format!(
+                    "{why} (the transaction {} in Bitcoin block {} pays the seller, but no proof can carry it: it opens nothing)",
+                    u.txid, u.height
+                ),
+                None => why,
+            };
             let open = job
                 .payments
                 .iter()
@@ -1844,7 +1864,12 @@ pub fn tick(
                     job.note = why;
                 }
                 Completion::Never(why) => {
-                    end(job, State::Never, found.height, btc_tip, limits, why);
+                    // This payment opens nothing; another one may. Never settled by it: it
+                    // is passed over, and the scan reads on from its block. Until another
+                    // is found the job is waiting, its cancels due as if none were mined.
+                    btc.pass_over(&mut job.scan)?;
+                    job.state = State::Waiting;
+                    job.note = format!("{why}: passed over, looking for another payment");
                 }
             }
         }

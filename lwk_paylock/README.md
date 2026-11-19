@@ -68,8 +68,9 @@ transaction index (`-txindex=1`).
    done when the claim's block is final.
 7. **Or the refund.** If no claim is mined, the seller's `paylock sign-refund`
    is valid 60 blocks after the first block anchored at `D`. It refuses to sign
-   while a payment to the receiving address is mined above `F` and at most `D`:
-   that payment is a buyer's, and its claim can still be mined. Its fee, too,
+   while a payment to the receiving address that a proof can carry is mined
+   above `F` and at most `D`: that payment is a buyer's, and its claim can still
+   be mined. One no proof can carry opens nothing and does not hold it back. Its fee, too,
    comes from the locked asset, the fee pot or a coin of the seller's own.
 
 ## The completion service
@@ -122,12 +123,18 @@ are payments and cancels. So a client that posts the buyer's claims first, with
 a made-up payment id, no payment, a subset of the claims or no cancel, holds
 nothing of the buyer's out.
 
-The claim needs nothing a client posts besides the claims. The payment is
-whatever Bitcoin mines above `F` and at or below `D` that pays the terms'
-receiving script at least the price, whoever made it and whatever coins it
-spends, since that is what the claim's script accepts. A payment handed over is
-held so that its cancels are: a cancel spends exactly the coins of a payment
-held.
+The claim needs nothing a client posts besides the claims. The payment is the
+first transaction Bitcoin mines above `F` and at or below `D` that pays the
+terms' receiving script at least the price and that a proof can carry, whoever
+made it and whatever coins it spends, since that is what the claim accepts. A
+proof carries a transaction that is not a coinbase and is, without its witness,
+neither 64 bytes long nor above 100,000 bytes (the specification's section
+4.1). A paying transaction outside those bounds (a miner can mine one Bitcoin
+would not relay) opens nothing: it is passed over, the search reads on, and it
+withholds no cancel; a read shows its height as `unprovable_payment_height`. So
+does one whose proof fails when the claim is completed. Of several payments in
+one block, one handed over is taken first. A payment handed over is held so
+that its cancels are: a cancel spends exactly the coins of a payment held.
 
 Intake checks what it is handed against the chains before holding any of it,
 and refuses what fails, whoever posts it:
@@ -199,9 +206,9 @@ On every round the service reads both chains as they are now:
   was first seen pooled, by whoever pooled it, leaves it out;
 - it submits the tiers of the first fee asset the node still accepts whose fee
   coin is unspent;
-- it completes the claim with whatever paying transaction Bitcoin mines in the
-  lock's heights, so the buyer's fee bump completes it too; a paying
-  transaction mined only after `D` ends the job `never`;
+- it completes the claim with the first provable paying transaction Bitcoin
+  mines in the lock's heights, so the buyer's fee bump completes it too; a
+  paying transaction mined only after `D` ends the job `never`;
 - it knows each payment it holds by the coins it spends: a confirmed spend of
   them that does not pay is its cancel. Once every payment Bitcoin has shown
   real is spent so, the job is `cancelled` at the latest of those blocks; a
@@ -210,8 +217,8 @@ On every round the service reads both chains as they are now:
 - it sends a payment it holds vouched for again if a reorganization evicted it
   before `D`;
 - it broadcasts every cancel of every payment held that is not settled, the
-  checked ones highest fee first and then those not checkable yet, if no payment
-  is mined two blocks before `D`, whatever its Sequentia node says of the lock,
+  checked ones highest fee first and then those not checkable yet, if no
+  provable payment is mined two blocks before `D`, whatever its Sequentia node says of the lock,
   and sends them again until a spend of that payment's coins is confirmed;
 - it shows the swap done (`final`) as soon as the claim's block is final, and
   goes on watching in the background (`watching: true`) until the Bitcoin block

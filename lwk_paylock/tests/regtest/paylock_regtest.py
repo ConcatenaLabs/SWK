@@ -82,7 +82,15 @@ Cases (PAYLOCK_CASES):
            buyer pays and posts, and its claim completes; the seller's refund is refused;
   idleconns    300 connections that send nothing, opened again as the service closes
            them, from another address and then from the buyer's own: the buyer's posts and
-           reads are answered, and its cancel goes out at D - 2.
+           reads are answered, and its cancel goes out at D - 2;
+  bigpay   a miner mines first, in the window, a transaction paying the seller the price
+           that no proof can carry (above 100,000 bytes without its witness); the buyer's
+           payment follows: the service passes the first over and completes the claim with
+           the buyer's, and the seller's wallet does not refund;
+  bigcancel    the same unprovable payment mined in the window while the buyer's waits
+           unmined: a claim proving it, forced into a block, is refused; it withholds
+           nothing, the buyer's cancel goes out at D - 2 and the job ends cancelled; the
+           seller's wallet is not held back from its refund by it.
 
 Each negative is forced into a block: a block node 1 produced is rewritten to
 carry the transaction, certified again (`recertifyposblock`) and submitted, and
@@ -121,7 +129,7 @@ from test_framework.util import assert_equal, get_auth_cookie, p2p_port, rpc_por
 CASES = os.environ.get("PAYLOCK_CASES", "path,unpaid,late,gone,remined,anchor,wrongamount,wrongaddress,"
                        "unaccepted,feecoin,feepot,twoasset,raise,resend,crowd,overflow,noraise,preempt,"
                        "cancelstate,afterfinal,unconf,bumplate,bumpin,block,nopayment,unknownparent,afterbroadcast,"
-                       "fakelock,samewit,wirepending,onelock,idleconns").split(",")
+                       "fakelock,samewit,wirepending,onelock,idleconns,bigpay,bigcancel").split(",")
 RESULTS = os.environ.get("PAYLOCK_RESULTS", "")
 BUYER = 1  # the buyer's node, which the completion service also reads
 COIN = Decimal(100_000_000)
@@ -1711,6 +1719,98 @@ class PayLockRegtest(LostSwapTest):
             assert opened[0] >= 300
             self.btc_mine(1)
             self.cancelled_and_archived(s, c)
+
+    def unprovable_payment(self, s, c):
+        """A transaction paying the seller the price beside 100,500 bytes of OP_RETURN data: more
+        than a proof carries (100,000 bytes without its witness), and more than Bitcoin relays, so
+        only a miner puts it in a block. Mined now, in its own block; returns that block's height."""
+        b, w = self.btc(), self.btc("miner")
+        coin = [u for u in w.listunspent(1) if u["amount"] >= Decimal("1")][0]
+        raw = w.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}],
+                                     [{s["recv"]: Decimal(s["price"]) / COIN},
+                                      {w.getnewaddress("", "bech32"): coin["amount"] - Decimal(s["price"]) / COIN - Decimal("0.01")},
+                                      {"data": "ab" * 100_500}])
+        big = w.signrawtransactionwithwallet(raw)["hex"]
+        d = b.decoderawtransaction(big)
+        stripped = (d["weight"] - d["size"]) // 3
+        assert stripped > 100_000, stripped
+        t = b.testmempoolaccept([big])[0]
+        assert not t["allowed"], t
+        h = b.getblockheader(b.generateblock(w.getnewaddress(), [big])["hash"])["height"]
+        s["big"] = d["txid"]
+        self.record(c, "the unprovable payment", "%s, %d bytes without its witness (the mempool: %s), mined at %d (F %d, D %d)" % (
+            d["txid"][:16], stripped, t.get("reject-reason"), h, s["terms"]["floor"], s["terms"]["deadline"]))
+        return h
+
+    def case_bigpay(self):
+        self.log.info("(bigpay) an unprovable payment mined first in the window, then the buyer's")
+        c = "bigpay"
+        b = self.btc()
+        s = self.ready(c)
+        self.make_payment(s)
+        self.hand_over(s)
+        self.send_pay(s)
+        # The buyer's payment waits while the miner's goes first.
+        b.prioritisetransaction(s["pay"], 0, -100_000_000)
+        h1 = self.unprovable_payment(s, c)
+        b.prioritisetransaction(s["pay"], 0, 100_000_000)
+        h2 = b.getblockheader(b.generateblock(self.btc("miner").getnewaddress(), [s["pay"]])["hash"])["height"]
+        assert s["terms"]["floor"] < h1 < h2 <= s["terms"]["deadline"], (h1, h2)
+        self.anchored_block(h2)
+        j = self.wait_job(s, ["final"], timeout=90)
+        assert_equal((j["payment_height"], j["failures"], j.get("unprovable_payment_height")), (h2, 0, h1))
+        self.record(c, "the service", "%s; the payment at %d, the unprovable one at %d passed over, %d failures: %s" % (
+            j["state"], j["payment_height"], j.get("unprovable_payment_height"), j["failures"], j["note"][:160]))
+        self.assert_buyer_paid(s, j)
+        # Completed by hand on the unprovable payment: never, and why.
+        r = self.pl("complete", "--terms", s["tfile"], "--lock", s["lock"], "--claim", s["claims"][0],
+                    "--payment", s["big"], ok=False)
+        assert_equal(r.get("state"), "never")
+        assert "no proof can carry" in r["reason"], r
+        self.record(c, "complete, naming the unprovable payment", "%s: %s" % (r["state"], r["reason"]))
+        to = self.nodes[SELLER].getaddressinfo(self.nodes[SELLER].getnewaddress())["scriptPubKey"]
+        r = self.pl("sign-refund", "--terms", s["tfile"], "--lock", s["lock"], "--key-file", s["skey"],
+                    "--to", to, "--fee", 5000, ok=False)
+        assert "does not refund" in r.get("error", "") and s["pay"] in r["error"], r
+        self.record(c, "the seller's refund", r["error"])
+        self.sync_tips(range(N))
+
+    def case_bigcancel(self):
+        self.log.info("(bigcancel) an unprovable payment mined in the window while the buyer's waits")
+        c = "bigcancel"
+        b = self.btc()
+        s = self.ready(c)
+        self.make_payment(s)
+        self.hand_over(s)
+        self.send_pay(s)
+        b.prioritisetransaction(s["pay"], 0, -100_000_000)
+        h1 = self.unprovable_payment(s, c)
+        self.anchored_block(h1)
+        # It opens nothing: the buyer's claim with a proof of it is refused, in a block too.
+        big_claim, _ = self.claim_with_python_proof(s, s["big"], blockhash=b.getblockhash(h1))
+        self.force(c, "a claim on the unprovable payment", [big_claim], "bad-btcpay-encoding")
+        D = s["terms"]["deadline"]
+        self.empty_btc_blocks(D - 3 - b.getblockcount())
+        time.sleep(3)
+        j = self.job(s)
+        assert_equal((j["state"], j["payment_height"], j["cancel_sent"], j.get("unprovable_payment_height")),
+                     ("waiting", None, False, h1))
+        self.record(c, "at D - 3", "%s, payment %s, unprovable at %s: %s" % (
+            j["state"], j["payment_height"], j.get("unprovable_payment_height"), j["note"][:160]))
+        # The seller's wallet: the unprovable payment opens nothing, so it is no buyer's.
+        to = self.nodes[SELLER].getaddressinfo(self.nodes[SELLER].getnewaddress())["scriptPubKey"]
+        r = self.pl("sign-refund", "--terms", s["tfile"], "--lock", s["lock"], "--key-file", s["skey"],
+                    "--to", to, "--fee", 5000, ok=False)
+        assert "does not refund" not in r.get("error", ""), r
+        self.record(c, "the seller's refund, signed", "error %s; keys %s" % (r.get("error"), sorted(r)))
+        self.empty_btc_blocks(1)
+        t0 = time.time()
+        self.wait_until(lambda: s["cancel_id"] in b.getrawmempool(), timeout=30)
+        self.record(c, "D - 2", "the buyer's cancel is in the mempool %.1f s after" % (time.time() - t0))
+        assert s["pay"] not in b.getrawmempool()
+        self.btc_mine(1)
+        self.cancelled_and_archived(s, c)
+        b.prioritisetransaction(s["pay"], 0, 100_000_000)
 
     def run_test(self):
         try:

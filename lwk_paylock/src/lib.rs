@@ -420,6 +420,14 @@ pub struct PaymentScan {
     /// For [`BtcChain::scan_lock`]: the first transaction paying the receiving script at
     /// least the price mined after `D`, which opens nothing.
     pub late: Option<Found>,
+    /// For [`BtcChain::scan_lock`]: the first transaction mined in the lock's heights that
+    /// pays the receiving script at least the price but that no proof can carry (see
+    /// [`provable`]), or whose proof failed. It opens nothing, so it is passed over: shown,
+    /// never taken as the payment.
+    pub unprovable: Option<Found>,
+    /// Transactions whose proof failed when the claim was completed, by id: passed over by
+    /// every later scan, as an unprovable one is.
+    pub unusable: Vec<String>,
 }
 
 /// How a payment the completion service holds was settled on Bitcoin: the first confirmed
@@ -441,6 +449,26 @@ pub const LATE_SCAN: u32 = 6;
 /// unmined is taken to be gone.
 pub const CANCEL_KEEP_BLOCKS: u32 = 144;
 
+/// Whether a proof can carry `tx` as a payment (specification section 4.1, check 4, and
+/// the record's limit in section 3): it is not a coinbase, and without its witness it is
+/// neither 64 bytes long nor above [`paylock::MAX_PAYMENT_BYTES`]. Only such a transaction
+/// opens a lock, so only such a transaction is ever taken as a swap's payment: a miner can
+/// mine one that is not, and it must neither stand in for the buyer's payment nor withhold
+/// the buyer's cancel.
+pub fn provable(tx: &bitcoin::Transaction) -> bool {
+    let n = tx.base_size();
+    !tx.is_coinbase() && n != 64 && n <= paylock::MAX_PAYMENT_BYTES
+}
+
+/// Whether `tx` pays `spk` at least `price_sat` in a form a proof can carry: what a claim
+/// accepts.
+fn pays_provably(tx: &bitcoin::Transaction, spk: &bitcoin::ScriptBuf, price_sat: u64) -> bool {
+    tx.output
+        .iter()
+        .any(|o| o.script_pubkey == *spk && o.value.to_sat() >= price_sat)
+        && provable(tx)
+}
+
 /// What a transaction is to a swap whose payment is `payment` and spends `coins`.
 fn classify(
     tx: &bitcoin::Transaction,
@@ -455,12 +483,9 @@ fn classify(
     if !named && !spends {
         return None;
     }
-    let pays = tx
-        .output
-        .iter()
-        .any(|o| o.script_pubkey == *spk && o.value.to_sat() >= terms.price_sat);
+    let pays = pays_provably(tx, spk, terms.price_sat);
     // The named payment is the payment, whatever it pays: a claim on it is then refused
-    // for paying too little, never mistaken for a cancel.
+    // for paying too little (or for no proof carrying it), never mistaken for a cancel.
     Some(named || pays)
 }
 
@@ -589,12 +614,16 @@ impl BtcChain {
     /// blocks and until `until`, and says whether it reached as far as it reads.
     ///
     /// The payment is known by Bitcoin alone: the first transaction mined above `F` and at
-    /// or below `D` that pays the terms' receiving script at least the price
-    /// (`scan.found`), whoever made it and whatever coins it spends, since that is what the
-    /// claim's script accepts. A paying transaction mined after `D` is noted
-    /// (`scan.late`). For each entry of `coins` (the coins of a payment held, to which its
-    /// cancels belong), `settled` records the first confirmed spend of any of them, and
-    /// whether it pays. Nothing is inferred from a coin that is merely missing.
+    /// or below `D` that pays the terms' receiving script at least the price in a form a
+    /// proof can carry (`scan.found`), whoever made it and whatever coins it spends, since
+    /// that is what the claim accepts. Of several in one block, a payment held (one that
+    /// spends coins of `coins`) is taken first. A paying transaction no proof can carry
+    /// ([`provable`]), or one in `scan.unusable`, opens nothing: it is passed over and the
+    /// scan reads on (`scan.unprovable` shows the first). A provable paying transaction
+    /// mined after `D` is noted (`scan.late`). For each entry of `coins` (the coins of a
+    /// payment held, to which its cancels belong), `settled` records the first confirmed
+    /// spend of any of them, and whether it pays so. Nothing is inferred from a coin that
+    /// is merely missing.
     ///
     /// It reads from `F` to [`LATE_SCAN`] blocks past `D`, and on, up to
     /// [`CANCEL_KEEP_BLOCKS`] past `D`, while `open` (a payment held with cancels is not
@@ -628,6 +657,10 @@ impl BtcChain {
             scan.late = None;
             gone = true;
         }
+        if !kept(&scan.unprovable)? {
+            scan.unprovable = None;
+            gone = true;
+        }
         for s in settled.iter_mut() {
             if !kept(&s.as_ref().map(|s| s.at.clone()))? {
                 *s = None;
@@ -644,6 +677,7 @@ impl BtcChain {
             scan.scanned = None;
             scan.found = None;
             scan.late = None;
+            scan.unprovable = None;
             settled.iter_mut().for_each(|s| *s = None);
         }
         if scan.found.is_some() {
@@ -666,43 +700,87 @@ impl BtcChain {
             let block = self.block(&hash)?;
             read += 1;
             scan.scanned = Some((h, hash.clone()));
+            // The payment of this block, if any: (whether a payment held, where).
+            let mut chosen: Option<(bool, Found)> = None;
             for tx in block.txdata.iter().skip(1) {
-                let pays = tx
+                let pays_price = tx
                     .output
                     .iter()
                     .any(|o| o.script_pubkey == spk && o.value.to_sat() >= terms.price_sat);
+                let txid = tx.compute_txid().to_string();
+                let usable = pays_price && provable(tx) && !scan.unusable.contains(&txid);
                 let here = || Found {
                     height: h,
                     block: hash.clone(),
-                    txid: tx.compute_txid().to_string(),
+                    txid: txid.clone(),
                 };
+                let mut held = false;
                 for (c, s) in coins.iter().zip(settled.iter_mut()) {
-                    if s.is_none() && tx.input.iter().any(|i| c.contains(&i.previous_output)) {
-                        *s = Some(Settled {
-                            at: here(),
-                            paid: pays,
-                        });
+                    if tx.input.iter().any(|i| c.contains(&i.previous_output)) {
+                        held = true;
+                        if s.is_none() {
+                            *s = Some(Settled {
+                                at: here(),
+                                paid: usable,
+                            });
+                        }
                     }
                 }
-                if pays && h > terms.floor {
-                    if h <= terms.deadline {
-                        scan.found = Some(here());
-                        return Ok(true);
+                if !pays_price || h <= terms.floor {
+                    continue;
+                }
+                if !usable {
+                    if h <= terms.deadline && scan.unprovable.is_none() {
+                        scan.unprovable = Some(here());
                     }
+                    continue;
+                }
+                if h > terms.deadline {
                     if scan.late.is_none() {
                         scan.late = Some(here());
                     }
+                } else if match &chosen {
+                    None => true,
+                    Some((k, _)) => held && !k,
+                } {
+                    chosen = Some((held, here()));
                 }
+            }
+            if let Some((_, f)) = chosen {
+                scan.found = Some(f);
+                return Ok(true);
             }
             h += 1;
         }
         Ok(true)
     }
 
+    /// Passes over the payment `scan` found, whose proof failed: it is never taken again,
+    /// and the scan reads on from the block before it, for another payment in that block
+    /// or a later one. Nothing is settled by it.
+    pub fn pass_over(&self, scan: &mut PaymentScan) -> Result<(), Error> {
+        let Some(f) = scan.found.take() else {
+            return Ok(());
+        };
+        if !scan.unusable.contains(&f.txid) {
+            scan.unusable.push(f.txid.clone());
+        }
+        if scan.unprovable.is_none() {
+            scan.unprovable = Some(f.clone());
+        }
+        scan.scanned = match f.height.checked_sub(1).filter(|h| *h >= 1) {
+            Some(h) => Some((h, self.block_hash(h)?)),
+            None => None,
+        };
+        Ok(())
+    }
+
     /// The first transaction of the best chain's blocks from `lo` to `hi` with an output
-    /// paying `script_pubkey` at least `min_sat`: what a seller looks for before it
-    /// refunds, since a payment in the lock's heights belongs to a buyer whose claim
-    /// may still come.
+    /// paying `script_pubkey` at least `min_sat`, in a form a proof can carry (not a
+    /// coinbase, and without its witness neither 64 bytes nor above
+    /// [`paylock::MAX_PAYMENT_BYTES`]; see [`provable`]): what a seller looks for before it
+    /// refunds, since such a payment in the lock's heights belongs to a buyer whose claim
+    /// may still come. One no proof can carry opens nothing, so it is passed over.
     pub fn paid_to(
         &self,
         script_pubkey: &[u8],
@@ -713,7 +791,19 @@ impl BtcChain {
         let want = hex_encode(script_pubkey);
         for h in lo.max(1)..=hi {
             let b = self.rpc.call("getblock", json!([self.block_hash(h)?, 2]))?;
-            for tx in b.get("tx").and_then(Value::as_array).into_iter().flatten() {
+            for tx in b
+                .get("tx")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .skip(1)
+            {
+                // Without its witness: weight = 3 × that size + the whole size.
+                let n = |k: &str| tx.get(k).and_then(Value::as_u64).unwrap_or(0);
+                let base = n("weight").saturating_sub(n("size")) / 3;
+                if base == 64 || base as usize > paylock::MAX_PAYMENT_BYTES {
+                    continue;
+                }
                 let pays = tx
                     .get("vout")
                     .and_then(Value::as_array)
@@ -924,7 +1014,8 @@ pub enum Completion {
     },
     /// Nothing to submit yet, and why.
     Waiting(String),
-    /// The payment can never open this lock.
+    /// The payment can never open this lock (another payment still may: the completion
+    /// service then passes this one over and looks on).
     Never(String),
 }
 
@@ -1026,7 +1117,16 @@ pub fn prove_claim(
     let vout = *paylock::paying_outputs(terms, &src.payment)?
         .first()
         .ok_or_else(|| err("the payment pays the seller's receiving script less than the price"))?;
-    let proof = PaymentProof::build(&src, coin_anchor)?;
+    // A proof failure depends only on the payment and its block: no proof of this payment
+    // opens the lock, which never says that no payment does.
+    let proof = match PaymentProof::build(&src, coin_anchor) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(Completion::Never(format!(
+                "no proof can carry the payment {payment_txid}: {e}"
+            )))
+        }
+    };
     let proof_bytes = proof.encode().len();
     Ok(Completion::Ready {
         tx: attach_proof(claim, &proof, vout)?,

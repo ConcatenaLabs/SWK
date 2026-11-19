@@ -42,7 +42,10 @@ fn fake_node(answer: Answer) -> String {
                     Err((code, message)) => json!({"jsonrpc": "2.0", "result": null,
                         "error": {"code": code, "message": message}, "id": v["id"]}),
                 };
-                let _ = req.respond(tiny_http::Response::from_string(out.to_string()));
+                let _ = req.respond(
+                    tiny_http::Response::from_string(out.to_string())
+                        .with_chunked_threshold(usize::MAX),
+                );
             });
         }
     });
@@ -1944,6 +1947,153 @@ fn the_payment_is_whatever_bitcoin_mines_paying_the_terms() {
     assert!(scan.found.is_none());
     assert_eq!(scan.late.map(|f| f.height), Some(1007));
     assert_eq!(settled[0].clone().map(|s| s.paid), Some(true));
+}
+
+/// `t`'s payment from coin `n` padded with an OP_RETURN of `pad` bytes: past 100,000 bytes
+/// without its witness, no proof can carry it.
+fn padded_payment(t: &PayLockTerms, n: u32, pad: usize) -> bitcoin::Transaction {
+    let (mut pay, _) = payment_for(t, n, 1_000);
+    let mut data = vec![0x6a, 0x4e];
+    data.extend((pad as u32).to_le_bytes());
+    data.extend(std::iter::repeat(0xab).take(pad));
+    pay.output.push(bitcoin::TxOut {
+        value: bitcoin::Amount::ZERO,
+        script_pubkey: bitcoin::ScriptBuf::from(data),
+    });
+    pay
+}
+
+#[test]
+fn a_payment_no_proof_can_carry_opens_nothing() {
+    let t = terms(1_000, 1_006);
+    let (held, _) = payment_for(&t, 42, 1_000);
+    let (stranger, _) = payment_for(&t, 77, 1_000);
+    let (other, _) = payment_for(&t, 79, 1_000);
+    let big = padded_payment(&t, 78, 100_500);
+    assert!(big.base_size() > 100_000);
+    assert!(!lwk_paylock::provable(&big));
+    assert!(lwk_paylock::provable(&held));
+    // 64 bytes without witness: an inner node of the merkle tree, never a payment.
+    let mut tiny = btc_spend(5, 1);
+    tiny.output[0].script_pubkey = bitcoin::ScriptBuf::from(vec![0x51; 4]);
+    assert_eq!(tiny.base_size(), 64);
+    assert!(!lwk_paylock::provable(&tiny));
+    tiny.output[0].script_pubkey = bitcoin::ScriptBuf::from(vec![0x51; 5]);
+    assert!(lwk_paylock::provable(&tiny));
+
+    let blocks: Arc<Mutex<Vec<Vec<bitcoin::Transaction>>>> = Arc::new(Mutex::new(vec![]));
+    let b2 = blocks.clone();
+    let btc_url = fake_node(Box::new(move |m, p| {
+        let b = b2.lock().unwrap();
+        match m {
+            "getblockcount" => Ok(json!(999 + b.len() as u64)),
+            "getblockhash" => Ok(json!(format!("{:064x}", p[0].as_u64().unwrap()))),
+            "getblock" => {
+                let h = u64::from_str_radix(p[0].as_str().unwrap(), 16).unwrap();
+                Ok(json!(raw_block(&b[(h - 1000) as usize])))
+            }
+            _ => Err((-32601, "no such method".into())),
+        }
+    }));
+    let btc = BtcChain {
+        rpc: rpc(&btc_url, 3),
+    };
+    let coins = vec![held
+        .input
+        .iter()
+        .map(|i| i.previous_output)
+        .collect::<Vec<_>>()];
+    let far = Instant::now() + Duration::from_secs(30);
+    let id = |t: &bitcoin::Transaction| t.compute_txid().to_string();
+
+    // 1001: the unprovable payment; 1002: the buyer's. The first is passed over.
+    *blocks.lock().unwrap() = vec![vec![], vec![big.clone()], vec![held.clone()]];
+    let mut scan = lwk_paylock::PaymentScan::default();
+    let mut settled = vec![None];
+    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
+        .unwrap();
+    let f = scan
+        .found
+        .clone()
+        .expect("the buyer's payment opens the lock");
+    assert_eq!((f.height, f.txid), (1002, id(&held)));
+    let u = scan
+        .unprovable
+        .clone()
+        .expect("the unprovable one is shown");
+    assert_eq!((u.height, u.txid), (1001, id(&big)));
+    assert_eq!(
+        settled[0].clone().map(|s| (s.at.height, s.paid)),
+        Some((1002, true))
+    );
+
+    // Only the unprovable payment in the window: nothing found, so nothing is paid in it.
+    *blocks.lock().unwrap() = (0..8)
+        .map(|h| if h == 1 { vec![big.clone()] } else { vec![] })
+        .collect();
+    let mut scan = lwk_paylock::PaymentScan::default();
+    let mut settled = vec![None];
+    assert!(btc
+        .scan_lock(&t, &coins, &mut settled, false, &mut scan, 100, far)
+        .unwrap());
+    assert!(scan.found.is_none() && scan.late.is_none());
+    assert_eq!(scan.unprovable.as_ref().map(|f| f.height), Some(1001));
+    assert_eq!(
+        lwk_paylock::payment_position(&t, &scan, true, 1_007),
+        lwk_paylock::Position::Never(
+            "no payment was mined by the deadline (Bitcoin block 1006)".into()
+        )
+    );
+
+    // Its coins spent by an unprovable payment, a payment held is settled as unpaid.
+    let mut held_big = padded_payment(&t, 42, 100_500);
+    held_big.input = held.input.clone();
+    *blocks.lock().unwrap() = vec![vec![], vec![held_big]];
+    let mut scan = lwk_paylock::PaymentScan::default();
+    let mut settled = vec![None];
+    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
+        .unwrap();
+    assert!(scan.found.is_none());
+    assert_eq!(
+        settled[0].clone().map(|s| (s.at.height, s.paid)),
+        Some((1001, false))
+    );
+
+    // Two in one block: the payment held is taken first, wherever it stands.
+    *blocks.lock().unwrap() = vec![vec![], vec![stranger.clone(), held.clone()]];
+    let mut scan = lwk_paylock::PaymentScan::default();
+    let mut settled = vec![None];
+    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
+        .unwrap();
+    assert_eq!(scan.found.clone().map(|f| f.txid), Some(id(&held)));
+
+    // A payment whose proof failed is passed over: the scan reads its block again and takes
+    // the next one there, then the next block's; it never settles anything.
+    *blocks.lock().unwrap() = vec![
+        vec![],
+        vec![stranger.clone(), other.clone()],
+        vec![held.clone()],
+    ];
+    let mut scan = lwk_paylock::PaymentScan::default();
+    btc.scan_lock(&t, &[], &mut [], false, &mut scan, 100, far)
+        .unwrap();
+    assert_eq!(scan.found.clone().map(|f| f.txid), Some(id(&stranger)));
+    btc.pass_over(&mut scan).unwrap();
+    assert!(scan.found.is_none());
+    assert_eq!(scan.unusable, vec![id(&stranger)]);
+    btc.scan_lock(&t, &[], &mut [], false, &mut scan, 100, far)
+        .unwrap();
+    assert_eq!(
+        scan.found.clone().map(|f| (f.height, f.txid)),
+        Some((1001, id(&other)))
+    );
+    btc.pass_over(&mut scan).unwrap();
+    btc.scan_lock(&t, &[], &mut [], false, &mut scan, 100, far)
+        .unwrap();
+    assert_eq!(
+        scan.found.clone().map(|f| (f.height, f.txid)),
+        Some((1002, id(&held)))
+    );
 }
 
 /// A connection from `source` (a loopback address of its own) to the service.
