@@ -182,6 +182,8 @@ struct Btc {
     node: usize,
     switch_on_proof: Option<(String, usize)>,
     fetched: u64,
+    /// Transactions sent to it.
+    sent: Vec<String>,
 }
 
 impl Btc {
@@ -244,34 +246,46 @@ fn fake_btc(state: Arc<Mutex<Btc>>) -> String {
                 Ok(json!([{"allowed": false, "reject-reason": "missing-inputs"}]))
             }
             "getmempoolentry" => Err((-5, "Transaction not in mempool".into())),
+            "sendrawtransaction" => {
+                let hex = p[0].as_str().unwrap_or_default().to_string();
+                let t: bitcoin::Transaction =
+                    bitcoin::consensus::encode::deserialize(&hex_decode(&hex).unwrap()).unwrap();
+                s.sent.push(hex);
+                Ok(json!(t.compute_txid().to_string()))
+            }
             _ => Err((-32601, "Method not found".into())),
         }
     }))
 }
 
 /// The Sequentia node: blocks 0 to 5 anchored at these Bitcoin heights (of the branch it
-/// follows), the lock mined in block 1; claims it pools; and its relay floor: a claim is
-/// refused unless its fee covers its proof's bytes divided by `per_atom`.
+/// follows), the locks mined in block 1; claims it pools; and its relay floor: a claim is
+/// refused unless its fee covers `floor` atoms per 1,000 bytes of its proof's record, which
+/// `getmempoolinfo` reports as its relay floor (the fee asset at 1:1). `generation` names
+/// the blocks: raised, the same heights are other blocks (rebuilt on another branch).
 struct Seq {
     anchors: Vec<u32>,
     lock: Transaction,
+    locks: HashMap<String, Transaction>,
     pooled: HashMap<String, Transaction>,
-    per_atom: usize,
+    floor: usize,
+    fee_asset: AssetId,
+    generation: u64,
     refused: Vec<String>,
     first_pooled: Option<Instant>,
 }
 
 fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
-    let hash = |h: u64| format!("{:064x}", 0x5e9_0000 + h);
+    let hash = |h: u64, g: u64| format!("{:064x}", 0x5e9_0000 + h + (g << 32));
     fake_node(Box::new(move |m, p| {
         let mut s = state.lock().unwrap();
         let lock_id = s.lock.txid().to_string();
         match m {
             "getblockcount" => Ok(json!(s.anchors.len() - 1)),
-            "getblockhash" => Ok(json!(hash(p[0].as_u64().unwrap()))),
+            "getblockhash" => Ok(json!(hash(p[0].as_u64().unwrap(), s.generation))),
             "getblockheader" => {
-                let h = (u64::from_str_radix(p[0].as_str().unwrap(), 16).unwrap() - 0x5e9_0000)
-                    as usize;
+                let h = ((u64::from_str_radix(p[0].as_str().unwrap(), 16).unwrap() - 0x5e9_0000)
+                    & 0xffff_ffff) as usize;
                 let a = s.anchors[h];
                 let b = btc.lock().unwrap();
                 let anchor = b.branches[b.node][(a - BASE) as usize]
@@ -281,9 +295,16 @@ fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
                     json!({"height": h, "confirmations": 1, "anchorheight": a, "anchorhash": anchor}),
                 )
             }
-            "getrawtransaction" if p[0].as_str() == Some(&lock_id) => {
-                Ok(json!({"hex": hex_encode(&serialize(&s.lock)), "blockhash": hash(1)}))
+            "getrawtransaction" if p[0].as_str() == Some(&lock_id) => Ok(
+                json!({"hex": hex_encode(&serialize(&s.lock)), "blockhash": hash(1, s.generation)}),
+            ),
+            "getrawtransaction" if s.locks.contains_key(p[0].as_str().unwrap_or_default()) => {
+                let l = &s.locks[p[0].as_str().unwrap_or_default()];
+                Ok(json!({"hex": hex_encode(&serialize(l)), "blockhash": hash(1, s.generation)}))
             }
+            "getrawmempool" => Ok(json!(s.pooled.keys().collect::<Vec<_>>())),
+            "getmempoolinfo" => Ok(json!({"mempoolminfee": s.floor as f64 / 1e8,
+                "minrelaytxfee": s.floor as f64 / 1e8})),
             "getrawtransaction" => match s.pooled.get(p[0].as_str().unwrap_or_default()) {
                 Some(tx) => Ok(json!({"hex": hex_encode(&serialize(tx))})),
                 None => Err((-5, "No such mempool or blockchain transaction".into())),
@@ -292,10 +313,11 @@ fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
             "gettxout" => Ok(json!({"value": 1})),
             "getfeeassetinfo" => {
                 let mut m = serde_json::Map::new();
-                m.insert(
-                    p[0].as_str().unwrap().to_string(),
-                    json!({"accepted": true, "rate": 100_000_000}),
-                );
+                let asset = p[0]
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| s.fee_asset.to_string());
+                m.insert(asset, json!({"accepted": true, "rate": 100_000_000}));
                 Ok(Value::Object(m))
             }
             "sendrawtransaction" => {
@@ -308,7 +330,7 @@ fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
                     .map(Vec::len)
                     .unwrap_or(0);
                 let fee = paylock::fee_of(&tx).map(|f| f.1).unwrap_or(0) as usize;
-                let need = record / s.per_atom;
+                let need = record * s.floor / 1_000;
                 if fee < need {
                     let m = format!("min relay fee not met, {fee} < {need}");
                     s.refused.push(m.clone());
@@ -385,21 +407,36 @@ struct World {
     btc_chain: BtcChain,
 }
 
+/// The fake chains: Bitcoin's branches, Sequentia's anchors, and its floor of one atom per
+/// `per_atom` bytes of proof.
 fn world(
     t: &PayLockTerms,
     branches: Vec<Vec<bitcoin::Block>>,
     anchors: Vec<u32>,
     per_atom: usize,
 ) -> World {
+    let lock = lock_tx(t);
+    let probe = paylock::sign_claim(
+        t,
+        OutPoint::new(lock.txid(), 0),
+        Script::from(vec![0x51]),
+        1,
+        BlockHash::all_zeros(),
+        &key(1),
+    )
+    .unwrap();
     let btc = Arc::new(Mutex::new(Btc {
         branches,
         ..Default::default()
     }));
     let seq = Arc::new(Mutex::new(Seq {
         anchors,
-        lock: lock_tx(t),
+        lock,
+        locks: HashMap::new(),
         pooled: HashMap::new(),
-        per_atom,
+        floor: 1_000 / per_atom,
+        fee_asset: paylock::fee_of(&probe).unwrap().0,
+        generation: 0,
         refused: vec![],
         first_pooled: None,
     }));
@@ -716,4 +753,293 @@ fn a_flood_of_jobs_and_clients_does_not_delay_a_buyers_claim() {
             "{jobs} jobs from {clients}: {fetched} blocks served"
         );
     }
+}
+
+/// Terms from `floor` to `deadline` whose seller receives at a key of its own, made from
+/// `n`: one more job, one more receiving script.
+fn terms_n(floor: u32, deadline: u32, n: u32) -> PayLockTerms {
+    let secp = Secp256k1::new();
+    let x = |b| {
+        Keypair::from_secret_key(&secp, &key(b))
+            .x_only_public_key()
+            .0
+    };
+    let mut seed = [7u8; 32];
+    seed[28..].copy_from_slice(&(n + 1).to_be_bytes());
+    let rk = bitcoin::PublicKey::new(bitcoin::secp256k1::PublicKey::from_secret_key(
+        &bitcoin::secp256k1::Secp256k1::new(),
+        &bitcoin::secp256k1::SecretKey::from_slice(&seed).unwrap(),
+    ));
+    PayLockTerms::new(
+        AssetId::from_slice(&[5; 32]).unwrap(),
+        1_000_000,
+        50_000,
+        x(1),
+        x(2),
+        rk,
+        floor,
+        deadline,
+    )
+    .unwrap()
+}
+
+/// A store in a directory of its own, carrying any number of jobs.
+fn store(name: &str) -> (Mutex<Store>, std::path::PathBuf, Limits) {
+    let dir = std::env::temp_dir().join(format!("paylock-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let limits = Limits {
+        max_jobs: 1_000_000,
+        jobs_per_client: 0,
+        ..Limits::default()
+    };
+    (Mutex::new(Store::open(&dir).unwrap()), dir, limits)
+}
+
+/// Mines one more Bitcoin block holding `txs` on the daemon's best branch, and a Sequentia
+/// block anchoring it.
+fn mine(w: &World, tag: u8, txs: &[bitcoin::Transaction]) {
+    let h = {
+        let mut b = w.btc.lock().unwrap();
+        let best = b.best;
+        let p = b.branches[best].last().unwrap().block_hash();
+        b.branches[best].push(block(p, tag, txs));
+        BASE - 1 + b.branches[best].len() as u32
+    };
+    w.seq.lock().unwrap().anchors.push(h);
+}
+
+/// F10. An attacker gives each of its jobs a receiving script of its own, pays every one
+/// with one transaction, and prices every claim under the node's floor: its jobs never
+/// land. Each is tried once and passed over; after that none is tried again as Bitcoin
+/// blocks arrive, so a real buyer's claim is pooled in the first turns of the round after
+/// its payment is anchored, with no attacker claim sent before it. Once the node's floor
+/// falls below what the attacker's claims pay, they are tried again, and land.
+#[test]
+fn jobs_whose_claims_cannot_land_cost_a_buyer_nothing() {
+    const N: u32 = 300;
+    let tip = BASE + 4;
+    let buyer_terms = terms_at(tip, tip + 8, 3);
+    let att: Vec<PayLockTerms> = (0..N).map(|n| terms_n(BASE, tip + 7, n)).collect();
+    // One transaction pays every attacker script the price, at BASE + 1.
+    let mut pay = payment(&att[0], 200, 0);
+    pay.output = att
+        .iter()
+        .map(|t| bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(t.price_sat),
+            script_pubkey: t.receive_script_pubkey(),
+        })
+        .collect();
+    let blocks = chain(
+        bitcoin::BlockHash::all_zeros(),
+        1,
+        &[vec![], vec![pay], vec![], vec![], vec![]],
+    );
+    let w = world(
+        &buyer_terms,
+        vec![blocks],
+        vec![BASE, BASE, BASE + 2, BASE + 3, tip],
+        1,
+    );
+    let (store, dir, limits) = store("cannot-land");
+    {
+        let mut st = store.lock().unwrap();
+        let mut s = w.seq.lock().unwrap();
+        for (n, t) in att.iter().enumerate() {
+            let lock = lock_tx(t);
+            s.locks.insert(lock.txid().to_string(), lock.clone());
+            let op = OutPoint::new(lock.txid(), 0);
+            // One tier, at one atom: far under the floor.
+            let c = paylock::sign_claim(
+                t,
+                op,
+                Script::from(vec![0x51]),
+                1,
+                BlockHash::all_zeros(),
+                &key(1),
+            )
+            .unwrap();
+            let mut j = Job::from_request(&json!({"terms": t.to_json(),
+                "lock": format!("{}:0", op.txid), "claims": [hex_encode(&serialize(&c))]}))
+            .unwrap();
+            j.client = format!("100.64.{}.{}", n / 250, n % 250);
+            st.add(j, &limits).unwrap();
+        }
+        let mut j = job(&buyer_terms, &s.lock.clone(), None);
+        j.client = "203.0.113.91".into();
+        st.add(j, &limits).unwrap();
+    }
+    let refused = |w: &World| w.seq.lock().unwrap().refused.len();
+    // Every attacker job tried once, and passed over.
+    for _ in 0..20 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+        if refused(&w) >= N as usize {
+            break;
+        }
+    }
+    let first_pass = refused(&w);
+    assert_eq!(first_pass, N as usize, "each attacker job is tried once");
+    // Bitcoin blocks arrive, anchored: nothing is tried again.
+    for tag in 0..3u8 {
+        mine(&w, 100 + tag, &[]);
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    }
+    let after_blocks = refused(&w) - first_pass;
+    // The buyer pays: its payment is mined and anchored.
+    mine(&w, 120, &[payment(&buyer_terms, 42, 0)]);
+    let t0 = Instant::now();
+    let before = refused(&w);
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    let took = w.seq.lock().unwrap().first_pooled.map(|t| t - t0);
+    let sent_before_buyer = refused(&w) - before;
+    eprintln!(
+        "{N} attacker jobs: first pass {first_pass} refused; then {after_blocks} tried again over 3 blocks; the buyer pooled {took:?} into its round, {sent_before_buyer} attacker claims sent in that round"
+    );
+    assert_eq!(
+        after_blocks, 0,
+        "a block arriving brings no attacker job back"
+    );
+    assert_eq!(
+        sent_before_buyer, 0,
+        "no attacker claim is sent in the buyer's round"
+    );
+    assert!(
+        took.is_some(),
+        "the buyer's claim is pooled in the round after its payment"
+    );
+    assert!(took.unwrap() < Duration::from_secs(2), "{took:?}");
+    // The floor falls a millionfold: one atom now covers the attacker's claims, which are
+    // tried again and land.
+    w.seq.lock().unwrap().floor = 0;
+    let pooled_before = w.seq.lock().unwrap().pooled.len();
+    for _ in 0..20 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+        if w.seq.lock().unwrap().pooled.len() >= pooled_before + N as usize {
+            break;
+        }
+    }
+    let landed = w.seq.lock().unwrap().pooled.len() - pooled_before;
+    eprintln!("the floor fell: {landed} attacker claims landed");
+    assert_eq!(landed, N as usize);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F8. The service works a job in the moment Bitcoin has switched branches and Sequentia
+/// has not yet rebuilt its tip on the new one: the chains disagree and the claim waits.
+/// Sequentia then replaces its tip with a block of the same height, anchored on the new
+/// branch at the same Bitcoin height. The tips' heights are unchanged, their blocks are
+/// not: the job is worked again at once, and the claim pooled.
+#[test]
+fn a_tip_rebuilt_at_the_same_heights_wakes_the_job() {
+    let t = terms();
+    let buyer = payment(&t, 42, 0);
+    let common = chain(bitcoin::BlockHash::all_zeros(), 50, &[vec![], vec![]]);
+    let tip = common.last().unwrap().block_hash();
+    let a = chain(tip, 60, &[vec![], vec![], vec![]]);
+    let b = chain(tip, 70, &[vec![], vec![buyer.clone()], vec![]]);
+    let branch = |x: &[bitcoin::Block]| common.iter().chain(x).cloned().collect::<Vec<_>>();
+    let w = world(
+        &t,
+        vec![branch(&a), branch(&b)],
+        vec![1000, 1000, 1001, 1003, 1004],
+        1,
+    );
+    {
+        // The daemon follows B; Sequentia's blocks still anchor to A.
+        let mut s = w.btc.lock().unwrap();
+        s.best = 1;
+        s.node = 0;
+    }
+    let (store, dir, limits) = store("rebuilt");
+    {
+        let mut j = job(&t, &w.seq.lock().unwrap().lock.clone(), None);
+        j.client = "203.0.113.91".into();
+        store.lock().unwrap().add(j, &limits).unwrap();
+    }
+    for _ in 0..2 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    }
+    let note = |s: &Mutex<Store>| s.lock().unwrap().jobs.values().next().unwrap().note.clone();
+    eprintln!("chains disagreeing: {}", note(&store));
+    assert!(proven(&w.seq).is_none());
+    // Sequentia rebuilds its blocks on B: the same heights, other blocks.
+    w.btc.lock().unwrap().node = 1;
+    w.seq.lock().unwrap().generation += 1;
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    eprintln!("after the rebuild: {}", note(&store));
+    assert_eq!(proven(&w.seq), Some(id(&buyer)), "{}", note(&store));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F9. A claim proving the seller's own payment is pooled, so the buyer's cancel is
+/// withheld (the buyer has the asset). The claim then leaves the node's mempool, and the
+/// node refuses every tier: no claim proving a payment is pooled or mined any more, so
+/// the buyer's cancel is sent two blocks before the deadline.
+#[test]
+fn a_claim_gone_and_refused_releases_the_cancel() {
+    let t = terms();
+    let own = payment(&t, 9, 0);
+    let buyer = payment(&t, 42, 0);
+    let cancel = bitcoin::Transaction {
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(t.price_sat - 500),
+            script_pubkey: bitcoin::ScriptBuf::from(vec![0x51]),
+        }],
+        ..buyer.clone()
+    };
+    let hex = |x: &bitcoin::Transaction| hex_encode(&bitcoin::consensus::encode::serialize(x));
+    // The seller's own payment at 1001; Sequentia anchors it.
+    let blocks = chain(
+        bitcoin::BlockHash::all_zeros(),
+        80,
+        &[vec![], vec![own.clone()], vec![]],
+    );
+    let w = world(&t, vec![blocks], vec![1000, 1000, 1001, 1002], 1);
+    let (store, dir, limits) = store("gone");
+    {
+        let j = job(&t, &w.seq.lock().unwrap().lock.clone(), None);
+        let mut v = j.to_json();
+        v["payments"] = json!([{"hex": hex(&buyer), "vouched": true, "by": "203.0.113.91",
+            "cancels": [{"hex": hex(&cancel), "fee": 500, "vouched": true}]}]);
+        let mut j = Job::from_stored(&v).unwrap();
+        j.client = "203.0.113.91".into();
+        store.lock().unwrap().add(j, &limits).unwrap();
+    }
+    for _ in 0..3 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+        if proven(&w.seq).is_some() {
+            break;
+        }
+    }
+    assert_eq!(
+        proven(&w.seq),
+        Some(id(&own)),
+        "the claim lands on the seller's own payment"
+    );
+    // Two blocks before the deadline (1006): the claim pooled withholds the cancel.
+    mine(&w, 81, &[]);
+    mine(&w, 82, &[]);
+    assert_eq!(w.btc_chain.tip().unwrap(), 1004);
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    service::send_due_cancels(&store, &w.btc_chain, &w.seq_chain, &limits).unwrap();
+    let cancel_sent = |w: &World| w.btc.lock().unwrap().sent.contains(&hex(&cancel));
+    assert!(!cancel_sent(&w), "withheld while the claim is pooled");
+    // The claim leaves the mempool, and the floor rises above every tier.
+    {
+        let mut s = w.seq.lock().unwrap();
+        s.pooled.clear();
+        s.floor = 1_000_000;
+    }
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    let j = store
+        .lock()
+        .unwrap()
+        .jobs
+        .values()
+        .next()
+        .unwrap()
+        .public_json();
+    eprintln!("the claim gone and refused: {} {}", j["state"], j["note"]);
+    service::send_due_cancels(&store, &w.btc_chain, &w.seq_chain, &limits).unwrap();
+    assert!(cancel_sent(&w), "the cancel is sent: {j}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

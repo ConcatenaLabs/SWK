@@ -20,9 +20,9 @@
 //! - pays the fee in whichever asset the node still accepts, when the buyer signed
 //!   tiers in two;
 //! - broadcasts the cancels if the payment is still unconfirmed two blocks before `D`
-//!   and no claim on another payment is accepted, whatever its Sequentia node says of the
-//!   lock (the cancel concerns Bitcoin alone), and sends them again until a spend of the
-//!   payment's coins is confirmed;
+//!   and no claim proving another payment is pooled or mined, whatever its Sequentia node
+//!   says of the lock (the cancel concerns Bitcoin alone), and sends them again until a
+//!   spend of the payment's coins is confirmed;
 //! - shows the claim complete once its block is final, and goes on watching in the
 //!   background until the Bitcoin blocks that decided the swap are buried
 //!   ([`Limits::watch_depth`]): a later Bitcoin reorganization is followed by proving
@@ -39,12 +39,17 @@
 //! completing claims follows what happens on the chains, never the number of jobs or
 //! clients ([`work_round`]): each Bitcoin block is read once for every job
 //! ([`BlockCache`]), a job's search passes blocks that hold nothing for it by a lookup,
-//! and the jobs with a payment or a claim in play are worked first, taking turns by
-//! receiving script; each job within a time and block budget, the whole round within a
-//! budget of its own. A job that fails retries with a backoff. Intake caps the request's size, the size of each transaction it keeps, the
-//! claims, payments and cancels per job, a lock's span of heights, the number of live
-//! jobs and those each client starts, and needs a token whenever it listens
-//! beyond loopback. Each request is served on a thread of its own under deadlines, and
+//! and a job is worked only when something it waits on can have changed, those that
+//! something new on the chains concerns first, taking turns by receiving script; a
+//! candidate passed over comes back only when the node's floor or accepted assets have
+//! moved, never because a block arrived; each job works within a time and block budget,
+//! the whole round within a budget of its own. A job that fails retries with a backoff.
+//! Each signed payment and cancel is held once however many jobs hold it, and a job's
+//! own bytes are bounded ([`MAX_CLAIM_BYTES`], [`MAX_UNCHECKED_BYTES`],
+//! [`MAX_CANCEL_BYTES`]). Intake caps the request's size, the size of each transaction
+//! it keeps, the claims, payments and cancels per job, a lock's span of heights, the
+//! number of live jobs and those each client starts, and needs a token whenever it
+//! listens beyond loopback. Each request is served on a thread of its own under deadlines, and
 //! no address takes every connection ([`http`]), so a slow or crowding client stalls
 //! nobody else.
 //!
@@ -74,7 +79,8 @@
 //! with made-up ones. A read returns where a job stands, never its signed claims, its
 //! cancels or its payments.
 //!
-//! Jobs are kept as one JSON file each, so a restart carries on where it stopped;
+//! Jobs are kept as one JSON file each, their payments one file each under `payments/`
+//! however many jobs hold them, so a restart carries on where it stopped;
 //! ended jobs move to `archive/` once buried, and leave it after
 //! [`Limits::archive_days`].
 
@@ -92,13 +98,18 @@ use serde_json::{json, Value};
 
 pub use crate::CANCEL_KEEP_BLOCKS;
 use crate::{
-    http, outpoint, prove_claim, proven_payment, refused_for_weight, script_key, Accept, Advance,
-    BlockCache, BtcChain, Candidate, Completion, Error, Found, Passed, PaymentScan, SeqChain,
-    Settled, TxStatus,
+    http, outpoint, prove_claim, proven_payment, refusal_figures, refused_for_weight, script_key,
+    Accept, Advance, BlockCache, BtcChain, Candidate, Completion, Error, Floors, Found, Passed,
+    PaymentScan, Refusal, Retry, SeqChain, Settled, TxStatus,
 };
 
 /// How often a lock the node did not know is looked up again, in seconds.
 const LOCK_RECHECK_SECS: u64 = 60;
+
+/// How often a job holding a payment or cancel the Bitcoin daemon could not check yet is
+/// checked again while neither chain moves, in seconds: its parent may be broadcast at any
+/// time.
+const UNCHECKED_RECHECK_SECS: u64 = 10;
 
 /// How often a cancel already sent is sent again, in seconds.
 const CANCEL_RESEND_SECS: u64 = 10;
@@ -130,6 +141,20 @@ pub const MAX_UNVOUCHED_PAYMENTS: usize = 8;
 /// See [`MAX_UNVOUCHED_PAYMENTS`].
 pub const UNVOUCHED_PER_CLIENT: usize = 2;
 
+/// The largest signed claim a job keeps, in bytes, without its proof (which the service
+/// writes): a claim spends the lock and a few fee coins to a few outputs, a few hundred
+/// bytes in the clear, and a few kilobytes with confidential outputs.
+pub const MAX_CLAIM_BYTES: usize = 16 << 10;
+
+/// The most bytes of signed transactions the Bitcoin daemon cannot check yet that one job
+/// keeps: payments it cannot vouch for and cancels of them. Beyond it, the answer is to
+/// post them again once the payment's parent is broadcast.
+pub const MAX_UNCHECKED_BYTES: usize = 64 << 10;
+
+/// The most bytes of checked cancels one job keeps for one payment. Only the payment's
+/// signer can make one, so they crowd out nobody else's; beyond it the cheapest goes.
+pub const MAX_CANCEL_BYTES: usize = MAX_TX_BYTES;
+
 /// A cancel the job keeps: a spend of exactly the payment's coins back to the buyer.
 ///
 /// A cancel is known by its witness transaction id (`wtxid`), never by its `txid` alone:
@@ -138,8 +163,8 @@ pub const UNVOUCHED_PER_CLIENT: usize = 2;
 /// the daemon vouched for is never displaced by another.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cancel {
-    /// The raw transaction.
-    pub hex: String,
+    /// The raw transaction, held once for every job that keeps the same one ([`shared`]).
+    pub hex: Arc<str>,
     /// Its id (which does not cover its witness).
     pub txid: String,
     /// Its witness transaction id: what tells one copy of it from another.
@@ -159,7 +184,7 @@ impl Cancel {
     fn new(hex: &str) -> Result<Cancel, Error> {
         let t = btc_tx(hex, "cancel")?;
         Ok(Cancel {
-            hex: hex.to_string(),
+            hex: shared(hex),
             txid: t.compute_txid().to_string(),
             wtxid: t.compute_wtxid().to_string(),
             fee: 0,
@@ -180,7 +205,8 @@ pub struct Payment {
     /// The coins it spends, sorted: what it is known by.
     pub coins: Vec<bitcoin::OutPoint>,
     /// The signed transaction held: the copy the daemon vouched for, when there is one.
-    pub hex: String,
+    /// Held once for every job that holds it ([`shared`]), and stored once on disk.
+    pub hex: Arc<str>,
     /// Its id.
     pub txid: String,
     /// Whether the Bitcoin daemon pools it or has mined it: real coins, validly signed,
@@ -216,7 +242,7 @@ impl Payment {
         }
         Ok(Payment {
             coins: inputs_of(&t),
-            hex: hex.to_string(),
+            hex: shared(hex),
             txid: t.compute_txid().to_string(),
             vouched: false,
             by: by.to_string(),
@@ -275,12 +301,26 @@ impl Payment {
             self.pending.retain(|p| p.txid != c.txid);
         }
         self.pending.retain(|p| p.wtxid != c.wtxid);
+        let wtxid = c.wtxid.clone();
         self.cancels.push(Cancel {
             by: String::new(),
             ..c
         });
         self.cancels.sort_by(|a, b| b.fee.cmp(&a.fee));
-        true
+        // Within the bytes kept for one payment's cancels: the cheapest goes first.
+        while self.cancels.len() > 1
+            && self.cancels.iter().map(|c| c.hex.len() / 2).sum::<usize>() > MAX_CANCEL_BYTES
+        {
+            let i = self
+                .cancels
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, h)| (h.fee, h.vouched))
+                .map(|(i, _)| i)
+                .expect("non-empty");
+            self.cancels.remove(i);
+        }
+        self.cancels.iter().any(|h| h.wtxid == wtxid)
     }
 
     /// Keeps a cancel the daemon could not check yet, by its `wtxid`, up to
@@ -338,15 +378,22 @@ impl Payment {
         Ok(what)
     }
 
-    fn to_json(&self) -> Value {
+    /// As stored; with `inline` false, the signed transaction is named by its key
+    /// ([`payment_key`]) and kept in a file of its own, once for every job.
+    fn to_json(&self, inline: bool) -> Value {
+        let (k, hex) = if inline || self.hex.is_empty() {
+            ("hex", self.hex.to_string())
+        } else {
+            ("hex_ref", payment_key(&self.hex))
+        };
         json!({
             "coins": self.coins.iter().map(|c| format!("{}:{}", c.txid, c.vout)).collect::<Vec<_>>(),
             "txid": self.txid,
-            "hex": self.hex,
+            k: hex,
             "vouched": self.vouched,
             "by": self.by,
-            "cancels": self.cancels.iter().map(|c| json!({"hex": c.hex, "fee": c.fee, "vouched": c.vouched})).collect::<Vec<_>>(),
-            "pending": self.pending.iter().map(|c| json!({"hex": c.hex, "by": c.by})).collect::<Vec<_>>(),
+            "cancels": self.cancels.iter().map(|c| json!({"hex": &*c.hex, "fee": c.fee, "vouched": c.vouched})).collect::<Vec<_>>(),
+            "pending": self.pending.iter().map(|c| json!({"hex": &*c.hex, "by": c.by})).collect::<Vec<_>>(),
             "settled": self.settled.as_ref().map(|s| json!({"height": s.at.height, "block": s.at.block, "txid": s.at.txid, "paid": s.paid})),
         })
     }
@@ -362,7 +409,7 @@ impl Payment {
                     .flatten()
                     .filter_map(|c| c.as_str()?.parse().ok())
                     .collect(),
-                hex: String::new(),
+                hex: shared(""),
                 txid: v
                     .get("txid")
                     .and_then(Value::as_str)
@@ -593,13 +640,97 @@ pub struct Job {
     /// When the work thread last worked the job (an order, not a time); 0 never, since the
     /// service started. Not stored.
     pub worked: u64,
-    /// The tips of both chains when it was last worked. Not stored.
-    pub epoch: (u32, u32),
+    /// When the work thread last worked it (seconds since 1970); 0 never. Not stored.
+    pub worked_at: u64,
+    /// The tips of both chains when it was last worked, by their blocks' hashes (keys of
+    /// them): a block replaced at the same height moves it. Not stored.
+    pub epoch: (u64, u64),
     /// How many times intake merged something new in, and how many of those the work
     /// thread had seen when it last worked the job. Not stored.
     pub changed: u64,
     /// See `changed`.
     pub seen: u64,
+}
+
+/// What brings a candidate passed over back, as stored.
+fn retry_json(r: &Retry) -> Value {
+    match r {
+        Retry::Never => json!({"kind": "never"}),
+        Retry::Unknown => json!({"kind": "unknown"}),
+        Retry::Floor { refused, untried } => json!({
+            "kind": "floor",
+            "refused": refused.iter().map(|r| json!({"asset": r.asset.to_string(), "paid": r.paid,
+                "need": r.need, "floor": r.floor})).collect::<Vec<_>>(),
+            "untried": untried.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+/// [`retry_json`] read back; anything else (a record stored without it) is tried again.
+fn retry_from(v: Option<&Value>) -> Retry {
+    let Some(v) = v else {
+        return Retry::Unknown;
+    };
+    match v.get("kind").and_then(Value::as_str) {
+        Some("never") => Retry::Never,
+        Some("floor") => Retry::Floor {
+            refused: v
+                .get("refused")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|r| {
+                    Some(Refusal {
+                        asset: r.get("asset")?.as_str()?.parse().ok()?,
+                        paid: r.get("paid")?.as_u64()?,
+                        need: r.get("need")?.as_u64()?,
+                        floor: r.get("floor").and_then(Value::as_f64),
+                    })
+                })
+                .collect(),
+            untried: v
+                .get("untried")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str()?.parse().ok())
+                .collect(),
+        },
+        _ => Retry::Unknown,
+    }
+}
+
+/// Signed transactions held, each once however many jobs hold it: a payment that vouches
+/// for many jobs, or a cancel handed over for each, costs one copy.
+static SHARED: std::sync::OnceLock<Mutex<std::collections::HashSet<Arc<str>>>> =
+    std::sync::OnceLock::new();
+
+/// The one copy of `hex` held ([`SHARED`]).
+fn shared(hex: &str) -> Arc<str> {
+    let mut set = SHARED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(h) = set.get(hex) {
+        return h.clone();
+    }
+    let h: Arc<str> = Arc::from(hex);
+    set.insert(h.clone());
+    h
+}
+
+/// Lets go of the copies no job holds any more.
+fn drop_unshared() {
+    if let Some(m) = SHARED.get() {
+        m.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|h| Arc::strong_count(h) > 1);
+    }
+}
+
+/// The name of a signed payment's file: a hash of the transaction, witness included.
+fn payment_key(hex: &str) -> String {
+    sha256::Hash::hash(hex.as_bytes()).to_string()
 }
 
 fn now_secs() -> u64 {
@@ -717,6 +848,11 @@ impl Job {
             }
         }
         for c in &claims {
+            if serialize(c).len() > MAX_CLAIM_BYTES {
+                return Err(Error(format!(
+                    "a signed claim is at most {MAX_CLAIM_BYTES} bytes"
+                )));
+            }
             if c.input.first().map(|i| i.previous_output) != Some(lock) {
                 return Err(Error(
                     "a claim does not spend the lock as its first input".into(),
@@ -807,6 +943,7 @@ impl Job {
             retry_at: 0,
             note: String::new(),
             worked: 0,
+            worked_at: 0,
             epoch: (0, 0),
             changed: 0,
             seen: 0,
@@ -849,6 +986,16 @@ impl Job {
 
     /// The job as stored: everything, its signed transactions included.
     pub fn to_json(&self) -> Value {
+        self.json(true)
+    }
+
+    /// The job as its file holds it: its payments named by key, each kept once for every
+    /// job in a file of its own ([`Store::save`]).
+    fn stored_json(&self) -> Value {
+        self.json(false)
+    }
+
+    fn json(&self, inline: bool) -> Value {
         let mut v = self.public_json();
         v["terms"] = self.terms.to_json();
         v["claims"] = json!(self
@@ -859,7 +1006,7 @@ impl Job {
         v["payments"] = json!(self
             .payments
             .iter()
-            .map(Payment::to_json)
+            .map(|p| p.to_json(inline))
             .collect::<Vec<_>>());
         v["client"] = json!(self.client);
         v["scanned"] = json!(self
@@ -890,7 +1037,7 @@ impl Job {
             .iter()
             .map(
                 |p| json!({"height": p.at.height, "block": p.at.block, "txid": p.at.txid,
-                "proof": p.proof, "why": p.why, "tip": p.tip})
+                "proof": p.proof, "why": p.why, "tip": p.tip, "retry": retry_json(&p.retry)})
             )
             .collect::<Vec<_>>());
         v["lock_known"] = json!(self.lock_known);
@@ -1014,6 +1161,7 @@ impl Job {
                         proof: p.get("proof")?.as_u64()? as usize,
                         why: p.get("why")?.as_str()?.to_string(),
                         tip: p.get("tip")?.as_u64()? as u32,
+                        retry: retry_from(p.get("retry")),
                     })
                 })
                 .collect(),
@@ -1037,14 +1185,29 @@ impl Job {
     }
 
     /// Whether the payment is known: mined at a height the claim accepts, and proven by a
-    /// claim the node accepted. A payment only mined, whose claim may never land, withholds
-    /// no cancel.
+    /// claim that is pooled or mined now. A payment only mined, whose claim may never land,
+    /// withholds no cancel, and neither does one whose claim the node once accepted but
+    /// holds no longer (it left the mempool, and every tier is refused now).
     fn paid_in_window(&self) -> bool {
-        self.scan
-            .found
-            .as_ref()
-            .map(|f| f.height > self.terms.floor && f.height <= self.terms.deadline)
-            .unwrap_or(false)
+        matches!(self.state, State::Pooled | State::Mined | State::Final)
+            && self
+                .scan
+                .found
+                .as_ref()
+                .map(|f| f.height > self.terms.floor && f.height <= self.terms.deadline)
+                .unwrap_or(false)
+    }
+
+    /// The bytes of signed transactions held that the Bitcoin daemon could not check yet:
+    /// payments it has not vouched for, and cancels not checked yet.
+    fn unchecked_bytes(&self) -> usize {
+        self.payments
+            .iter()
+            .map(|p| {
+                (if p.vouched { 0 } else { p.hex.len() / 2 })
+                    + p.pending.iter().map(|c| c.hex.len() / 2).sum::<usize>()
+            })
+            .sum()
     }
 
     /// The payment held that spends exactly `coins`.
@@ -1322,7 +1485,7 @@ fn vouch(btc: &BtcChain, p: &mut Payment, notes: &mut Vec<String>) -> Result<(),
         },
         PaymentCheck::PooledCopy => {
             if let Some(h) = btc.mempool_tx(&p.txid).map_err(down)? {
-                p.hex = h;
+                p.hex = shared(&h);
                 p.vouched = true;
             }
         }
@@ -1544,7 +1707,7 @@ fn recheck_payments(btc: &BtcChain, job: &mut Job) -> Result<(), Error> {
             }
             PaymentCheck::Invalid(m) => {
                 note = Some(format!("a signed payment held was dropped: {m}"));
-                p.hex.clear();
+                p.hex = shared("");
             }
             PaymentCheck::PooledCopy | PaymentCheck::Kept => {}
         }
@@ -1624,14 +1787,15 @@ fn lock_on_chain(seq: &SeqChain, job: &Job) -> Result<bool, Error> {
     }
 }
 
-/// The tiers to try a claim at now, cheapest first within each fee asset, in the order the
-/// buyer signed the assets: every tier of each asset the node accepts whose fee coin (if
-/// any) is still unspent; only the top tiers once a block left the claim out.
-fn tiers(seq: &SeqChain, job: &Job) -> Result<Vec<usize>, Error> {
+/// The tiers to try a claim at now ([`Tiers`]), cheapest first within each fee asset, in
+/// the order the buyer signed the assets: every tier of each asset the node accepts whose
+/// fee coin (if any) is still unspent; only the top tiers once a block left the claim out.
+fn tiers(seq: &SeqChain, job: &Job) -> Result<Tiers, Error> {
     let leaf = job.terms.claim_leaf().to_bytes();
-    let mut out = vec![];
+    let mut out = Tiers::default();
     for (asset, tiers) in job.fee_sets() {
         if !seq.fee_asset_accepted(&asset)? {
+            out.unaccepted.push(asset);
             continue;
         }
         let take = if job.raised {
@@ -1649,11 +1813,25 @@ fn tiers(seq: &SeqChain, job: &Job) -> Result<Vec<usize>, Error> {
                 }
             }
             if coins_unspent {
-                out.push(i);
+                out.usable.push(i);
+            } else {
+                out.coin_spent = true;
             }
         }
     }
     Ok(out)
+}
+
+/// [`tiers`]' answer.
+#[derive(Default)]
+struct Tiers {
+    /// The tiers to try.
+    usable: Vec<usize>,
+    /// The claims' fee assets the node does not accept.
+    unaccepted: Vec<AssetId>,
+    /// Whether a tier was left out because its fee coin is not unspent in the chain (spent,
+    /// or not confirmed yet).
+    coin_spent: bool,
 }
 
 /// Whether claim `i` is the top tier of its fee asset.
@@ -1685,30 +1863,65 @@ enum Landing {
 /// Completes and submits a claim on the first candidate whose claim the node accepts: the
 /// candidates in [`PaymentScan::ordered`]'s order, each at every tier in [`tiers`]'
 /// order. A refusal for the claim's weight ([`refused_for_weight`]) moves to the next
-/// tier, and at the last passes the candidate over, with every heavier one; the next
-/// candidate is tried at once. A candidate whose proof waits on the chain (no anchor at
-/// its height yet, the two chains not agreeing, too many links) is left for a later round
-/// and the next one is tried. Any other refusal does not depend on the payment: it ends
-/// the round in error, to be retried.
+/// tier, and at the last passes the candidate over, with every heavier one, recording what
+/// refused it ([`Retry`]) so that it is tried again only once that can have changed; the
+/// next candidate is tried at once. When no tier pays in an asset the node accepts, every
+/// candidate is passed over until one of those assets is accepted. A candidate whose proof
+/// waits on the chain (no anchor at its height yet, the two chains not agreeing, too many
+/// links) is left for a later round and the next one is tried. Any other refusal does not
+/// depend on the payment: it ends the round in error, to be retried.
 fn land(
     seq: &SeqChain,
     btc: &BtcChain,
     job: &mut Job,
     seq_tip: u32,
     btc_tip: u32,
+    floors: &Floors,
     until: Instant,
 ) -> Result<Landing, Error> {
+    if !job.scan.live() {
+        return Ok(Landing::Nothing);
+    }
     let tiers = tiers(seq, job)?;
-    if tiers.is_empty() {
+    if tiers.usable.is_empty() {
         job.state = State::Waiting;
-        job.note =
-            "no signed tier pays its fee in an asset the node accepts, from a coin still unspent"
-                .into();
-        return Err(Error(job.note.clone()));
+        if tiers.coin_spent || tiers.unaccepted.is_empty() {
+            job.note =
+                "no signed tier pays its fee in an asset the node accepts, from a coin still unspent"
+                    .into();
+            return Err(Error(job.note.clone()));
+        }
+        // Nothing to try until an asset the buyer signed in is accepted: every candidate
+        // waits for that, and costs nothing meanwhile.
+        let why = format!(
+            "no signed tier pays its fee in an asset the node accepts ({})",
+            tiers
+                .unaccepted
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for c in job.scan.candidates.clone() {
+            if job.scan.is_passed(&c).is_none() {
+                pass_over(
+                    job,
+                    &c,
+                    usize::MAX,
+                    why.clone(),
+                    btc_tip,
+                    Retry::Floor {
+                        refused: vec![],
+                        untried: tiers.unaccepted.clone(),
+                    },
+                );
+            }
+        }
+        return Ok(Landing::Nothing);
     }
     let mut waiting: Option<String> = None;
     for c in job.scan.ordered() {
-        if job.scan.is_passed(&c, btc_tip).is_some() {
+        if job.scan.is_passed(&c).is_some() {
             continue;
         }
         if Instant::now() >= until {
@@ -1716,7 +1929,10 @@ fn land(
         }
         let mut heavy: Option<(String, usize)> = None;
         let mut every_tier = true;
-        for &t in &tiers {
+        // The best refusal for the claim's fee rate in each asset, and whether a tier was
+        // refused for its size, which no floor changes.
+        let mut refused: Vec<Refusal> = vec![];
+        for &t in &tiers.usable {
             match prove_claim(seq, btc, &job.terms, &job.lock, &job.claims[t], &c.at)? {
                 Completion::Ready {
                     tx,
@@ -1747,7 +1963,32 @@ fn land(
                         );
                         return Ok(Landing::Done);
                     }
-                    Err(e) if refused_for_weight(&e.0) => heavy = Some((e.0, proof_bytes)),
+                    Err(e) if refused_for_weight(&e.0) => {
+                        if let (Some((asset, _)), false) = (fee_of(&tx), e.0.contains("tx-size")) {
+                            let (paid, need) = refusal_figures(&e.0).unwrap_or((0, 0));
+                            let r = Refusal {
+                                asset,
+                                paid,
+                                need,
+                                floor: floors.floor(&asset),
+                            };
+                            // Keep the one nearest to landing: the highest worth over need.
+                            match refused.iter_mut().find(|x| x.asset == asset) {
+                                Some(x)
+                                    if (x.need == 0 && r.need > 0)
+                                        || (x.need > 0
+                                            && r.need > 0
+                                            && (r.paid as f64 / r.need as f64)
+                                                > (x.paid as f64 / x.need as f64)) =>
+                                {
+                                    *x = r
+                                }
+                                Some(_) => {}
+                                None => refused.push(r),
+                            }
+                        }
+                        heavy = Some((e.0, proof_bytes));
+                    }
                     Err(e) => {
                         job.state = State::Waiting;
                         job.note = format!("the node refused the completed claim: {e}");
@@ -1760,25 +2001,58 @@ fn land(
                     break;
                 }
                 Completion::Never(why) => {
-                    // No proof can carry it: this candidate alone, never a heavier one.
-                    heavy = Some((why, usize::MAX));
+                    // No proof can carry it: this candidate alone, never a heavier one, and
+                    // for good (short of a reorganization).
+                    every_tier = false;
+                    pass_over(job, &c, usize::MAX, why, btc_tip, Retry::Never);
                     break;
                 }
             }
         }
         if let Some((why, proof)) = heavy.filter(|_| every_tier) {
-            job.scan.passed.push(Passed {
-                at: c.at.clone(),
-                proof,
-                why,
-                tip: btc_tip,
-            });
+            // The floor the node judged by, read again now: what is recorded is never below
+            // the floor that refused (a floor that rose meanwhile only brings it back early).
+            if !refused.is_empty() {
+                if let Ok(now) = seq.floors() {
+                    for r in refused.iter_mut() {
+                        r.floor = match (r.floor, now.floor(&r.asset)) {
+                            (Some(a), Some(b)) => Some(a.max(b)),
+                            (a, b) => a.or(b),
+                        };
+                    }
+                }
+            }
+            let retry = if refused.is_empty() && tiers.unaccepted.is_empty() {
+                // Refused for its size at every tier: no floor brings it back.
+                Retry::Never
+            } else {
+                Retry::Floor {
+                    refused,
+                    untried: tiers.unaccepted.clone(),
+                }
+            };
+            pass_over(job, &c, proof, why, btc_tip, retry);
         }
     }
     Ok(match waiting {
         Some(w) => Landing::Waiting(w),
         None => Landing::Nothing,
     })
+}
+
+/// Passes candidate `c` over (see [`Passed`]). The payment a claim was accepted on is no
+/// longer known once its claim is refused at every tier: it withholds no cancel.
+fn pass_over(job: &mut Job, c: &Candidate, proof: usize, why: String, tip: u32, retry: Retry) {
+    if job.scan.found.as_ref() == Some(&c.at) {
+        job.scan.found = None;
+    }
+    job.scan.passed.push(Passed {
+        at: c.at.clone(),
+        proof,
+        why,
+        tip,
+        retry,
+    });
 }
 
 /// Ends a job with `state`, decided by Bitcoin height `at`; buried once the tip is
@@ -1801,15 +2075,26 @@ pub fn tick(
     limits: &Limits,
     until: Instant,
 ) -> Result<(), Error> {
-    tick_with(seq, btc, &mut BlockCache::default(), job, limits, until)
+    let floors = seq.floors().unwrap_or_default();
+    tick_with(
+        seq,
+        btc,
+        &mut BlockCache::default(),
+        &floors,
+        job,
+        limits,
+        until,
+    )
 }
 
-/// [`tick`], reading Bitcoin's blocks through `blocks`, which the work thread shares
-/// between every job: each block is read once, whatever the number of jobs.
+/// [`tick`], reading Bitcoin's blocks through `blocks` and the node's fee floors from
+/// `floors`, which the work thread reads once a round for every job: each block is read
+/// once, whatever the number of jobs.
 pub fn tick_with(
     seq: &SeqChain,
     btc: &BtcChain,
     blocks: &mut BlockCache,
+    floors: &Floors,
     job: &mut Job,
     limits: &Limits,
     until: Instant,
@@ -1938,9 +2223,10 @@ pub fn tick_with(
     }
     let btc_tip = btc.tip()?;
     let d = job.terms.deadline;
-    // What is passed over is tried again once Bitcoin moves on: the floor a claim's fee
-    // rate is judged against moves with the fee asset's rate and the mempool.
-    job.scan.passed.retain(|p| p.tip >= btc_tip);
+    // What is passed over is tried again once what refused it can have changed: the node's
+    // floor in the fee asset fell below the rate it refused, or an asset no tier could pay
+    // in is accepted. Never merely because a block arrived.
+    job.scan.passed.retain(|p| !p.retry_due(floors));
 
     // A claim pooled at the tier wanted: the node accepted it, so the payment it proves
     // is the swap's. Raised, a lower tier pooled is replaced by a top one below.
@@ -1955,7 +2241,7 @@ pub fn tick_with(
     }
     // The payment is the candidate whose completed claim the node accepts.
     if !job.scan.candidates.is_empty() {
-        match land(seq, btc, job, seq_tip, btc_tip, until)? {
+        match land(seq, btc, job, seq_tip, btc_tip, floors, until)? {
             Landing::Done => return Ok(()),
             Landing::Waiting(why) => {
                 job.state = State::Waiting;
@@ -2305,17 +2591,34 @@ impl Store {
     /// Opens (or creates) the store and reads every job in it; any ended and buried job
     /// found among them is archived.
     pub fn open(dir: &Path) -> Result<Store, Error> {
-        std::fs::create_dir_all(dir.join("archive"))
-            .map_err(|e| Error(format!("{}: {e}", dir.display())))?;
+        for d in ["archive", "payments"] {
+            std::fs::create_dir_all(dir.join(d))
+                .map_err(|e| Error(format!("{}: {e}", dir.display())))?;
+        }
         let mut jobs = BTreeMap::new();
         for e in std::fs::read_dir(dir).map_err(|e| Error(e.to_string()))? {
             let p = e.map_err(|e| Error(e.to_string()))?.path();
             if p.extension().and_then(|x| x.to_str()) != Some("json") {
                 continue;
             }
-            let v: Value =
+            let mut v: Value =
                 serde_json::from_slice(&std::fs::read(&p).map_err(|e| Error(e.to_string()))?)
                     .map_err(|e| Error(format!("{}: {e}", p.display())))?;
+            // Each payment from its own file. One gone (removed by hand) leaves the payment
+            // known by its coins and id, without the transaction.
+            for q in v
+                .get_mut("payments")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(k) = q.get("hex_ref").and_then(Value::as_str).map(String::from) {
+                    let f = dir.join("payments").join(format!("{k}.hex"));
+                    if let Ok(h) = std::fs::read_to_string(&f) {
+                        q["hex"] = json!(h);
+                    }
+                }
+            }
             let mut j = Job::from_stored(&v)?;
             // A file written under another name (an older naming of jobs) takes the job's;
             // two that now share a name are one job.
@@ -2349,6 +2652,7 @@ impl Store {
         for id in done {
             st.archive(&id)?;
         }
+        st.prune_payments();
         Ok(st)
     }
 
@@ -2370,9 +2674,13 @@ impl Store {
             ))));
         }
         if let Some(held) = self.jobs.get(&id).cloned() {
+            let had = held.unchecked_bytes();
             let (mut m, what) = merge(held, job, limits)?;
             if what.is_empty() {
                 return Ok((id, Added::Same));
+            }
+            if m.unchecked_bytes() > MAX_UNCHECKED_BYTES && m.unchecked_bytes() > had {
+                return Err(unchecked_limit());
             }
             // Something new to work on: the job's turn comes early.
             m.changed += 1;
@@ -2416,6 +2724,9 @@ impl Store {
         for p in payments {
             job.take_payment(p)?;
         }
+        if job.unchecked_bytes() > MAX_UNCHECKED_BYTES {
+            return Err(unchecked_limit());
+        }
         self.save(&job).map_err(io)?;
         self.jobs.insert(id.clone(), job);
         Ok((id, Added::New))
@@ -2429,16 +2740,51 @@ impl Store {
         self.dir.join("archive").join(format!("{id}.json"))
     }
 
-    /// Writes a job's file.
+    /// Writes a job's file, and the file of each payment it holds that is not written yet:
+    /// one per signed payment, however many jobs hold it.
     pub fn save(&self, job: &Job) -> Result<(), Error> {
+        let io = |e: std::io::Error| Error(e.to_string());
+        for p in job.payments.iter().filter(|p| !p.hex.is_empty()) {
+            let key = payment_key(&p.hex);
+            let f = self.dir.join("payments").join(format!("{key}.hex"));
+            if !f.exists() {
+                let tmp = self.dir.join("payments").join(format!("{key}.tmp"));
+                std::fs::write(&tmp, p.hex.as_bytes()).map_err(io)?;
+                std::fs::rename(&tmp, &f).map_err(io)?;
+            }
+        }
         let p = self.path(&job.id);
         let tmp = self.dir.join(format!("{}.json.tmp", job.id));
         std::fs::write(
             &tmp,
-            serde_json::to_vec_pretty(&job.to_json()).map_err(|e| Error(e.to_string()))?,
+            serde_json::to_vec_pretty(&job.stored_json()).map_err(|e| Error(e.to_string()))?,
         )
-        .map_err(|e| Error(e.to_string()))?;
-        std::fs::rename(&tmp, &p).map_err(|e| Error(e.to_string()))
+        .map_err(io)?;
+        std::fs::rename(&tmp, &p).map_err(io)
+    }
+
+    /// Removes the payment files no job carried holds, and lets go of the copies in memory
+    /// no job holds. Returns how many files it removed.
+    pub fn prune_payments(&self) -> usize {
+        drop_unshared();
+        let held: std::collections::HashSet<String> = self
+            .jobs
+            .values()
+            .flat_map(|j| j.payments.iter())
+            .filter(|p| !p.hex.is_empty())
+            .map(|p| format!("{}.hex", payment_key(&p.hex)))
+            .collect();
+        let Ok(rd) = std::fs::read_dir(self.dir.join("payments")) else {
+            return 0;
+        };
+        let mut n = 0;
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !held.contains(&name) && std::fs::remove_file(e.path()).is_ok() {
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Moves a job to the archive.
@@ -2480,6 +2826,12 @@ impl Store {
         }
         n
     }
+}
+
+fn unchecked_limit() -> Refused {
+    Refused::Limit(Error(format!(
+        "the job holds {MAX_UNCHECKED_BYTES} bytes of payments and cancels the Bitcoin daemon cannot check yet, as many as it keeps: post these again once the payment's parent is broadcast"
+    )))
 }
 
 /// `held` with what `new`, posted for the same lock, adds: its claims, its payments and
@@ -2552,13 +2904,13 @@ fn fold_in(job: &mut Job, cur: &Job, before: &Value) {
             cancels: p
                 .cancels
                 .iter()
-                .filter(|c| !had_cancels.contains(&c.hex))
+                .filter(|c| !had_cancels.iter().any(|h| **h == *c.hex))
                 .cloned()
                 .collect(),
             pending: p
                 .pending
                 .iter()
-                .filter(|c| !had_pending.contains(&c.hex))
+                .filter(|c| !had_pending.iter().any(|h| **h == *c.hex))
                 .cloned()
                 .collect(),
             ..p.clone()
@@ -2569,32 +2921,77 @@ fn fold_in(job: &mut Job, cur: &Job, before: &Value) {
     }
 }
 
+/// Whether every claim of a job is worth clearly less than the node's floor asks for its
+/// lightest proof still in play: half or less, at the fee asset's rate. It only orders the
+/// work (such jobs take their turns after the rest of their class), never skips it, so a
+/// wrong guess costs time, never a claim.
+fn under_floor(j: &Job, floors: &Floors) -> bool {
+    if !floors.known {
+        return false;
+    }
+    let Some(proof) = j
+        .scan
+        .candidates
+        .iter()
+        .filter(|c| j.scan.is_passed(c).is_none())
+        .map(|c| c.min_proof)
+        .min()
+    else {
+        return false;
+    };
+    !j.claims.iter().any(|c| {
+        let Some((asset, atoms)) = fee_of(c) else {
+            return false;
+        };
+        let Some(&rate) = floors.rates.get(&asset) else {
+            return false;
+        };
+        let worth = atoms as f64 * rate as f64 / 1e8;
+        let vsize = (c.weight() + proof + 3) / 4;
+        let need = floors.rate as f64 * vsize as f64 / 1000.0;
+        worth * 2.0 > need
+    })
+}
+
 /// The order jobs are worked in: an increasing count.
 static WORK_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// One round of work. The work a job costs follows what happens to it on the chains, never
 /// the number of jobs or of the clients that posted them:
 ///
-/// - Bitcoin's blocks are read once for every job ([`BlockCache`]): a job's search moves
-///   through blocks that neither pay its receiving script nor spend its payments' coins
-///   by a lookup, without a call to either chain ([`BlockCache::advance`]);
-/// - first, the jobs with a payment or a claim in play: a block that pays or spends for
-///   them, a payment found and not yet claimed, or a claim pooled or mined, each worked
-///   again whenever either chain moves; then the jobs new or changed since they were last
-///   worked, holding a payment or cancel Bitcoin cannot check yet, or whose search
-///   reached a block not read yet; then the rest whose chains moved, for the state they
-///   show;
+/// - Bitcoin's blocks are read once for every job ([`BlockCache`]), and the node's fee
+///   floors once a round ([`Floors`]): a job's search moves through blocks that neither pay
+///   its receiving script nor spend its payments' coins by a lookup, without a call to
+///   either chain ([`BlockCache::advance`]);
+/// - a job is worked only when something it waits on can have changed, and in this order:
+///   1. something new on the chains concerns it: a block that pays its script or spends
+///      its coins; a candidate payment not passed over that a Sequentia block now anchors;
+///      its claim pooled by someone, left out of a block, mined, or gone from the mempool.
+///      Those whose claims are worth at least the node's floor go first, the rest after;
+///   2. intake changed it since it was last worked, or its search reached a block not read
+///      yet;
+///   3. a candidate it passed over may now land: the node's floor in the fee asset fell
+///      below the rate it refused, or an asset no tier could pay in is accepted; then a
+///      job whose last round failed, once its backoff is over, fewest failures first;
+///   4. the rest, once per Bitcoin block (for the deadline and the state they show), and
+///      those holding a payment or cancel Bitcoin cannot check yet, whenever a chain moves
+///      and at least every ten seconds.
+///
+///   A candidate passed over is never tried again merely because a block arrived, so a
+///   job whose claims cannot land (priced under the floor, in an asset the node does not
+///   accept) costs a lookup a round once it has been tried, however many there are;
 /// - within each of those, the jobs take turns by receiving script, each script's least
-///   recently worked first. A script is the seller's address for the swap: one more turn
-///   in a round costs one more output on Bitcoin, never one more address or post, so
-///   however many jobs and clients there are, a buyer whose payment is mined is worked
-///   in the round's first turns.
+///   recently worked first. So a buyer whose payment is mined is worked in the first turns
+///   of the next round, behind only the jobs that something new on the chains concerns in
+///   that round, each of which cost whoever made it an output in a new Bitcoin block or a
+///   claim the node takes.
 ///
 /// A job backing off, and an ended one still watched whose turn has not come, waits.
-/// Each job works within its budget, the whole round within the round's. The store's lock
-/// is held only to sort the jobs, copy one out and put it back, so intake and cancels
-/// never wait on the chains. An ended job is archived once the Bitcoin block that decided
-/// it is buried. Returns how many jobs it worked on.
+/// Each job works within its budget, the whole round within the round's; a job cut short
+/// by its budget is worked again next round. The store's lock is held only to sort the
+/// jobs, copy one out and put it back, so intake and cancels never wait on the chains. An
+/// ended job is archived once the Bitcoin block that decided it is buried. Returns how
+/// many jobs it worked on.
 pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: &Limits) -> usize {
     let start = Instant::now();
     let round_end = start + limits.round_time;
@@ -2607,7 +3004,33 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
     let Ok(seq_tip) = seq.height() else {
         return 0;
     };
-    let epoch = (seq_tip, btc_tip);
+    // The tips by their blocks' hashes, so a block replaced at the same height (a
+    // Sequentia block rebuilt on Bitcoin's new branch) moves them; and the anchor of
+    // Sequentia's tip, below which a candidate's proof can link.
+    // These reads are skipped once half the round's time is gone (a node answering
+    // slowly): a hash not read leaves the height alone to tell the tips apart, unread
+    // floors bring nothing passed over back this round, and an unread anchor holds no
+    // candidate back.
+    let spare = || Instant::now() < start + limits.round_time / 2;
+    let key = |h: &str| script_key(h.as_bytes());
+    let seq_hash = spare()
+        .then(|| seq.rpc.call("getblockhash", json!([seq_tip])).ok())
+        .flatten()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| format!("height {seq_tip}"));
+    let btc_hash = blocks
+        .hash(btc, btc_tip)
+        .unwrap_or_else(|_| format!("height {btc_tip}"));
+    let epoch = (key(&seq_hash), key(&btc_hash));
+    let tip_anchor = spare()
+        .then(|| seq.rpc.call("getblockheader", json!([seq_hash, true])).ok())
+        .flatten()
+        .and_then(|h| h.get("anchorheight").and_then(Value::as_u64))
+        .map(|a| a as u32);
+    let floors = spare()
+        .then(|| seq.floors().ok())
+        .flatten()
+        .unwrap_or_default();
     let pooled: std::collections::HashSet<String> = seq
         .rpc
         .call("getrawmempool", json!([]))
@@ -2617,8 +3040,8 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
         .iter()
         .filter_map(|t| t.as_str().map(String::from))
         .collect();
-    // (class, receiving script, last worked, deadline, id)
-    let mut due: Vec<(u8, u64, u64, u32, String)> = vec![];
+    // (class, receiving script, failures, last worked, deadline, id)
+    let mut due: Vec<(u8, u64, u32, u64, u32, String)> = vec![];
     for j in lock(store).jobs.values_mut() {
         if j.retry_at > now || (j.state.ended() && j.watch_at > now) {
             continue;
@@ -2630,56 +3053,80 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
             .iter()
             .any(|p| p.real() && p.settled.is_none() && p.has_cancel());
         let moved = j.epoch != epoch;
+        let btc_moved = j.epoch.1 != epoch.1;
         let claim_pooled = j
             .claims
             .iter()
             .any(|c| pooled.contains(&c.txid().to_string()));
-        let in_play = matches!(j.state, State::Pooled | State::Mined)
-            || (!j.scan.candidates.is_empty() && j.scan.found.is_none() && !j.state.ended());
-        let class = match blocks.advance(&j.terms, &coins, open, &mut j.scan, btc_tip) {
-            Advance::Hit => 0,
-            _ if claim_pooled && j.state != State::Pooled => 0,
-            _ if in_play && moved => 0,
-            Advance::Unread => 1,
-            _ if j.worked == 0 || j.changed != j.seen => 1,
-            // Held but not checked yet: checked again every round until Bitcoin can.
-            _ if j
-                .payments
-                .iter()
-                .any(|p| !p.vouched || !p.pending.is_empty()) =>
-            {
+        // A candidate not passed over that a Sequentia block anchors: a claim on it can be
+        // completed now.
+        let provable = !j.state.ended()
+            && !matches!(j.state, State::Pooled | State::Mined)
+            && j.failures == 0
+            && j.scan.candidates.iter().any(|c| {
+                j.scan.is_passed(c).is_none()
+                    && tip_anchor.map(|a| c.at.height <= a).unwrap_or(true)
+            });
+        let advance = blocks.advance(&j.terms, &coins, open, &mut j.scan, btc_tip);
+        let fresh = advance == Advance::Hit
+            || (claim_pooled && j.state != State::Pooled)
+            || (j.state == State::Pooled && !claim_pooled)
+            || (j.state == State::Pooled && !j.raised && moved)
+            || (j.state == State::Mined && moved)
+            || (provable && moved);
+        let class = if fresh {
+            if under_floor(j, &floors) {
                 1
+            } else {
+                0
             }
-            _ if moved => 2,
-            _ => continue,
+        } else if advance == Advance::Unread || j.worked == 0 || j.changed != j.seen {
+            2
+        } else if j.failures == 0 && j.scan.passed.iter().any(|p| p.retry_due(&floors)) {
+            3
+        } else if j.failures > 0 {
+            4
+        } else if btc_moved
+            || ((moved || now >= j.worked_at + UNCHECKED_RECHECK_SECS)
+                && j.payments
+                    .iter()
+                    .any(|p| !p.vouched || !p.pending.is_empty()))
+        {
+            5
+        } else {
+            continue;
         };
         let script = script_key(j.terms.receive_script_pubkey().as_bytes());
-        due.push((class, script, j.worked, j.terms.deadline, j.id.clone()));
+        due.push((
+            class,
+            script,
+            j.failures,
+            j.worked,
+            j.terms.deadline,
+            j.id.clone(),
+        ));
     }
     let mut order: Vec<String> = vec![];
-    for class in 0..3u8 {
-        let mut groups: BTreeMap<u64, std::collections::VecDeque<(u64, u32, String)>> =
-            BTreeMap::new();
-        for (c, script, w, d, id) in due.iter().filter(|x| x.0 == class) {
-            let _ = c;
+    for class in 0..6u8 {
+        let mut groups: BTreeMap<u64, Vec<(u32, u64, u32, String)>> = BTreeMap::new();
+        for (_, script, f, w, d, id) in due.iter().filter(|x| x.0 == class) {
             groups
                 .entry(*script)
                 .or_default()
-                .push_back((*w, *d, id.clone()));
+                .push((*f, *w, *d, id.clone()));
         }
-        let mut queues: Vec<std::collections::VecDeque<(u64, u32, String)>> = groups
+        let mut queues: Vec<std::collections::VecDeque<(u32, u64, u32, String)>> = groups
             .into_values()
-            .map(|q| {
-                let mut v: Vec<_> = q.into_iter().collect();
+            .map(|mut v| {
                 v.sort();
                 v.into()
             })
             .collect();
-        // The script whose next job waited longest takes the first turn.
-        queues.sort_by_key(|q| q.front().map(|x| (x.0, x.1)));
+        // The script whose next job failed least, then waited longest, takes the first turn.
+        queues.sort_by_key(|q| q.front().map(|x| (x.0, x.1, x.2)));
         while queues.iter().any(|q| !q.is_empty()) {
             for q in queues.iter_mut() {
-                if let Some((_, _, id)) = q.pop_front() {
+                if let Some((_, _, _, id)) = q.pop_front() {
                     order.push(id);
                 }
             }
@@ -2695,10 +3142,14 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
             continue;
         };
         let until = (t + limits.job_time).min(round_end);
-        let before = job.to_json();
-        let result = tick_with(seq, btc, &mut blocks, &mut job, limits, until);
+        let before = job.stored_json();
+        let result = tick_with(seq, btc, &mut blocks, &floors, &mut job, limits, until);
         job.worked = WORK_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        job.epoch = epoch;
+        job.worked_at = now_secs();
+        // A job cut short by its budget has not seen these tips yet: it is worked again.
+        if Instant::now() < until {
+            job.epoch = epoch;
+        }
         job.seen = job.changed;
         match result {
             Ok(()) => {
@@ -2745,7 +3196,7 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
             // What intake merged in while it was worked is still to be seen.
             job.changed = cur.changed;
         }
-        if job.to_json() != before {
+        if job.stored_json() != before {
             let _ = st.save(&job);
         }
         let done = job.state.ended() && job.buried;
@@ -2947,8 +3398,10 @@ pub fn serve(
     lock(&store).prune_archive(limits.archive_days);
     loop {
         work_round(&store, &seq, &btc, &limits);
-        if pruned.elapsed() > Duration::from_secs(3600) {
-            lock(&store).prune_archive(limits.archive_days);
+        if pruned.elapsed() > Duration::from_secs(600) {
+            let st = lock(&store);
+            st.prune_archive(limits.archive_days);
+            st.prune_payments();
             pruned = Instant::now();
         }
         std::thread::sleep(interval);

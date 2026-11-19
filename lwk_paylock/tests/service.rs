@@ -1311,7 +1311,7 @@ fn no_client_can_block_a_buyers_job() {
     assert_eq!(st.jobs[&id].claims.len(), 2);
     let p = &st.jobs[&id].payments[0];
     assert_eq!(p.cancels.len(), 1);
-    assert_eq!(p.cancels[0].hex, cancel);
+    assert_eq!(&*p.cancels[0].hex, cancel.as_str());
     assert_eq!(p.cancels[0].fee, 10_000);
     // A second valid cancel of the same coins is kept beside it, highest fee first.
     let mut second = buyer.clone();
@@ -1685,10 +1685,16 @@ fn cancels_are_held_by_witness_id() {
     ] {
         assert_eq!(st.add(j, &l).unwrap().1, Added::Same);
     }
-    assert_eq!(st.jobs[&id].payments[0].cancels[0].hex, btc_hex(&good));
+    assert_eq!(
+        &*st.jobs[&id].payments[0].cancels[0].hex,
+        btc_hex(&good).as_str()
+    );
     // Stored and read back, the same.
     let st = Store::open(&dir).unwrap();
-    assert_eq!(st.jobs[&id].payments[0].cancels[0].hex, btc_hex(&good));
+    assert_eq!(
+        &*st.jobs[&id].payments[0].cancels[0].hex,
+        btc_hex(&good).as_str()
+    );
     assert!(st.jobs[&id].payments[0].cancels[0].vouched);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2147,19 +2153,59 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     assert!(order[3].min_proof > 90_000);
 
     // A candidate passed over (the node refused every claim on it for its weight) passes
-    // over every candidate whose lightest proof is as heavy, until Bitcoin moves on.
+    // over every candidate whose lightest proof is as heavy, until what refused it can have
+    // changed: the node's floor in the fee asset falls below the rate it refused, or an
+    // asset no tier could pay in is accepted. A block arriving changes neither.
     let tip = 1_003;
+    let asset = lwk_wollet::elements::AssetId::from_slice(&[5; 32]).unwrap();
+    let other_asset = lwk_wollet::elements::AssetId::from_slice(&[6; 32]).unwrap();
+    let (paid, need) = lwk_paylock::refusal_figures(
+        "the node refused: min relay fee not met, 5000 < 8356 (code 66)",
+    )
+    .unwrap();
+    assert_eq!((paid, need), (5_000, 8_356));
+    let floors = |rate: u64, rates: &[(lwk_wollet::elements::AssetId, u64)]| lwk_paylock::Floors {
+        known: true,
+        rate,
+        rates: rates.iter().cloned().collect(),
+    };
+    let at = floors(1_000, &[(asset, 100_000_000)]);
     scan.passed.push(lwk_paylock::Passed {
         at: order[3].at.clone(),
         proof: order[3].min_proof,
-        why: "min relay fee not met".into(),
+        why: "min relay fee not met, 5000 < 8356".into(),
         tip,
+        retry: lwk_paylock::Retry::Floor {
+            refused: vec![lwk_paylock::Refusal {
+                asset,
+                paid,
+                need,
+                floor: at.floor(&asset),
+            }],
+            untried: vec![other_asset],
+        },
     });
-    assert!(scan.is_passed(&order[3], tip).is_some());
-    assert!(scan.is_passed(&order[0], tip).is_none());
+    assert!(scan.is_passed(&order[3]).is_some());
+    assert!(scan.is_passed(&order[0]).is_none());
     scan.passed[0].proof = order[1].min_proof;
-    assert!(scan.is_passed(&order[1], tip).is_some() && scan.is_passed(&order[2], tip).is_some());
-    assert!(scan.is_passed(&order[1], tip + 1).is_none());
+    assert!(scan.is_passed(&order[1]).is_some() && scan.is_passed(&order[2]).is_some());
+    let p = &scan.passed[0];
+    // The same floor, however many blocks later: not tried again.
+    assert!(!p.retry_due(&at));
+    // The floor down, but not below the rate refused (5,000 / 8,356 of it): not yet.
+    assert!(!p.retry_due(&floors(700, &[(asset, 100_000_000)])));
+    // Below it: tried again. So too when the asset's rate rises as much.
+    assert!(p.retry_due(&floors(598, &[(asset, 100_000_000)])));
+    assert!(p.retry_due(&floors(1_000, &[(asset, 168_000_000)])));
+    // The asset no tier could pay in is accepted: tried again.
+    assert!(p.retry_due(&floors(1_000, &[(asset, 100_000_000), (other_asset, 1)])));
+    // Unread floors bring nothing back; a record that says nothing is tried again.
+    assert!(!p.retry_due(&lwk_paylock::Floors::default()));
+    let mut q = p.clone();
+    q.retry = lwk_paylock::Retry::Unknown;
+    assert!(q.retry_due(&at));
+    q.retry = lwk_paylock::Retry::Never;
+    assert!(!q.retry_due(&floors(0, &[(asset, u64::MAX)])));
 
     // A reorganization below the scan's place drops every candidate and everything passed
     // over: the scan reads again from the floor, on the new branch.

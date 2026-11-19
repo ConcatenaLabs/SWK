@@ -336,6 +336,36 @@ impl SeqChain {
         Ok(e.and_then(|e| e.get("rate")).and_then(Value::as_u64))
     }
 
+    /// The node's fee floors ([`Floors`]): its mempool's floor (`getmempoolinfo`) and the
+    /// rate of every fee asset it accepts (`getfeeassetinfo`). Two calls, whatever the
+    /// number of jobs.
+    pub fn floors(&self) -> Result<Floors, Error> {
+        let m = self.rpc.call("getmempoolinfo", json!([]))?;
+        let per_k = |k: &str| {
+            m.get(k)
+                .and_then(Value::as_f64)
+                .map(|b| (b * 1e8).round() as u64)
+                .unwrap_or(0)
+        };
+        let rate = per_k("mempoolminfee").max(per_k("minrelaytxfee"));
+        let v = self.rpc.call("getfeeassetinfo", json!([]))?;
+        let mut rates = std::collections::HashMap::new();
+        for (k, e) in v.as_object().into_iter().flatten() {
+            if e.get("accepted").and_then(Value::as_bool) != Some(true) {
+                continue;
+            }
+            if let (Ok(a), Some(r)) = (k.parse::<AssetId>(), e.get("rate").and_then(Value::as_u64))
+            {
+                rates.insert(a, r);
+            }
+        }
+        Ok(Floors {
+            known: true,
+            rate,
+            rates,
+        })
+    }
+
     /// The highest height the node holds final (`getposfinality`).
     pub fn finalized_height(&self) -> Result<u32, Error> {
         let v = self.rpc.call("getposfinality", json!([]))?;
@@ -407,7 +437,7 @@ pub struct Found {
 }
 
 /// How far a search for a payment has read Bitcoin's best chain, kept between ticks.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PaymentScan {
     /// The last block read: its height and hash.
     pub scanned: Option<(u32, String)>,
@@ -432,7 +462,7 @@ pub struct PaymentScan {
     pub candidates: Vec<Candidate>,
     /// Candidates whose completed claim the node refused at every tier for the claim's
     /// own weight, keyed by transaction and block. A reorganization clears them, and each
-    /// is tried again once Bitcoin's tip moves on (see [`Passed`]).
+    /// is tried again once what refused it can have changed (see [`Passed`]).
     pub passed: Vec<Passed>,
 }
 
@@ -450,13 +480,15 @@ pub struct Candidate {
 
 /// A candidate passed over: the node refused the claim proving it, at every tier the
 /// buyer signed, for the claim's weight (its fee rate below the node's floor, or its size
-/// above the standard limit). A claim proving a payment that needs as heavy a proof or
-/// heavier is refused alike, so every candidate whose lightest proof is at least `proof`
-/// bytes is passed over with it. The floor a fee rate is judged against moves (the fee
-/// asset's rate, the mempool's minimum), so a candidate passed over is tried again once
-/// Bitcoin's tip is above `tip`; a reorganization of Bitcoin below the scan's place clears
-/// every one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// above the standard limit), or no tier pays its fee in an asset the node accepts. A claim
+/// proving a payment that needs as heavy a proof or heavier is refused alike, so every
+/// candidate whose lightest proof is at least `proof` bytes is passed over with it.
+///
+/// It is tried again only once what refused it can have changed ([`Passed::retry_due`]):
+/// the node's floor for a fee asset fell below the rate it refused, or an asset no tier
+/// could pay in became accepted. A block arriving changes neither, so it never brings a
+/// candidate back; a reorganization of Bitcoin below the scan's place clears every one.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Passed {
     /// The candidate.
     pub at: Found,
@@ -466,6 +498,107 @@ pub struct Passed {
     pub why: String,
     /// Bitcoin's tip when it was passed over.
     pub tip: u32,
+    /// What brings it back.
+    pub retry: Retry,
+}
+
+/// What brings a candidate passed over back ([`Passed`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Retry {
+    /// Refused for the claim's fee rate in the assets of `refused`, and not tried in the
+    /// assets of `untried` (the node did not accept them): tried again once the node's
+    /// floor in one of the first falls below the rate it refused, or one of the second is
+    /// accepted.
+    Floor {
+        /// The best refusal in each asset tried.
+        refused: Vec<Refusal>,
+        /// The claims' fee assets the node did not accept.
+        untried: Vec<AssetId>,
+    },
+    /// Nothing but a reorganization changes it: the claim is above the standard size at
+    /// every tier, or no proof can carry the payment.
+    Never,
+    /// Recorded without saying what refused it: tried again at the next round.
+    Unknown,
+}
+
+/// The node's refusal of a claim for its fee rate, in one fee asset: the claim's fee was
+/// worth `paid` and the node asked `need` (`min relay fee not met, paid < need`, in the
+/// reference unit), when the node's floor in that asset was `floor` ([`Floors::floor`]).
+/// The fee's worth follows the asset's rate and the need follows the floor, so the claim
+/// is accepted once the floor in the asset is at most `floor × paid / need`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refusal {
+    /// The fee asset.
+    pub asset: AssetId,
+    /// What the fee was worth to the node (0 when the refusal gave no figures).
+    pub paid: u64,
+    /// What the node asked (0 when the refusal gave no figures).
+    pub need: u64,
+    /// The node's floor in the asset when it refused; `None` when it could not be read.
+    pub floor: Option<f64>,
+}
+
+impl Refusal {
+    /// Whether the claim this refusal was for may be accepted at `floors`.
+    pub fn may_clear(&self, floors: &Floors) -> bool {
+        let (Some(then), Some(now)) = (self.floor, floors.floor(&self.asset)) else {
+            // The floor unread then or now: what changed cannot be told, so it is tried.
+            return floors.known;
+        };
+        if self.need == 0 {
+            // A refusal without figures (`mempool full`): back once the floor falls.
+            return now < then;
+        }
+        now * self.need as f64 <= then * self.paid as f64
+    }
+}
+
+impl Passed {
+    /// Whether it is tried again at `floors`: what refused it can have changed.
+    pub fn retry_due(&self, floors: &Floors) -> bool {
+        match &self.retry {
+            Retry::Never => false,
+            Retry::Unknown => true,
+            Retry::Floor { refused, untried } => {
+                refused.iter().any(|r| r.may_clear(floors))
+                    || untried.iter().any(|a| floors.accepts(a))
+            }
+        }
+    }
+}
+
+/// The node's fee floors as one read of its mempool and fee whitelist gives them: the
+/// rate a claim's fee must reach, in the reference unit, and the rate each accepted fee
+/// asset is valued at. Read once per round of work and shared by every job, so whether a
+/// claim passed over may now land costs a lookup, not a call to the node.
+#[derive(Debug, Clone, Default)]
+pub struct Floors {
+    /// Whether the node answered.
+    pub known: bool,
+    /// The fee rate the node's mempool takes, in reference atoms per 1,000 vbytes: the
+    /// higher of its relay floor and its mempool's minimum.
+    pub rate: u64,
+    /// The rate of each fee asset the node accepts (`getfeeassetinfo`'s `rate`).
+    pub rates: std::collections::HashMap<AssetId, u64>,
+}
+
+impl Floors {
+    /// The node's floor in `asset`: its fee rate floor over the asset's rate, which grows
+    /// with the atoms of `asset` a claim must pay per vbyte. `None` when the node does not
+    /// accept the asset or was not read.
+    pub fn floor(&self, asset: &AssetId) -> Option<f64> {
+        if !self.known {
+            return None;
+        }
+        let r = *self.rates.get(asset)?;
+        (r > 0).then(|| self.rate as f64 / r as f64)
+    }
+
+    /// Whether the node accepts fees in `asset`.
+    pub fn accepts(&self, asset: &AssetId) -> bool {
+        self.rates.get(asset).map(|r| *r > 0).unwrap_or(false)
+    }
 }
 
 /// Non-held candidates a scan keeps, the lightest: more are heavier than all of these,
@@ -473,13 +606,16 @@ pub struct Passed {
 pub const MAX_CANDIDATES: usize = 32;
 
 impl PaymentScan {
-    /// Whether a candidate is passed over at Bitcoin tip `tip`: itself, or by a lighter
-    /// proof the node refused.
-    pub fn is_passed(&self, c: &Candidate, tip: u32) -> Option<&Passed> {
+    /// Whether a candidate is passed over: itself, or by a lighter proof the node refused.
+    pub fn is_passed(&self, c: &Candidate) -> Option<&Passed> {
         self.passed.iter().find(|p| {
-            p.tip >= tip
-                && ((p.at.txid == c.at.txid && p.at.block == c.at.block) || c.min_proof >= p.proof)
+            (p.at.txid == c.at.txid && p.at.block == c.at.block) || c.min_proof >= p.proof
         })
+    }
+
+    /// Whether a candidate is not passed over: a claim on it may land.
+    pub fn live(&self) -> bool {
+        self.candidates.iter().any(|c| self.is_passed(c).is_none())
     }
 
     /// The candidates in the order they are tried: the payment a claim already proves;
@@ -1475,6 +1611,26 @@ pub fn refused_for_weight(message: &str) -> bool {
     .iter()
     .any(|m| message.contains(m))
         && !message.contains("tx-size-small")
+}
+
+/// The figures of a refusal for the claim's fee rate: what the fee was worth and what the
+/// node asked (`min relay fee not met, 5000 < 8356`), and whether it was the mempool's
+/// floor (`mempool min fee not met`) rather than the relay floor. `None` for any other
+/// refusal, `mempool full` included (it gives no figures).
+pub fn refusal_figures(message: &str) -> Option<(u64, u64)> {
+    let i = ["min relay fee not met", "mempool min fee not met"]
+        .iter()
+        .find_map(|m| message.find(m).map(|i| i + m.len()))?;
+    let rest = message[i..].trim_start_matches([',', ' ', ':']);
+    let mut it = rest.split(" < ");
+    let paid = it.next()?.trim().parse().ok()?;
+    let need = it
+        .next()?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    Some((paid, need))
 }
 
 /// The payment a completed claim proves, from the record on its first input: its Bitcoin

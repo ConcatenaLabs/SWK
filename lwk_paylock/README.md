@@ -153,9 +153,14 @@ every tier the buyer signed, cheapest first. A refusal for the claim's weight
 the only refusals that depend on which payment the claim proves) moves to the
 next tier; refused at every tier, the candidate is passed over, with every one
 whose proof would be as heavy, and the next is tried in the same round. A
-candidate is passed over only for that, and only until Bitcoin's next block
-(the floor its fee rate is judged against moves) or a reorganization below the
-scan's place, which drops everything passed over. Anything else that keeps a
+candidate is passed over only for that, and comes back only once what refused
+it can have changed: the node's floor in the fee asset (its relay floor over the
+asset's rate, both read once a round) falls to where the fee refused would meet
+it, or an asset the node did not accept, in which a tier is signed, is accepted.
+A claim refused for its size at every tier never comes back. A block arriving
+changes none of this, so it brings nothing back. When no tier is in an asset
+the node accepts, every candidate is passed over until one is. A reorganization
+below the scan's place drops everything passed over. Anything else that keeps a
 claim from being made waits on the chain and never passes a payment over: no
 Sequentia block anchored at the payment yet, the Bitcoin daemon and the node's
 anchors not agreeing (or the daemon switching branches between reading a block
@@ -250,9 +255,11 @@ On every round the service reads both chains as they are now:
   before `D`;
 - it broadcasts every cancel of every payment held that is not settled, the
   checked ones highest fee first and then those not checkable yet, if two
-  blocks before `D` the node has accepted no claim on a payment mined in the
-  lock's heights, whatever its Sequentia node says of the lock, and sends them
-  again until a spend of that payment's coins is confirmed;
+  blocks before `D` no claim proving a payment mined in the lock's heights is
+  pooled or mined, whatever its Sequentia node says of the lock, and sends them
+  again until a spend of that payment's coins is confirmed. A claim the node
+  once accepted withholds nothing once it has left the mempool and the node
+  refuses every tier;
 - it shows the swap done (`final`) as soon as the claim's block is final, and
   goes on watching in the background (`watching: true`) until the Bitcoin block
   that decided it is `--watch-depth` blocks deep: a Bitcoin reorganization
@@ -276,25 +283,53 @@ and the coins it spends: a job's search for its payment, from `F` to six blocks
 past `D` (on to Bitcoin's tip, up to 144 blocks past `D`, while a payment held
 with cancels is not settled), passes a block that neither pays its receiving
 script nor spends its payments' coins by a lookup, and reads a block whole only
-when it does. A round works first the jobs with a payment or a claim in play (a
-block that pays or spends for them, a payment found and not yet claimed, a claim
-pooled or mined), whenever either chain moves; then the jobs new or changed
-since they were last worked, or holding a payment or cancel the daemon cannot
-check yet; then, as the round's time allows, the rest whose chains moved. Within
-each, the jobs take turns by receiving script, least recently worked first: a
-turn costs an output on Bitcoin, not an address, so a buyer whose payment is
-mined is worked in a round's first turns however many jobs and clients there
-are. Each job works within a time and block budget, the round within its own.
-A job keeps every payment handed over and the 32 lightest others as candidates. A failing
-job backs off, up to a minute. Intake caps a request at 512 KiB, a job at eight
-claims, eight unvouched payments and, per payment, four cancels (and 16 not yet
-checkable), a lock at 1,008 Bitcoin blocks from `F` to `D`, the service at
-`--max-jobs` live jobs and each client at `--jobs-per-client` live jobs it
-started (`0` for no limit), never for a job whose payment the daemon vouches
-for; a job whose outcome is decided no longer counts, and a post that merges
-into a job held starts none.
+when it does. The node's fee floors are read once a round for every job.
 
-Jobs are one JSON file each under `--data`, so a restart carries on. A job that
+A job is worked only when something it waits on can have changed, in this
+order:
+
+1. something new on the chains concerns it: a Bitcoin block pays its receiving
+   script or spends its payments' coins; a Sequentia block anchors a candidate
+   not passed over; its claim is pooled by someone, left out of a block, mined,
+   or gone from the mempool. The tips are told apart by their blocks' hashes, so
+   a block rebuilt at the same height counts. Jobs whose claims are worth
+   clearly less than the node's floor take their turns after the others here;
+2. intake changed it since it was last worked;
+3. a candidate it passed over may now land (the floor fell, an asset became
+   accepted); then a job whose last round failed, once its backoff is over,
+   fewest failures first;
+4. the rest, once per Bitcoin block, for the deadline and the state a read
+   shows, and a job holding a payment or cancel the daemon cannot check yet,
+   whenever a chain moves and at least every ten seconds.
+
+Within each, the jobs take turns by receiving script, least recently worked
+first. A candidate passed over is never tried again merely because a block
+arrived, so a job whose claims cannot land (priced under the floor, in assets the
+node does not accept) is tried once and then costs a lookup a round, however many
+there are and on however many scripts. A buyer whose payment is mined is worked
+in the first turns of the round after a Sequentia block anchors it, behind only
+the jobs that something new on the chains concerns in that round, each of which
+cost whoever made it an output in a new Bitcoin block or a claim the node takes.
+Each job works within a time and block budget, the round within its own; a job
+cut short is worked again next round. A job keeps every payment handed over and
+the 32 lightest others as candidates. A failing job backs off, up to a minute.
+
+Memory and disk follow the jobs by a bound per job, never by what a payment
+weighs: each signed payment is held once, in memory and in one file under
+`--data/payments/`, however many jobs it vouches for, and so is each cancel in
+memory. A job keeps at most eight claims of 16 KiB each, 64 KiB of payments and
+cancels the daemon cannot check yet, and, per payment held, 32 KiB of checked
+cancels (only that payment's signer can make one).
+
+Intake caps a request at 512 KiB, a job at eight claims, eight unvouched payments
+and, per payment, four cancels (and 16 not yet checkable), a lock at 1,008
+Bitcoin blocks from `F` to `D`, the service at `--max-jobs` live jobs and each
+client at `--jobs-per-client` live jobs it started (`0` for no limit), never for
+a job whose payment the daemon vouches for; a job whose outcome is decided no
+longer counts, and a post that merges into a job held starts none.
+
+Jobs are one JSON file each under `--data`, with their payments in
+`--data/payments/`, so a restart carries on. A job that
 has ended and is buried (the block that decided it, and for a job that did not
 complete `D` as well, `--watch-depth` deep) moves to `--data/archive/`, where it
 is still answered at `GET /jobs/<id>`, and is removed after 30 days.
