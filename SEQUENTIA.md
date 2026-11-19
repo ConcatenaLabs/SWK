@@ -484,7 +484,11 @@ Changes by file:
     block's header, transaction ids, coinbase and payment, and checked as the
     node checks it), the claim signed before the payment and completed
     without a key, the refund with its anchor floor, the buyer's cancel of its
-    own payment, the top fee tier and the timeline states. `lwk_paylock`
+    own payment, the top fee tier and the timeline states. The claim and the
+    refund pay their fee from the locked asset, from a fee pot (a second
+    output of the lock under the same leaves, named in the terms, which the
+    claim spends with the same proof), or from a coin of the signer's own that
+    its wallet signs (`FeeSource`, `FeePlan`, `lock_spend`). `lwk_paylock`
     reads the chains over it.
   - `xchain.rs`: cross-chain (BTC to Sequentia-asset) swap glue for the taker:
     HTLC key derivation (canonical absolute paths outside the receive/change
@@ -522,8 +526,12 @@ payment lock needs from a Sequentia node and a Bitcoin daemon (JSON-RPC), the
 claim completed with a proof linked to the lowest anchor the chain recorded at
 or above the payment, the activation read from the node's `getdeploymentinfo`
 (`btc_payment` and `lost_blocks`; an entry the node does not report is not
-active), the completion service, and the `paylock` command for every step. Its
-`README.md` says how to run it and its regtest proof.
+active), the claim's fee routes judged by the node's `getfeeassetinfo`, the
+completion service (bounded: cancels on a thread of their own, jobs worked
+nearest deadline first within time and block budgets, a payment search that
+keeps its place, ended jobs archived, capped intake, a token beyond loopback),
+and the `paylock` command for every step. Its `README.md` says how to run it
+and its regtest proof.
 
 ## `lwk_contracts`
 

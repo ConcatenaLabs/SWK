@@ -19,12 +19,14 @@ pub mod service;
 
 use std::time::Duration;
 
+use std::time::Instant;
+
 use lwk_wollet::btc::paylock::{
-    self, attach_proof, hex_decode, hex_encode, payment_state, PayLockTerms, PaymentProof,
-    PaymentState, ProofSource,
+    self, attach_proof, fee_pot_vout, hex_decode, hex_encode, payment_state, FeeSource,
+    PayLockTerms, PaymentProof, PaymentState, ProofSource,
 };
 use lwk_wollet::elements::encode::{deserialize, serialize};
-use lwk_wollet::elements::{OutPoint, Transaction, Txid};
+use lwk_wollet::elements::{confidential, AssetId, OutPoint, Transaction, TxOut, Txid};
 use serde_json::{json, Value};
 
 /// An error of this crate: a message a product can show or log.
@@ -86,11 +88,21 @@ pub struct Rpc {
 impl Rpc {
     /// A client of `url` (`http://host:port`, optionally with a `/wallet/<name>` path).
     pub fn new(url: &str, user: &str, pass: &str) -> Result<Self, Error> {
+        Self::with_timeout(url, user, pass, Duration::from_secs(60))
+    }
+
+    /// A client whose every call gives up after `timeout`.
+    pub fn with_timeout(
+        url: &str,
+        user: &str,
+        pass: &str,
+        timeout: Duration,
+    ) -> Result<Self, Error> {
         let t = jsonrpc::simple_http::SimpleHttpTransport::builder()
             .url(url)
             .map_err(|e| err(format!("RPC url: {e}")))?
             .auth(user, Some(pass))
-            .timeout(Duration::from_secs(60))
+            .timeout(timeout)
             .build();
         Ok(Rpc {
             client: jsonrpc::Client::with_transport(t),
@@ -273,6 +285,53 @@ impl SeqChain {
         Ok(!v.is_null())
     }
 
+    /// Whether an output is unspent in the active chain, whatever the mempool holds.
+    pub fn unspent_in_chain(&self, op: &OutPoint) -> Result<bool, Error> {
+        let v = self
+            .rpc
+            .call("gettxout", json!([op.txid.to_string(), op.vout, false]))?;
+        Ok(!v.is_null())
+    }
+
+    /// An output exactly as its transaction carries it, while it is unspent (in the
+    /// active chain and by the mempool).
+    pub fn txout(&self, op: &OutPoint) -> Result<Option<TxOut>, Error> {
+        if !self.unspent(op)? {
+            return Ok(None);
+        }
+        Ok(self
+            .tx(&op.txid)?
+            .and_then(|(tx, _)| tx.output.get(op.vout as usize).cloned()))
+    }
+
+    /// Whether this node values a fee paid in `asset` (`getfeeassetinfo`'s `accepted`:
+    /// listed and priced above zero). A node mirrors the price server block producers
+    /// follow, so this is the buyer's best reading of what producers accept. Anything the
+    /// node does not answer counts as not accepted.
+    pub fn fee_asset_accepted(&self, asset: &AssetId) -> Result<bool, Error> {
+        let hex = asset.to_string();
+        let v = self.rpc.call("getfeeassetinfo", json!([hex]))?;
+        Ok(v.get(&hex)
+            .and_then(|e| e.get("accepted"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    /// The rate a node values `asset` at (`getfeeassetinfo`'s `rate`), when it accepts it.
+    pub fn fee_asset_rate(&self, asset: &AssetId) -> Result<Option<u64>, Error> {
+        let hex = asset.to_string();
+        let v = self.rpc.call("getfeeassetinfo", json!([hex]))?;
+        let e = v.get(&hex);
+        if !e
+            .and_then(|e| e.get("accepted"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        Ok(e.and_then(|e| e.get("rate")).and_then(Value::as_u64))
+    }
+
     /// The highest height the node holds final (`getposfinality`).
     pub fn finalized_height(&self) -> Result<u32, Error> {
         let v = self.rpc.call("getposfinality", json!([]))?;
@@ -341,6 +400,18 @@ pub struct Found {
     pub block: String,
 }
 
+/// How far a search for a payment has read Bitcoin's best chain, kept between ticks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaymentScan {
+    /// The last block read: its height and hash.
+    pub scanned: Option<(u32, String)>,
+    /// The payment's block, once found.
+    pub found: Option<Found>,
+}
+
+/// How many blocks above `D` a search reads, to tell a late payment from none.
+pub const LATE_SCAN: u32 = 6;
+
 impl BtcChain {
     /// Bitcoin's tip height.
     pub fn tip(&self) -> Result<u32, Error> {
@@ -355,25 +426,59 @@ impl BtcChain {
         Ok(v.as_str().ok_or_else(|| err("getblockhash"))?.to_string())
     }
 
-    /// Looks for a transaction in the best chain's blocks from `hi` down to `lo`.
-    pub fn find(&self, txid: &str, lo: u32, hi: u32) -> Result<Option<Found>, Error> {
-        let mut h = hi;
-        while h >= lo && h > 0 {
+    /// Moves `scan` on through the best chain's blocks the payment `txid` can be in, at
+    /// most `max_blocks` blocks and until `until`, and says whether it reached Bitcoin's tip
+    /// (or the last height it watches). A scan keeps its place, so each block is read once;
+    /// a reorganization below its place (the block it stopped at, or the payment's block,
+    /// is no longer in the best chain) starts it again from the floor.
+    pub fn scan_payment(
+        &self,
+        txid: &str,
+        terms: &PayLockTerms,
+        scan: &mut PaymentScan,
+        max_blocks: u32,
+        until: Instant,
+    ) -> Result<bool, Error> {
+        let tip = self.tip()?;
+        if let Some(f) = &scan.found {
+            if f.height <= tip && self.block_hash(f.height)? == f.block {
+                return Ok(true);
+            }
+            scan.found = None;
+            scan.scanned = None;
+        }
+        if let Some((h, hash)) = &scan.scanned {
+            if *h > tip || self.block_hash(*h)? != *hash {
+                scan.scanned = None;
+            }
+        }
+        let first = terms.floor.max(1);
+        let last = tip.min(terms.deadline.saturating_add(LATE_SCAN));
+        let mut h = scan.scanned.as_ref().map(|(h, _)| h + 1).unwrap_or(first);
+        let mut read = 0;
+        while h <= last {
+            if read >= max_blocks || Instant::now() >= until {
+                return Ok(false);
+            }
             let hash = self.block_hash(h)?;
             let b = self.rpc.call("getblock", json!([hash, 1]))?;
-            if b.get("tx")
+            read += 1;
+            let has = b
+                .get("tx")
                 .and_then(Value::as_array)
                 .map(|a| a.iter().any(|t| t.as_str() == Some(txid)))
-                .unwrap_or(false)
-            {
-                return Ok(Some(Found {
+                .unwrap_or(false);
+            scan.scanned = Some((h, hash.clone()));
+            if has {
+                scan.found = Some(Found {
                     height: h,
                     block: hash,
-                }));
+                });
+                return Ok(true);
             }
-            h -= 1;
+            h += 1;
         }
-        Ok(None)
+        Ok(true)
     }
 
     /// The first transaction of the best chain's blocks from `lo` to `hi` with an output
@@ -514,9 +619,49 @@ pub enum Completion {
     Never(String),
 }
 
+/// Where a payment stands for a claim, from a scan of Bitcoin's best chain.
+pub fn payment_position(
+    terms: &PayLockTerms,
+    scan: &PaymentScan,
+    complete: bool,
+    btc_tip: u32,
+) -> Position {
+    match payment_state(terms, scan.found.as_ref().map(|f| f.height)) {
+        PaymentState::NotMined if complete && btc_tip > terms.deadline => Position::Never(format!(
+            "no payment was mined by the deadline (Bitcoin block {})",
+            terms.deadline
+        )),
+        PaymentState::NotMined => {
+            Position::Waiting("the payment is not mined on Bitcoin yet".into())
+        }
+        PaymentState::BelowFloor(h) => Position::Never(format!(
+            "the payment is mined at {h}, not above the lock's floor {}",
+            terms.floor
+        )),
+        PaymentState::Late(h) => Position::Never(format!(
+            "the payment is mined at Bitcoin block {h}, after the deadline {}",
+            terms.deadline
+        )),
+        PaymentState::InWindow(_) => Position::InWindow,
+    }
+}
+
+/// [`payment_position`]'s answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Position {
+    /// Mined at a height the claim accepts.
+    InWindow,
+    /// Not mined yet, or not read that far yet.
+    Waiting(String),
+    /// It can never open the lock.
+    Never(String),
+}
+
 /// Completes a signed claim with a proof of the payment `payment_txid`, when it is
 /// mined in Bitcoin's best chain within the lock's heights and a Sequentia block
-/// has anchored at its height or above. Asks no key.
+/// has anchored at its height or above. Asks no key. It reads every block the payment
+/// can be in, from the floor to a few blocks past the deadline; the completion service
+/// keeps its place instead ([`BtcChain::scan_payment`]).
 pub fn complete_claim(
     seq: &SeqChain,
     btc: &BtcChain,
@@ -525,29 +670,36 @@ pub fn complete_claim(
     claim: &Transaction,
     payment_txid: &str,
 ) -> Result<Completion, Error> {
-    let tip = btc.tip()?;
-    let found = btc.find(payment_txid, terms.floor.max(1), tip)?;
-    match payment_state(terms, found.as_ref().map(|f| f.height)) {
-        PaymentState::NotMined => {
-            return Ok(Completion::Waiting(
-                "the payment is not mined on Bitcoin yet".into(),
-            ))
-        }
-        PaymentState::BelowFloor(h) => {
-            return Ok(Completion::Never(format!(
-                "the payment is mined at {h}, not above the lock's floor {}",
-                terms.floor
-            )))
-        }
-        PaymentState::Late(h) => {
-            return Ok(Completion::Never(format!(
-                "the payment is mined at Bitcoin block {h}, after the deadline {}",
-                terms.deadline
-            )))
-        }
-        PaymentState::InWindow(_) => {}
+    let mut scan = PaymentScan::default();
+    let window = terms.deadline - terms.floor + LATE_SCAN + 1;
+    let far = Instant::now() + Duration::from_secs(3600);
+    let complete = btc.scan_payment(payment_txid, terms, &mut scan, window, far)?;
+    match payment_position(terms, &scan, complete, btc.tip()?) {
+        Position::Waiting(w) => Ok(Completion::Waiting(w)),
+        Position::Never(w) => Ok(Completion::Never(w)),
+        Position::InWindow => prove_claim(
+            seq,
+            btc,
+            terms,
+            lock,
+            claim,
+            payment_txid,
+            scan.found.as_ref().expect("in window"),
+        ),
     }
-    let found = found.expect("in window");
+}
+
+/// Completes a signed claim with a proof of the payment found in `found`, linked to the
+/// lowest anchor the Sequentia chain recorded at or above it.
+pub fn prove_claim(
+    seq: &SeqChain,
+    btc: &BtcChain,
+    terms: &PayLockTerms,
+    lock: &OutPoint,
+    claim: &Transaction,
+    payment_txid: &str,
+    found: &Found,
+) -> Result<Completion, Error> {
     let Some(anchor) = seq.first_anchored_at(found.height)? else {
         return Ok(Completion::Waiting(format!(
             "no Sequentia block has anchored at Bitcoin block {} yet",
@@ -559,7 +711,7 @@ pub fn complete_claim(
             "the lock is not in the active chain".into(),
         ));
     };
-    let src = match btc.proof_source(payment_txid, &found, &anchor) {
+    let src = match btc.proof_source(payment_txid, found, &anchor) {
         Ok(s) => s,
         Err(e) => return Ok(Completion::Waiting(e.0)),
     };
@@ -574,6 +726,155 @@ pub fn complete_claim(
         vout,
         proof_bytes,
     })
+}
+
+// ---------------------------------------------------------------- the claim's fee
+
+/// One way a claim (or a refund) can pay its fee, and whether the node accepts its asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeRoute {
+    /// Where the fee would come from.
+    pub source: FeeSource,
+    /// The fee's asset, when the source is there to read.
+    pub asset: Option<AssetId>,
+    /// Usable: the source is there and the node accepts its asset.
+    pub usable: bool,
+    /// Why not, in words, when it is not.
+    pub why_not: Option<String>,
+}
+
+impl FeeRoute {
+    /// The route as JSON.
+    pub fn to_json(&self) -> Value {
+        let source = match &self.source {
+            FeeSource::Locked => "locked asset".to_string(),
+            FeeSource::Pot(v) => format!("fee pot (output {v})"),
+            FeeSource::Coin { outpoint, .. } => {
+                format!("coin {}:{}", outpoint.txid, outpoint.vout)
+            }
+        };
+        json!({
+            "source": source,
+            "asset": self.asset.map(|a| a.to_string()),
+            "usable": self.usable,
+            "why_not": self.why_not,
+        })
+    }
+}
+
+/// Every way the claim on `lock_tx`'s output `lock_vout` can pay its fee: the locked
+/// asset, the terms' fee pot, and each coin in `coins` (the buyer's own). A route is
+/// usable only when its source is there, unspent and in the clear, and the node accepts
+/// its asset; anything it cannot read counts against the route. A buyer pays only when
+/// one route is usable (section 8.2).
+pub fn fee_routes(
+    seq: &SeqChain,
+    terms: &PayLockTerms,
+    lock_tx: &Transaction,
+    lock_vout: u32,
+    coins: &[OutPoint],
+) -> Vec<FeeRoute> {
+    let mut out = vec![];
+    let accepted = |a: &AssetId| -> (bool, Option<String>) {
+        match seq.fee_asset_accepted(a) {
+            Ok(true) => (true, None),
+            Ok(false) => (
+                false,
+                Some(format!("block producers do not accept a fee in asset {a}")),
+            ),
+            Err(e) => (
+                false,
+                Some(format!(
+                    "the node did not say whether it accepts a fee in asset {a}: {e}"
+                )),
+            ),
+        }
+    };
+    let (ok, why) = accepted(&terms.asset);
+    out.push(FeeRoute {
+        source: FeeSource::Locked,
+        asset: Some(terms.asset),
+        usable: ok,
+        why_not: why,
+    });
+    if let Some(pot) = terms.fee_pot {
+        match fee_pot_vout(terms, lock_tx, lock_vout) {
+            Some(v) => {
+                let (ok, why) = accepted(&pot.asset);
+                out.push(FeeRoute {
+                    source: FeeSource::Pot(v),
+                    asset: Some(pot.asset),
+                    usable: ok,
+                    why_not: why,
+                });
+            }
+            None => out.push(FeeRoute {
+                source: FeeSource::Pot(u32::MAX),
+                asset: Some(pot.asset),
+                usable: false,
+                why_not: Some("the lock transaction carries no fee pot".into()),
+            }),
+        }
+    }
+    for op in coins {
+        let txout = match seq.txout(op) {
+            Ok(Some(o)) => o,
+            Ok(None) => {
+                out.push(FeeRoute {
+                    source: FeeSource::Coin {
+                        outpoint: *op,
+                        txout: TxOut::default(),
+                    },
+                    asset: None,
+                    usable: false,
+                    why_not: Some(format!(
+                        "the fee coin {}:{} is spent or unknown",
+                        op.txid, op.vout
+                    )),
+                });
+                continue;
+            }
+            Err(e) => {
+                out.push(FeeRoute {
+                    source: FeeSource::Coin {
+                        outpoint: *op,
+                        txout: TxOut::default(),
+                    },
+                    asset: None,
+                    usable: false,
+                    why_not: Some(format!("the fee coin could not be read: {e}")),
+                });
+                continue;
+            }
+        };
+        let route = match (txout.asset, txout.value) {
+            (confidential::Asset::Explicit(a), confidential::Value::Explicit(_)) => {
+                let (ok, why) = accepted(&a);
+                FeeRoute {
+                    source: FeeSource::Coin {
+                        outpoint: *op,
+                        txout,
+                    },
+                    asset: Some(a),
+                    usable: ok,
+                    why_not: why,
+                }
+            }
+            _ => FeeRoute {
+                source: FeeSource::Coin {
+                    outpoint: *op,
+                    txout,
+                },
+                asset: None,
+                usable: false,
+                why_not: Some(
+                    "the fee coin is confidential; a fee coin must be in the clear".into(),
+                ),
+            },
+        };
+        out.push(route);
+    }
+    out
 }
 
 // -------------------------------------------------------------- activation

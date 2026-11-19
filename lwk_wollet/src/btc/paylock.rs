@@ -155,6 +155,21 @@ pub struct PayLockTerms {
     pub deadline: u32,
     /// `R`: the anchor floor of the refund; the swap sets `R = D`.
     pub refund_at: u32,
+    /// A fee pot: a second output of the lock transaction, under the same two leaves,
+    /// holding an asset block producers accept, from which the claim (or the refund)
+    /// pays its fee when producers do not accept the locked asset (section 8.1).
+    pub fee_pot: Option<FeePot>,
+}
+
+/// A fee pot: `atoms` of `asset` in an output of the lock transaction that pays the
+/// lock's own script. The seller prices it into the offer; the claim spends it beside
+/// the lock, with the same proof, and the buyer keeps what its fee leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeePot {
+    /// The pot's asset, one producers accept as a fee.
+    pub asset: AssetId,
+    /// Its atoms.
+    pub atoms: u64,
 }
 
 impl PayLockTerms {
@@ -180,9 +195,17 @@ impl PayLockTerms {
             floor,
             deadline,
             refund_at: deadline,
+            fee_pot: None,
         };
         t.sane()?;
         Ok(t)
+    }
+
+    /// The same terms with a fee pot in another asset (section 8.1).
+    pub fn with_fee_pot(mut self, pot: FeePot) -> Result<Self, Error> {
+        self.fee_pot = Some(pot);
+        self.sane()?;
+        Ok(self)
     }
 
     /// The checks every party runs on terms, whoever wrote them.
@@ -204,12 +227,22 @@ impl PayLockTerms {
         if !self.receive_key.compressed {
             return Err(gen("the receiving key must be compressed"));
         }
+        if let Some(pot) = &self.fee_pot {
+            if pot.atoms == 0 {
+                return Err(gen("a fee pot of zero atoms"));
+            }
+            if pot.asset == self.asset {
+                return Err(gen(
+                    "a fee pot in the locked asset adds nothing: the claim pays from the lock itself",
+                ));
+            }
+        }
         Ok(())
     }
 
     /// The terms as JSON: what two parties exchange and what a completion service is given.
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "asset": self.asset.to_string(),
             "atoms": self.atoms,
             "price_sat": self.price_sat,
@@ -219,7 +252,11 @@ impl PayLockTerms {
             "floor": self.floor,
             "deadline": self.deadline,
             "refund_at": self.refund_at,
-        })
+        });
+        if let Some(pot) = &self.fee_pot {
+            v["fee_pot"] = serde_json::json!({"asset": pot.asset.to_string(), "atoms": pot.atoms});
+        }
+        v
     }
 
     /// Terms read from [`PayLockTerms::to_json`]'s form, checked with [`PayLockTerms::sane`].
@@ -251,6 +288,21 @@ impl PayLockTerms {
             floor: h32("floor")?,
             deadline: h32("deadline")?,
             refund_at: h32("refund_at")?,
+            fee_pot: match v.get("fee_pot") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(p) => Some(FeePot {
+                    asset: p
+                        .get("asset")
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| gen("terms: the fee pot has no asset"))?
+                        .parse()
+                        .map_err(gen)?,
+                    atoms: p
+                        .get("atoms")
+                        .and_then(|x| x.as_u64())
+                        .ok_or_else(|| gen("terms: the fee pot has no atoms"))?,
+                }),
+            },
         };
         t.sane()?;
         Ok(t)
@@ -411,6 +463,12 @@ pub fn check_lock(terms: &PayLockTerms, facts: &LockFacts<'_>) -> Vec<String> {
             }
         }
     }
+    if terms.fee_pot.is_some() && fee_pot_vout(terms, facts.lock_tx, facts.vout).is_none() {
+        why.push(
+            "the lock transaction carries no fee pot of the agreed asset and amount under the lock's leaves"
+                .into(),
+        );
+    }
     if facts
         .lock_tx
         .input
@@ -432,6 +490,25 @@ pub fn check_lock(terms: &PayLockTerms, facts: &LockFacts<'_>) -> Vec<String> {
         ));
     }
     why
+}
+
+/// The output of the lock transaction that holds the terms' fee pot: it pays the lock's
+/// own script, in the clear, exactly the pot's asset and atoms, at an index other than the
+/// lock's. `None` when the terms have no pot or the transaction does not carry it.
+pub fn fee_pot_vout(terms: &PayLockTerms, lock_tx: &Transaction, lock_vout: u32) -> Option<u32> {
+    let pot = terms.fee_pot?;
+    let spk = terms.tree().ok()?.script_pubkey;
+    lock_tx
+        .output
+        .iter()
+        .enumerate()
+        .find(|(i, o)| {
+            *i as u32 != lock_vout
+                && o.script_pubkey == spk
+                && o.asset == confidential::Asset::Explicit(pot.asset)
+                && o.value == confidential::Value::Explicit(pot.atoms)
+        })
+        .map(|(i, _)| i as u32)
 }
 
 // --------------------------------------------------------- the proof record
@@ -716,46 +793,196 @@ pub fn lock_txout(terms: &PayLockTerms) -> Result<TxOut, Error> {
     ))
 }
 
-fn spend_lock(
+/// Where a claim's or a refund's fee comes from (section 8.1). No asset is a fallback: a
+/// wallet picks a source whose asset block producers accept, and declines the trade when
+/// it has none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // one per claim; boxing buys nothing
+pub enum FeeSource {
+    /// The locked asset itself: the default, when producers accept it.
+    Locked,
+    /// The terms' fee pot, at this output of the lock transaction, spent beside the lock
+    /// through the same leaf.
+    Pot(u32),
+    /// A coin of the signer's own, in an asset producers accept. Its wallet signs that
+    /// input. The claim's (or the refund's) signature commits to the coin's outpoint and
+    /// output, so it authorises nothing but this one transaction.
+    Coin {
+        /// The coin.
+        outpoint: OutPoint,
+        /// Its output, in the clear.
+        txout: TxOut,
+    },
+}
+
+/// A fee: its source, its atoms, and where what the source leaves goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeePlan {
+    /// Where the fee comes from.
+    pub source: FeeSource,
+    /// The fee, in atoms of the source's asset.
+    pub fee: u64,
+    /// Where what a pot or a coin leaves after the fee goes; `None` sends it with the asset.
+    pub change: Option<Script>,
+}
+
+impl FeePlan {
+    /// A fee of `fee` atoms of the locked asset.
+    pub fn locked(fee: u64) -> Self {
+        FeePlan {
+            source: FeeSource::Locked,
+            fee,
+            change: None,
+        }
+    }
+
+    /// The asset the fee is paid in.
+    pub fn asset(&self, terms: &PayLockTerms) -> Result<AssetId, Error> {
+        match &self.source {
+            FeeSource::Locked => Ok(terms.asset),
+            FeeSource::Pot(_) => terms
+                .fee_pot
+                .map(|p| p.asset)
+                .ok_or_else(|| gen("the terms have no fee pot")),
+            FeeSource::Coin { txout, .. } => match txout.asset {
+                confidential::Asset::Explicit(a) => Ok(a),
+                _ => Err(gen("a fee coin must hold its asset in the clear")),
+            },
+        }
+    }
+}
+
+/// A spend of the lock (a claim or a refund), before its signatures, with the outputs its
+/// inputs spend.
+#[derive(Debug, Clone)]
+pub struct LockSpend {
+    /// The transaction.
+    pub tx: Transaction,
+    /// The output each input spends, in input order.
+    pub prevouts: Vec<TxOut>,
+    /// The inputs that spend the lock's script: the lock, and the fee pot when it pays.
+    pub lock_inputs: Vec<usize>,
+}
+
+fn txin(previous_output: OutPoint, sequence: u32) -> TxIn {
+    TxIn {
+        previous_output,
+        sequence: Sequence(sequence),
+        ..Default::default()
+    }
+}
+
+/// The lock spent to `to`, its fee paid as `plan` says. Input 0 is the lock; a pot or a
+/// coin is input 1. Output 0 pays the asset to `to` (less the fee when the locked asset
+/// pays it), then what the pot or coin leaves, then the fee.
+pub fn lock_spend(
     terms: &PayLockTerms,
     lock: OutPoint,
     to: Script,
-    fee: u64,
+    plan: &FeePlan,
     sequence: u32,
-) -> Result<Transaction, Error> {
-    if fee == 0 || fee >= terms.atoms {
-        return Err(gen(format!(
-            "the fee must be between 1 and {} atoms of the locked asset",
-            terms.atoms.saturating_sub(1)
-        )));
+) -> Result<LockSpend, Error> {
+    let fee = plan.fee;
+    let mut input = vec![txin(lock, sequence)];
+    let mut prevouts = vec![lock_txout(terms)?];
+    let mut lock_inputs = vec![0];
+    let (fee_asset, left, left_to) = match &plan.source {
+        FeeSource::Locked => {
+            if fee == 0 || fee >= terms.atoms {
+                return Err(gen(format!(
+                    "the fee must be between 1 and {} atoms of the locked asset",
+                    terms.atoms.saturating_sub(1)
+                )));
+            }
+            let tx = Transaction {
+                version: 2,
+                lock_time: LockTime::ZERO,
+                input,
+                output: vec![
+                    explicit_out(terms.asset, terms.atoms - fee, to),
+                    explicit_out(terms.asset, fee, Script::new()),
+                ],
+            };
+            return Ok(LockSpend {
+                tx,
+                prevouts,
+                lock_inputs,
+            });
+        }
+        FeeSource::Pot(vout) => {
+            let pot = terms
+                .fee_pot
+                .ok_or_else(|| gen("the terms have no fee pot"))?;
+            if *vout == lock.vout {
+                return Err(gen("the fee pot is the lock's own output"));
+            }
+            if fee == 0 || fee > pot.atoms {
+                return Err(gen(format!(
+                    "the fee must be between 1 and {} atoms of the fee pot",
+                    pot.atoms
+                )));
+            }
+            input.push(txin(OutPoint::new(lock.txid, *vout), sequence));
+            prevouts.push(explicit_out(
+                pot.asset,
+                pot.atoms,
+                terms.tree()?.script_pubkey,
+            ));
+            lock_inputs.push(1);
+            (pot.asset, pot.atoms - fee, plan.change.clone())
+        }
+        FeeSource::Coin { outpoint, txout } => {
+            let (asset, value) = match (txout.asset, txout.value) {
+                (confidential::Asset::Explicit(a), confidential::Value::Explicit(v)) => (a, v),
+                _ => {
+                    return Err(gen(
+                        "a fee coin must hold its asset and amount in the clear",
+                    ))
+                }
+            };
+            if outpoint.txid == lock.txid {
+                return Err(gen(
+                    "a fee coin cannot be an output of the lock transaction",
+                ));
+            }
+            if fee == 0 || fee > value {
+                return Err(gen(format!(
+                    "the fee must be between 1 and {value} atoms of the fee coin"
+                )));
+            }
+            input.push(txin(*outpoint, sequence));
+            prevouts.push(txout.clone());
+            (asset, value - fee, plan.change.clone())
+        }
+    };
+    let mut output = vec![explicit_out(terms.asset, terms.atoms, to.clone())];
+    if left > 0 {
+        output.push(explicit_out(fee_asset, left, left_to.unwrap_or(to)));
     }
-    Ok(Transaction {
-        version: 2,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: lock,
-            sequence: Sequence(sequence),
-            ..Default::default()
-        }],
-        output: vec![
-            explicit_out(terms.asset, terms.atoms - fee, to),
-            explicit_out(terms.asset, fee, Script::new()),
-        ],
+    output.push(explicit_out(fee_asset, fee, Script::new()));
+    Ok(LockSpend {
+        tx: Transaction {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            input,
+            output,
+        },
+        prevouts,
+        lock_inputs,
     })
 }
 
 fn sign_leaf(
-    tx: &Transaction,
-    terms: &PayLockTerms,
+    spend: &LockSpend,
+    input: usize,
     leaf: &Script,
     genesis: BlockHash,
     sk: &SecretKey,
 ) -> Result<Vec<u8>, Error> {
-    let prevouts = [lock_txout(terms)?];
-    let sighash = SighashCache::new(tx)
+    let sighash = SighashCache::new(&spend.tx)
         .taproot_script_spend_signature_hash(
-            0,
-            &Prevouts::All(&prevouts),
+            input,
+            &Prevouts::All(&spend.prevouts),
             ScriptPath::with_defaults(leaf),
             SchnorrSighashType::Default,
             genesis,
@@ -765,6 +992,36 @@ fn sign_leaf(
     let kp = Keypair::from_secret_key(&secp, sk);
     let sig = secp.sign_schnorr_no_aux_rand(&Message::from_digest(sighash.to_byte_array()), &kp);
     Ok(sig.serialize().to_vec())
+}
+
+/// Takes the witnesses of the inputs this key does not sign (a fee coin) from a copy of
+/// the same transaction its wallet signed. The two must be the same transaction.
+fn take_wallet_witnesses(
+    spend: &mut LockSpend,
+    wallet_signed: Option<&Transaction>,
+) -> Result<(), Error> {
+    let Some(w) = wallet_signed else {
+        return Ok(());
+    };
+    if w.txid() != spend.tx.txid() {
+        return Err(gen(
+            "the wallet-signed transaction is not this claim or refund: it spends or pays something else",
+        ));
+    }
+    for i in 0..spend.tx.input.len() {
+        if !spend.lock_inputs.contains(&i) {
+            spend.tx.input[i].witness = w.input[i].witness.clone();
+        }
+    }
+    Ok(())
+}
+
+fn check_key(sk: &SecretKey, want: &XOnlyPublicKey, who: &str) -> Result<(), Error> {
+    let secp = Secp256k1::new();
+    if Keypair::from_secret_key(&secp, sk).x_only_public_key().0 != *want {
+        return Err(gen(format!("the key given is not the terms' {who} key")));
+    }
+    Ok(())
 }
 
 /// The buyer's claim, signed and ready for a proof: input 0 spends the lock through
@@ -779,47 +1036,72 @@ pub fn sign_claim(
     genesis: BlockHash,
     buyer_sk: &SecretKey,
 ) -> Result<Transaction, Error> {
-    let secp = Secp256k1::new();
-    if Keypair::from_secret_key(&secp, buyer_sk)
-        .x_only_public_key()
-        .0
-        != terms.buyer
-    {
-        return Err(gen("the key given is not the terms' buyer key"));
-    }
+    sign_claim_with(
+        terms,
+        lock,
+        to,
+        &FeePlan::locked(fee),
+        genesis,
+        buyer_sk,
+        None,
+    )
+}
+
+/// The buyer's claim with its fee paid as `plan` says. Every input that spends the lock's
+/// script (the lock, and the fee pot) is signed through the claim leaf. A fee coin's input
+/// is the buyer's wallet's to sign: pass the copy the wallet signed as `wallet_signed`, a
+/// copy of [`lock_spend`]'s transaction (the template); without it that input is left
+/// unsigned.
+pub fn sign_claim_with(
+    terms: &PayLockTerms,
+    lock: OutPoint,
+    to: Script,
+    plan: &FeePlan,
+    genesis: BlockHash,
+    buyer_sk: &SecretKey,
+    wallet_signed: Option<&Transaction>,
+) -> Result<Transaction, Error> {
+    check_key(buyer_sk, &terms.buyer, "buyer")?;
     let tree = terms.tree()?;
-    let mut tx = spend_lock(terms, lock, to, fee, CLAIM_SEQUENCE)?;
-    let sig = sign_leaf(&tx, terms, &tree.claim, genesis, buyer_sk)?;
-    tx.input[0].witness = TxInWitness {
-        script_witness: vec![
-            script_num(0),
-            sig,
-            tree.claim.to_bytes(),
-            tree.claim_control,
-        ],
-        ..Default::default()
-    };
-    Ok(tx)
+    let mut spend = lock_spend(terms, lock, to, plan, CLAIM_SEQUENCE)?;
+    take_wallet_witnesses(&mut spend, wallet_signed)?;
+    for &i in &spend.lock_inputs.clone() {
+        let sig = sign_leaf(&spend, i, &tree.claim, genesis, buyer_sk)?;
+        spend.tx.input[i].witness = TxInWitness {
+            script_witness: vec![
+                script_num(0),
+                sig,
+                tree.claim.to_bytes(),
+                tree.claim_control.clone(),
+            ],
+            ..Default::default()
+        };
+    }
+    Ok(spend.tx)
 }
 
 /// Completes a signed claim with a proof and the index of the payment's output that
-/// pays the seller. The transaction id is unchanged; only its witness id moves.
+/// pays the seller. Every input that spends the claim leaf (the lock, and a fee pot)
+/// carries the proof. The transaction id is unchanged; only its witness id moves.
 pub fn attach_proof(
     claim: &Transaction,
     proof: &PaymentProof,
     payment_vout: u32,
 ) -> Result<Transaction, Error> {
     let mut tx = claim.clone();
-    let w = &mut tx
-        .input
-        .get_mut(0)
-        .ok_or_else(|| gen("a claim with no input"))?
-        .witness;
-    if w.script_witness.len() != 4 {
-        return Err(gen("the claim's witness is not <i> <sig> <leaf> <control>"));
+    let leaf = match tx.input.first().map(|i| &i.witness.script_witness) {
+        Some(w) if w.len() == 4 => w[2].clone(),
+        Some(_) => return Err(gen("the claim's witness is not <i> <sig> <leaf> <control>")),
+        None => return Err(gen("a claim with no input")),
+    };
+    let record = proof.encode();
+    for i in tx.input.iter_mut() {
+        let w = &mut i.witness;
+        if w.script_witness.len() == 4 && w.script_witness[2] == leaf {
+            w.script_witness[0] = script_num(i64::from(payment_vout));
+            w.pegin_witness = vec![record.clone()];
+        }
     }
-    w.script_witness[0] = script_num(i64::from(payment_vout));
-    w.pegin_witness = vec![proof.encode()];
     Ok(tx)
 }
 
@@ -832,26 +1114,62 @@ pub fn sign_refund(
     genesis: BlockHash,
     seller_sk: &SecretKey,
 ) -> Result<Transaction, Error> {
-    let secp = Secp256k1::new();
-    if Keypair::from_secret_key(&secp, seller_sk)
-        .x_only_public_key()
-        .0
-        != terms.seller
-    {
-        return Err(gen("the key given is not the terms' seller key"));
-    }
-    let tree = terms.tree()?;
-    let mut tx = spend_lock(terms, lock, to, fee, CLAIM_SEQUENCE)?;
-    let sig = sign_leaf(&tx, terms, &tree.refund, genesis, seller_sk)?;
-    tx.input[0].witness = TxInWitness {
-        script_witness: vec![sig, tree.refund.to_bytes(), tree.refund_control],
-        pegin_witness: vec![floor_record(terms.refund_at)],
-        ..Default::default()
-    };
-    Ok(tx)
+    sign_refund_with(
+        terms,
+        lock,
+        to,
+        &FeePlan::locked(fee),
+        genesis,
+        seller_sk,
+        None,
+    )
 }
 
-/// A claim's virtual size with a proof of `proof_bytes`, for pricing its fee tiers.
+/// The seller's refund with its fee paid as `plan` says: from the fee pot, which it takes
+/// back with the lock, or from a coin of the seller's own (`wallet_signed` as for
+/// [`sign_claim_with`]). Each input that spends the lock's script carries the refund's
+/// anchor floor record.
+pub fn sign_refund_with(
+    terms: &PayLockTerms,
+    lock: OutPoint,
+    to: Script,
+    plan: &FeePlan,
+    genesis: BlockHash,
+    seller_sk: &SecretKey,
+    wallet_signed: Option<&Transaction>,
+) -> Result<Transaction, Error> {
+    check_key(seller_sk, &terms.seller, "seller")?;
+    let tree = terms.tree()?;
+    let mut spend = lock_spend(terms, lock, to, plan, CLAIM_SEQUENCE)?;
+    take_wallet_witnesses(&mut spend, wallet_signed)?;
+    for &i in &spend.lock_inputs.clone() {
+        let sig = sign_leaf(&spend, i, &tree.refund, genesis, seller_sk)?;
+        spend.tx.input[i].witness = TxInWitness {
+            script_witness: vec![sig, tree.refund.to_bytes(), tree.refund_control.clone()],
+            pegin_witness: vec![floor_record(terms.refund_at)],
+            ..Default::default()
+        };
+    }
+    Ok(spend.tx)
+}
+
+/// The fee a claim or a refund pays: the asset and atoms of its fee output.
+pub fn fee_of(tx: &Transaction) -> Option<(AssetId, u64)> {
+    tx.output
+        .iter()
+        .find(|o| o.script_pubkey.is_empty())
+        .and_then(|o| match (o.asset, o.value) {
+            (confidential::Asset::Explicit(a), confidential::Value::Explicit(v)) => Some((a, v)),
+            _ => None,
+        })
+}
+
+/// The witness bytes a fee coin's wallet adds to an input it has not signed yet: a P2WPKH
+/// spend, the usual wallet coin. Pricing only.
+const UNSIGNED_INPUT_WITNESS: u64 = 108;
+
+/// A claim's virtual size with a proof of `proof_bytes` on every input that spends the
+/// claim leaf, for pricing its fee tiers.
 pub fn claim_vsize(claim: &Transaction, proof_bytes: usize) -> u64 {
     let base = crate::elements::encode::serialize(&Transaction {
         input: claim
@@ -865,15 +1183,29 @@ pub fn claim_vsize(claim: &Transaction, proof_bytes: usize) -> u64 {
         ..claim.clone()
     })
     .len() as u64;
-    let total = crate::elements::encode::serialize(claim).len() as u64 + proof_bytes as u64 + 3;
+    let proofs = claim
+        .input
+        .iter()
+        .filter(|i| i.witness.script_witness.len() == 4)
+        .count() as u64;
+    let unsigned = claim
+        .input
+        .iter()
+        .filter(|i| i.witness.script_witness.is_empty())
+        .count() as u64;
+    let total = crate::elements::encode::serialize(claim).len() as u64
+        + proofs * (proof_bytes as u64 + 3)
+        + unsigned * UNSIGNED_INPUT_WITNESS;
     let weight = base * 3 + total;
     weight.div_ceil(4)
 }
 
 /// The top fee tier (section 8.5): what a seller must outbid on every block the claim
 /// can be mined in before the refund is valid, so that keeping the claim out costs more
-/// than the asset is worth. `stale_ratio` is `m`, the most a fee asset's published rate
-/// may exceed its market price; the seller's share of the blocks is taken as one half.
+/// than the asset is worth. `atoms` is `V`, the value locked, expressed in atoms of the
+/// asset the tier pays its fee in (the locked asset's own atoms when it pays). `stale_ratio`
+/// is `m`, the most a fee asset's published rate may exceed its market price; the seller's
+/// share of the blocks is taken as one half.
 pub fn top_tier_fee(
     atoms: u64,
     claim_vsize: u64,
@@ -973,6 +1305,7 @@ pub fn cancel_due(terms: &PayLockTerms, btc_tip: u32, payment_mined: bool) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elements::Txid;
     use std::str::FromStr;
 
     fn key(b: u8) -> SecretKey {
@@ -1073,6 +1406,225 @@ mod tests {
         assert_eq!(a.input[0].witness.pegin_witness[0][0], RECORD_PAYMENT);
         let r = sign_refund(&t, lock, Script::new(), 1000, genesis, &key(2)).unwrap();
         assert_eq!(r.input[0].witness.pegin_witness[0], floor_record(900_006));
+    }
+
+    fn other_asset() -> AssetId {
+        AssetId::from_str("b2e15d0d7a0c94e4e2ce0fe6e8691b9e451377f6e46e8045a86f7c4b5d4f0f23")
+            .unwrap()
+    }
+
+    fn proof() -> PaymentProof {
+        PaymentProof {
+            height: 900_001,
+            coin_anchor: 900_000,
+            header: [0; 80],
+            coinbase_sha: [0; 32],
+            index: 1,
+            payment_branch: vec![[1; 32]],
+            coinbase_branch: vec![[2; 32]],
+            links: vec![],
+            payment: vec![9; 100],
+        }
+    }
+
+    #[test]
+    fn a_fee_pot_is_part_of_the_terms() {
+        let pot = FeePot {
+            asset: other_asset(),
+            atoms: 20_000,
+        };
+        let t = terms().with_fee_pot(pot).unwrap();
+        assert_eq!(PayLockTerms::from_json(&t.to_json()).unwrap(), t);
+        // Terms without a pot read and write as before.
+        assert!(terms().to_json().get("fee_pot").is_none());
+        assert!(terms()
+            .with_fee_pot(FeePot {
+                asset: terms().asset,
+                atoms: 1
+            })
+            .is_err());
+        assert!(terms()
+            .with_fee_pot(FeePot {
+                asset: other_asset(),
+                atoms: 0
+            })
+            .is_err());
+
+        // check_lock finds the pot only at the lock's script, in the clear, exact.
+        let spk = t.tree().unwrap().script_pubkey;
+        let lock_tx = |pot_value: u64| Transaction {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            input: vec![],
+            output: vec![
+                explicit_out(t.asset, t.atoms, spk.clone()),
+                explicit_out(other_asset(), pot_value, spk.clone()),
+            ],
+        };
+        let good = lock_tx(20_000);
+        assert_eq!(fee_pot_vout(&t, &good, 0), Some(1));
+        let facts = LockFacts {
+            lock_tx: &good,
+            vout: 0,
+            lock_anchor: 900_000,
+            btc_tip: 900_000,
+        };
+        assert!(
+            check_lock(&t, &facts).is_empty(),
+            "{:?}",
+            check_lock(&t, &facts)
+        );
+        let short = lock_tx(19_999);
+        assert_eq!(fee_pot_vout(&t, &short, 0), None);
+        let facts = LockFacts {
+            lock_tx: &short,
+            ..facts
+        };
+        assert!(check_lock(&t, &facts)
+            .iter()
+            .any(|r| r.contains("no fee pot")));
+    }
+
+    #[test]
+    fn a_claim_pays_its_fee_from_the_pot_with_a_proof_on_both_inputs() {
+        let t = terms()
+            .with_fee_pot(FeePot {
+                asset: other_asset(),
+                atoms: 20_000,
+            })
+            .unwrap();
+        let lock = OutPoint::new(Txid::from_byte_array([7; 32]), 0);
+        let plan = FeePlan {
+            source: FeeSource::Pot(1),
+            fee: 5_000,
+            change: None,
+        };
+        let to = Script::from(vec![0x51]);
+        let c = sign_claim_with(
+            &t,
+            lock,
+            to.clone(),
+            &plan,
+            BlockHash::all_zeros(),
+            &key(1),
+            None,
+        )
+        .unwrap();
+        assert_eq!(c.input.len(), 2);
+        assert_eq!(c.input[1].previous_output, OutPoint::new(lock.txid, 1));
+        // The whole locked amount reaches the buyer; the pot pays the fee and the rest.
+        assert_eq!(c.output[0].value, confidential::Value::Explicit(t.atoms));
+        assert_eq!(c.output[1].value, confidential::Value::Explicit(15_000));
+        assert_eq!(c.output[1].script_pubkey, to);
+        assert_eq!(fee_of(&c), Some((other_asset(), 5_000)));
+        // Two signatures, each for its own input.
+        let w0 = &c.input[0].witness.script_witness;
+        let w1 = &c.input[1].witness.script_witness;
+        assert_eq!(w0.len(), 4);
+        assert_eq!(w1.len(), 4);
+        assert_eq!(w0[2], w1[2]);
+        assert_ne!(w0[1], w1[1]);
+        let a = attach_proof(&c, &proof(), 2).unwrap();
+        assert_eq!(a.txid(), c.txid());
+        for i in &a.input {
+            assert_eq!(i.witness.script_witness[0], vec![2]);
+            assert_eq!(i.witness.pegin_witness[0][0], RECORD_PAYMENT);
+        }
+        assert!(
+            claim_vsize(&c, 400)
+                > claim_vsize(
+                    &sign_claim(&t, lock, to.clone(), 5000, BlockHash::all_zeros(), &key(1))
+                        .unwrap(),
+                    400
+                ) + 100
+        );
+        // A pot the terms do not have, or the lock's own output, is refused.
+        assert!(lock_spend(&terms(), lock, to.clone(), &plan, CLAIM_SEQUENCE).is_err());
+        let own = FeePlan {
+            source: FeeSource::Pot(0),
+            ..plan.clone()
+        };
+        assert!(lock_spend(&t, lock, to.clone(), &own, CLAIM_SEQUENCE).is_err());
+        // The refund takes the pot back too, each input with its floor record.
+        let r =
+            sign_refund_with(&t, lock, to, &plan, BlockHash::all_zeros(), &key(2), None).unwrap();
+        assert_eq!(r.input.len(), 2);
+        for i in &r.input {
+            assert_eq!(i.witness.pegin_witness[0], floor_record(900_006));
+        }
+    }
+
+    #[test]
+    fn a_claim_pays_its_fee_from_a_coin_the_wallet_signs() {
+        let t = terms();
+        let lock = OutPoint::new(Txid::from_byte_array([7; 32]), 0);
+        let coin = OutPoint::new(Txid::from_byte_array([8; 32]), 3);
+        let coin_out = explicit_out(other_asset(), 9_000, Script::from(vec![0x00, 0x14]));
+        let change = Script::from(vec![0x52]);
+        let plan = FeePlan {
+            source: FeeSource::Coin {
+                outpoint: coin,
+                txout: coin_out.clone(),
+            },
+            fee: 1_000,
+            change: Some(change.clone()),
+        };
+        let to = Script::from(vec![0x51]);
+        let template = lock_spend(&t, lock, to.clone(), &plan, CLAIM_SEQUENCE).unwrap();
+        assert_eq!(template.lock_inputs, vec![0]);
+        assert_eq!(template.prevouts[1], coin_out);
+        // The wallet signs input 1 of the template; the buyer's key signs input 0 after.
+        let mut wallet = template.tx.clone();
+        wallet.input[1].witness.script_witness = vec![vec![0xaa; 71], vec![0x02; 33]];
+        let c = sign_claim_with(
+            &t,
+            lock,
+            to.clone(),
+            &plan,
+            BlockHash::all_zeros(),
+            &key(1),
+            Some(&wallet),
+        )
+        .unwrap();
+        assert_eq!(
+            c.input[1].witness.script_witness,
+            wallet.input[1].witness.script_witness
+        );
+        assert_eq!(c.input[0].witness.script_witness.len(), 4);
+        assert_eq!(c.output[0].value, confidential::Value::Explicit(t.atoms));
+        assert_eq!(c.output[1].script_pubkey, change);
+        assert_eq!(fee_of(&c), Some((other_asset(), 1_000)));
+        // The proof goes on the lock's input only.
+        let a = attach_proof(&c, &proof(), 0).unwrap();
+        assert!(a.input[1].witness.pegin_witness.is_empty());
+        // A wallet copy of some other transaction is refused.
+        let mut other = wallet.clone();
+        other.output[0].script_pubkey = Script::from(vec![0x53]);
+        assert!(sign_claim_with(
+            &t,
+            lock,
+            to.clone(),
+            &plan,
+            BlockHash::all_zeros(),
+            &key(1),
+            Some(&other)
+        )
+        .is_err());
+        // A fee as large as the coin is allowed (no change); a larger one is not.
+        let all = FeePlan {
+            fee: 9_000,
+            ..plan.clone()
+        };
+        assert_eq!(
+            lock_spend(&t, lock, to.clone(), &all, CLAIM_SEQUENCE)
+                .unwrap()
+                .tx
+                .output
+                .len(),
+            2
+        );
+        let over = FeePlan { fee: 9_001, ..plan };
+        assert!(lock_spend(&t, lock, to, &over, CLAIM_SEQUENCE).is_err());
     }
 
     #[test]

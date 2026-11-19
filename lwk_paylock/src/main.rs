@@ -11,26 +11,41 @@
 //! ```text
 //! paylock activation
 //! paylock terms      --asset A --atoms N --price SAT --buyer X --seller X --receive-key K [--floor F] [--deadline D] [--margin 6]
-//! paylock check-lock --terms T --lock TXID:VOUT
-//! paylock sign-claim --terms T --lock TXID:VOUT --key-file F --to SPK --fee N [--top-fee N|auto]
+//!                    [--fee-pot-asset A --fee-pot-atoms N]
+//! paylock check-lock --terms T --lock TXID:VOUT [--fee-coin TXID:VOUT,...]
+//! paylock sign-claim --terms T --lock TXID:VOUT --key-file F --to SPK --fee N [--top-fee N|auto|none] [--value N]
+//!                    [--fee-pot | --fee-coin TXID:VOUT [--change SPK] [--wallet-signed HEX,...]]
 //! paylock complete   --terms T --lock TXID:VOUT --claim HEX --payment TXID [--send]
 //! paylock cancel     --payment-hex HEX --values V,V --to SPK --fee SAT
 //! paylock sign-refund --terms T --lock TXID:VOUT --key-file F --to SPK --fee N [--send] [--despite-payment]
-//! paylock serve      --data DIR --listen HOST:PORT [--interval SECS]
+//!                    [--fee-pot | --fee-coin TXID:VOUT [--change SPK] [--wallet-signed HEX]]
+//! paylock serve      --data DIR --listen HOST:PORT [--interval SECS] [--token-file F] [--max-jobs N]
 //! ```
 //!
 //! `T` is a terms file, or the terms' JSON itself.
+//!
+//! `terms` builds a payment lock only when the node reports both rules it needs active
+//! for its next block; otherwise it answers `"payment_lock": false` and no lock, and the
+//! product keeps today's swap. A claim pays its fee in an asset block producers accept:
+//! the locked asset, the terms' fee pot, or a coin of the buyer's own (`--fee-coin`).
+//! `check-lock` is payable only when one of these is accepted, and `sign-claim` refuses a
+//! fee in an asset the node does not accept. With `--fee-coin`, `sign-claim` first answers
+//! the unsigned `templates`; the buyer's wallet signs the coin's input of each, and the
+//! same command with `--wallet-signed` adds the claim's own signature.
 
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use lwk_paylock::{
-    activation, complete_claim, outpoint, service, BtcChain, Completion, Error, Rpc, SeqChain,
-    TxStatus,
+    activation, complete_claim, fee_routes, outpoint, service, BtcChain, Completion, Error, Rpc,
+    SeqChain, TxStatus,
 };
 use lwk_wollet::bitcoin;
-use lwk_wollet::btc::paylock::{self, check_lock, hex_decode, hex_encode, LockFacts, PayLockTerms};
+use lwk_wollet::btc::paylock::{
+    self, check_lock, fee_of, fee_pot_vout, hex_decode, hex_encode, FeePlan, FeePot, FeeSource,
+    LockFacts, PayLockTerms,
+};
 use lwk_wollet::elements::encode::{deserialize, serialize};
 use lwk_wollet::elements::secp256k1_zkp::{SecretKey, XOnlyPublicKey};
 use lwk_wollet::elements::{Script, Transaction};
@@ -45,7 +60,7 @@ fn parse(args: &[String]) -> Result<Args, Error> {
         let k = args[i]
             .strip_prefix("--")
             .ok_or_else(|| Error(format!("unexpected argument {}", args[i])))?;
-        if k == "send" || k == "despite-payment" {
+        if k == "send" || k == "despite-payment" || k == "fee-pot" {
             m.insert(k.to_string(), "1".to_string());
             i += 1;
             continue;
@@ -72,6 +87,10 @@ fn num(a: &Args, k: &str) -> Result<u64, Error> {
 }
 
 fn rpc(prefix: &str) -> Result<Rpc, Error> {
+    rpc_with(prefix, Duration::from_secs(60))
+}
+
+fn rpc_with(prefix: &str, timeout: Duration) -> Result<Rpc, Error> {
     let env = |k: &str| std::env::var(format!("PAYLOCK_{prefix}_{k}")).ok();
     let url = env("URL").ok_or_else(|| Error(format!("PAYLOCK_{prefix}_URL is not set")))?;
     let (user, pass) = match env("COOKIE") {
@@ -89,7 +108,7 @@ fn rpc(prefix: &str) -> Result<Rpc, Error> {
             env("PASS").unwrap_or_default(),
         ),
     };
-    Rpc::new(&url, &user, &pass)
+    Rpc::with_timeout(&url, &user, &pass, timeout)
 }
 
 fn seq() -> Result<SeqChain, Error> {
@@ -129,6 +148,70 @@ fn tx_hex(tx: &Transaction) -> String {
     hex_encode(&serialize(tx))
 }
 
+fn a_fee(a: &Args) -> Result<u64, Error> {
+    num(a, "fee")
+}
+
+fn coins_of(a: &Args) -> Result<Vec<lwk_wollet::elements::OutPoint>, Error> {
+    match a.get("fee-coin") {
+        None => Ok(vec![]),
+        Some(s) => s.split(',').map(|c| outpoint(c.trim())).collect(),
+    }
+}
+
+/// The fee source the arguments name: the fee pot (`--fee-pot`), a coin (`--fee-coin`),
+/// or the locked asset.
+fn fee_source(
+    a: &Args,
+    seq: &SeqChain,
+    t: &PayLockTerms,
+    lock: &lwk_wollet::elements::OutPoint,
+) -> Result<FeeSource, Error> {
+    if a.contains_key("fee-pot") {
+        let (tx, _) = seq
+            .tx(&lock.txid)?
+            .ok_or_else(|| Error("the node does not know the lock transaction".into()))?;
+        let v = fee_pot_vout(t, &tx, lock.vout)
+            .ok_or_else(|| Error("the lock transaction carries no fee pot of the terms".into()))?;
+        return Ok(FeeSource::Pot(v));
+    }
+    if let Some(c) = a.get("fee-coin") {
+        let op = outpoint(c)?;
+        let txout = seq
+            .txout(&op)?
+            .ok_or_else(|| Error(format!("the fee coin {c} is spent or unknown")))?;
+        return Ok(FeeSource::Coin {
+            outpoint: op,
+            txout,
+        });
+    }
+    Ok(FeeSource::Locked)
+}
+
+/// A template with the claim leaf's witness on its lock inputs, for sizing only.
+fn with_claim_witness(t: &PayLockTerms, s: &paylock::LockSpend) -> Transaction {
+    let mut tx = s.tx.clone();
+    let tree = t.tree().expect("terms build");
+    for &i in &s.lock_inputs {
+        tx.input[i].witness.script_witness = vec![
+            vec![],
+            vec![0; 64],
+            tree.claim.to_bytes(),
+            tree.claim_control.clone(),
+        ];
+    }
+    tx
+}
+
+fn claims_json(claims: &[Transaction]) -> Value {
+    json!({
+        "claims": claims.iter().map(tx_hex).collect::<Vec<_>>(),
+        "txids": claims.iter().map(|c| c.txid().to_string()).collect::<Vec<_>>(),
+        "fees": claims.iter().map(|c| fee_of(c).map(|f| f.1)).collect::<Vec<_>>(),
+        "fee_asset": claims.first().and_then(fee_of).map(|f| f.0.to_string()),
+    })
+}
+
 fn btc_network(btc: &BtcChain) -> bitcoin::Network {
     match btc
         .rpc
@@ -156,10 +239,23 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
             }))
         }
         "terms" => {
+            // Activation first: before these rules apply to the next block, the opcodes are
+            // OP_SUCCESS and the lock would be anyone's. No lock and no receiving address
+            // is built then; the product keeps today's swap.
+            let seq = seq()?;
+            let act = activation(&seq)?;
+            if !act.payment_lock() {
+                return Ok(json!({
+                    "payment_lock": false,
+                    "use": "today's swap",
+                    "reason": "this node does not put its next block under both rules the payment lock needs",
+                    "activation": {"btc_payment": act.btc_payment, "lost_blocks": act.lost_blocks, "window": act.window},
+                }));
+            }
             let btc = btc()?;
             let floor = match a.get("floor") {
                 Some(f) => f.parse().map_err(|_| Error("--floor".into()))?,
-                None => seq()?.tip_anchor()?,
+                None => seq.tip_anchor()?,
             };
             let deadline = match a.get("deadline") {
                 Some(d) => d.parse().map_err(|_| Error("--deadline".into()))?,
@@ -173,7 +269,7 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
                     )
                 }
             };
-            let t = PayLockTerms::new(
+            let mut t = PayLockTerms::new(
                 arg(a, "asset")?
                     .parse()
                     .map_err(|e| Error(format!("--asset: {e}")))?,
@@ -186,18 +282,46 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
                 floor,
                 deadline,
             )?;
+            if let Some(pa) = a.get("fee-pot-asset") {
+                t = t.with_fee_pot(FeePot {
+                    asset: pa
+                        .parse()
+                        .map_err(|e| Error(format!("--fee-pot-asset: {e}")))?,
+                    atoms: num(a, "fee-pot-atoms")?,
+                })?;
+            }
             let tree = t.tree()?;
-            Ok(json!({
+            let locked_ok = seq.fee_asset_accepted(&t.asset)?;
+            let pot_ok = match &t.fee_pot {
+                Some(p) => Some(seq.fee_asset_accepted(&p.asset)?),
+                None => None,
+            };
+            let claim_fee = if locked_ok {
+                "the locked asset"
+            } else if pot_ok == Some(true) {
+                "the fee pot"
+            } else {
+                "none the node accepts: the buyer must pay the claim's fee from a coin of its own, and the seller its refund's"
+            };
+            let mut out = json!({
+                "payment_lock": true,
                 "terms": t.to_json(),
                 "lock_script_pubkey": hex_encode(tree.script_pubkey.as_bytes()),
                 "receive_address": t.receive_address(btc_network(&btc)).to_string(),
-            }))
+                "fee": {"locked_asset_accepted": locked_ok, "fee_pot_accepted": pot_ok, "claim_pays_from": claim_fee},
+            });
+            if let Some(p) = &t.fee_pot {
+                out["fee_pot"] = json!({"asset": p.asset.to_string(), "atoms": p.atoms,
+                    "note": "the lock transaction pays the pot to lock_script_pubkey too, as a second output"});
+            }
+            Ok(out)
         }
         "check-lock" => {
             let t = terms_of(a)?;
             let lock = outpoint(arg(a, "lock")?)?;
             let (seq, btc) = (seq()?, btc()?);
             let mut reasons = vec![];
+            let mut routes: Vec<Value> = vec![];
             if !activation(&seq)?.payment_lock() {
                 reasons.push(
                     "this node does not put its next block under the payment lock's rules"
@@ -215,28 +339,106 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
                     reasons.extend(check_lock(&t, &facts));
                     let (_, node) = seq.checklock(&lock.txid)?;
                     reasons.extend(node);
+                    // The claim must be able to pay its fee in an asset producers accept,
+                    // or it is never mined and the seller refunds (section 8.1).
+                    let coins = coins_of(a)?;
+                    let r = fee_routes(&seq, &t, &tx, lock.vout, &coins);
+                    if !r.iter().any(|r| r.usable) {
+                        reasons.push(format!(
+                            "the claim cannot pay its fee in an asset block producers accept ({}); \
+                             it would never be mined and the seller would refund. Pay only with a fee \
+                             pot in the lock or a coin of your own in an accepted asset (--fee-coin)",
+                            r.iter()
+                                .filter_map(|r| r.why_not.clone())
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ));
+                    }
+                    routes = r.iter().map(|r| r.to_json()).collect();
                 }
                 _ => reasons.push(
                     "the lock is not in a block of the active chain: wait until it is mined".into(),
                 ),
             }
-            Ok(json!({"payable": reasons.is_empty(), "reasons": reasons}))
+            Ok(json!({"payable": reasons.is_empty(), "reasons": reasons, "fee_routes": routes}))
         }
         "sign-claim" => {
             let t = terms_of(a)?;
             let lock = outpoint(arg(a, "lock")?)?;
-            let genesis = seq()?.genesis()?;
+            let seq = seq()?;
+            let genesis = seq.genesis()?;
             let sk = key_of(a)?;
             let to = script(a, "to")?;
-            let fee = num(a, "fee")?;
-            let going = paylock::sign_claim(&t, lock, to.clone(), fee, genesis, &sk)?;
-            let mut claims = vec![going.clone()];
+            let source = fee_source(a, &seq, &t, &lock)?;
+            let change = a.get("change").map(|_| script(a, "change")).transpose()?;
+            let plan_with = |fee: u64| FeePlan {
+                source: source.clone(),
+                fee,
+                change: change.clone(),
+            };
+            let fee_asset = plan_with(1).asset(&t)?;
+            // Fail closed: a claim whose fee the node does not accept is never mined.
+            if !seq.fee_asset_accepted(&fee_asset)? {
+                return Err(Error(format!(
+                    "block producers do not accept a fee in asset {fee_asset}: a claim paying it would never be mined. \
+                     Pay the fee from the lock's fee pot (--fee-pot) or a coin of your own in an accepted asset (--fee-coin)"
+                )));
+            }
+            // The second step of a fee coin: the wallet signed the coin's input of each template.
+            if let Some(signed) = a.get("wallet-signed") {
+                let mut claims = vec![];
+                for h in signed.split(',') {
+                    let w: Transaction = deserialize(&hex_decode(h.trim())?)
+                        .map_err(|e| Error(format!("--wallet-signed: {e}")))?;
+                    let (_, fee) =
+                        fee_of(&w).ok_or_else(|| Error("--wallet-signed: no fee output".into()))?;
+                    claims.push(paylock::sign_claim_with(
+                        &t,
+                        lock,
+                        to.clone(),
+                        &plan_with(fee),
+                        genesis,
+                        &sk,
+                        Some(&w),
+                    )?);
+                }
+                return Ok(claims_json(&claims));
+            }
+            let going = paylock::lock_spend(
+                &t,
+                lock,
+                to.clone(),
+                &plan_with(a_fee(a)?),
+                paylock::CLAIM_SEQUENCE,
+            )?;
+            let mut fees = vec![a_fee(a)?];
             let top = match a.get("top-fee").map(String::as_str) {
                 None | Some("auto") => {
+                    // V in the fee asset's atoms: the locked atoms, or their worth at the node's
+                    // rates, or what the wallet states (--value).
+                    let value = if fee_asset == t.asset {
+                        t.atoms
+                    } else if let Some(v) = a.get("value") {
+                        v.parse()
+                            .map_err(|_| Error("--value must be a number".into()))?
+                    } else {
+                        match (seq.fee_asset_rate(&t.asset)?, seq.fee_asset_rate(&fee_asset)?) {
+                            (Some(rl), Some(rf)) if rf > 0 => {
+                                (u128::from(t.atoms) * u128::from(rl) / u128::from(rf)) as u64
+                            }
+                            _ => {
+                                return Err(Error(
+                                    "the top tier is priced at the locked value in the fee asset, and the node prices only one of the two: \
+                                     give --value (the locked value in atoms of the fee asset) or --top-fee"
+                                        .into(),
+                                ))
+                            }
+                        }
+                    };
                     // Sized for a proof of about 1.2 kilobytes, the usual completed claim.
-                    let v = paylock::claim_vsize(&going, 1_200);
+                    let v = paylock::claim_vsize(&with_claim_witness(&t, &going), 1_200);
                     Some(paylock::top_tier_fee(
-                        t.atoms,
+                        value,
                         v,
                         paylock::BLOCK_VSIZE,
                         paylock::TOP_TIER_BLOCKS,
@@ -246,14 +448,59 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
                 Some("none") => None,
                 Some(n) => Some(n.parse().map_err(|_| Error("--top-fee".into()))?),
             };
-            if let Some(top) = top.filter(|f| *f > fee) {
-                claims.push(paylock::sign_claim(&t, lock, to, top, genesis, &sk)?);
+            if let Some(top) = top.filter(|f| *f > fees[0]) {
+                paylock::lock_spend(
+                    &t,
+                    lock,
+                    to.clone(),
+                    &plan_with(top),
+                    paylock::CLAIM_SEQUENCE,
+                )
+                .map_err(|e| {
+                    Error(format!(
+                        "the top tier's fee is {top} atoms, and its source cannot pay it ({e}): \
+                             use a larger fee coin, or name the tier with --top-fee"
+                    ))
+                })?;
+                fees.push(top);
             }
-            Ok(json!({
-                "claims": claims.iter().map(tx_hex).collect::<Vec<_>>(),
-                "txids": claims.iter().map(|c| c.txid().to_string()).collect::<Vec<_>>(),
-                "fees": claims.iter().map(|c| c.output[1].value.explicit()).collect::<Vec<_>>(),
-            }))
+            if matches!(source, FeeSource::Coin { .. }) {
+                let templates = fees
+                    .iter()
+                    .map(|f| {
+                        paylock::lock_spend(
+                            &t,
+                            lock,
+                            to.clone(),
+                            &plan_with(*f),
+                            paylock::CLAIM_SEQUENCE,
+                        )
+                        .map(|s| tx_hex(&s.tx))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(json!({
+                    "templates": templates,
+                    "fees": fees,
+                    "fee_asset": fee_asset.to_string(),
+                    "sign_input": 1,
+                    "next": "sign input 1 of each template with the coin's wallet, then run sign-claim again with --wallet-signed",
+                }));
+            }
+            let claims = fees
+                .iter()
+                .map(|f| {
+                    paylock::sign_claim_with(
+                        &t,
+                        lock,
+                        to.clone(),
+                        &plan_with(*f),
+                        genesis,
+                        &sk,
+                        None,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(claims_json(&claims))
         }
         "complete" => {
             let t = terms_of(a)?;
@@ -323,13 +570,45 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
                     )));
                 }
             }
-            let tx = paylock::sign_refund(
+            let source = fee_source(a, &seq, &t, &lock)?;
+            let plan = FeePlan {
+                source: source.clone(),
+                fee: a_fee(a)?,
+                change: a.get("change").map(|_| script(a, "change")).transpose()?,
+            };
+            let fee_asset = plan.asset(&t)?;
+            if !seq.fee_asset_accepted(&fee_asset)? {
+                return Err(Error(format!(
+                    "block producers do not accept a fee in asset {fee_asset}: a refund paying it would never be mined. \
+                     Pay the fee from the lock's fee pot (--fee-pot) or a coin of your own in an accepted asset (--fee-coin)"
+                )));
+            }
+            let wallet_signed: Option<Transaction> = match a.get("wallet-signed") {
+                Some(h) => Some(
+                    deserialize(&hex_decode(h)?)
+                        .map_err(|e| Error(format!("--wallet-signed: {e}")))?,
+                ),
+                None => None,
+            };
+            if matches!(source, FeeSource::Coin { .. }) && wallet_signed.is_none() {
+                let s = paylock::lock_spend(
+                    &t,
+                    lock,
+                    script(a, "to")?,
+                    &plan,
+                    paylock::CLAIM_SEQUENCE,
+                )?;
+                return Ok(json!({"template": tx_hex(&s.tx), "sign_input": 1,
+                    "next": "sign input 1 with the coin's wallet, then run sign-refund again with --wallet-signed"}));
+            }
+            let tx = paylock::sign_refund_with(
                 &t,
                 lock,
                 script(a, "to")?,
-                num(a, "fee")?,
+                &plan,
                 seq.genesis()?,
                 &key_of(a)?,
+                wallet_signed.as_ref(),
             )?;
             let sent = if a.contains_key("send") {
                 Some(seq.send(&tx).map(|t| t.to_string()))
@@ -347,12 +626,40 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
                 .get("interval")
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(2.0);
+            let token = match a.get("token-file") {
+                Some(p) => {
+                    let t = std::fs::read_to_string(p)
+                        .map_err(|e| Error(format!("{p}: {e}")))?
+                        .trim()
+                        .to_string();
+                    if t.len() < 16 {
+                        return Err(Error("the token must be at least 16 characters".into()));
+                    }
+                    Some(t)
+                }
+                None => None,
+            };
+            let mut limits = service::Limits::default();
+            if let Some(n) = a.get("max-jobs") {
+                limits.max_jobs = n.parse().map_err(|_| Error("--max-jobs".into()))?;
+            }
+            // A slow node is given up on after 15 s, so one job's call cannot hold the round.
+            let t = Duration::from_secs(15);
             service::serve(
-                seq()?,
-                btc()?,
+                SeqChain {
+                    rpc: rpc_with("SEQ", t)?,
+                },
+                BtcChain {
+                    rpc: rpc_with("BTC", t)?,
+                },
+                BtcChain {
+                    rpc: rpc_with("BTC", t)?,
+                },
                 std::path::Path::new(arg(a, "data")?),
                 arg(a, "listen")?,
                 Duration::from_secs_f64(interval),
+                limits,
+                service::Access { token },
             )?;
             Ok(json!({}))
         }
