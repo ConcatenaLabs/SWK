@@ -1838,7 +1838,10 @@ class PayLockRegtest(LostSwapTest):
         # The price to the seller beside 3,150 dust outputs: standard, so anyone relays it.
         coin = [u for u in w.listunspent(1) if u["amount"] >= Decimal("2")][0]
         outs = [{s["recv"]: Decimal(s["price"]) / COIN}]
-        outs += [{w.getnewaddress("", "bech32"): Decimal("0.00001")} for _ in range(3150)]
+        # The dust goes to the miner's wallet: left in the buyer's, it would make the next
+        # payments heavier than the fee tiers are priced for.
+        m = self.btc("miner")
+        outs += [{m.getnewaddress("", "bech32"): Decimal("0.00001")} for _ in range(3150)]
         spent = Decimal(s["price"]) / COIN + Decimal("0.00001") * 3150 + Decimal("0.0012")
         outs.append({w.getnewaddress("", "bech32"): coin["amount"] - spent})
         raw = w.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}], outs)
@@ -1943,7 +1946,7 @@ class PayLockRegtest(LostSwapTest):
         addrs = [w.getnewaddress("", "bech32") for _ in range(8)]
         fund = w.sendmany("", {a: Decimal("0.1") for a in addrs})
         self.btc_mine(1)
-        coins = [u for u in w.listunspent(1) if u["txid"] == fund]
+        coins = [u for u in w.listunspent(1) if u["txid"] == fund and u["amount"] == Decimal("0.1")]
         assert len(coins) == 8, len(coins)
         total = sum(Decimal(str(u["amount"])) for u in coins)
         raw = w.createrawtransaction([{"txid": u["txid"], "vout": u["vout"]} for u in coins],
