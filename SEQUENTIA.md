@@ -488,8 +488,10 @@ Changes by file:
     refund pay their fee from the locked asset, from a fee pot (a second
     output of the lock under the same leaves, named in the terms, which the
     claim spends with the same proof), or from a coin of the signer's own that
-    its wallet signs (`FeeSource`, `FeePlan`, `lock_spend`). `lwk_paylock`
-    reads the chains over it.
+    its wallet signs (`FeeSource`, `FeePlan`, `lock_spend`). Heights above
+    2,147,483,647 are refused, a lock whose deadline is more than 1,008
+    Bitcoin blocks ahead is not payable, and the cancel pays at least the BIP125
+    floor (`cancel_fee_floor`). `lwk_paylock` reads the chains over it.
   - `xchain.rs`: cross-chain (BTC to Sequentia-asset) swap glue for the taker:
     HTLC key derivation (canonical absolute paths outside the receive/change
     branches, plus a legacy relative mode recorded in persisted state), the
@@ -527,9 +529,13 @@ claim completed with a proof linked to the lowest anchor the chain recorded at
 or above the payment, the activation read from the node's `getdeploymentinfo`
 (`btc_payment` and `lost_blocks`; an entry the node does not report is not
 active), the claim's fee routes judged by the node's `getfeeassetinfo`, the
-completion service (bounded: cancels on a thread of their own, jobs worked
+completion service (bounded: cancels on a thread of their own with a time
+budget per pass that drops stale jobs before they cost a send, jobs worked
 nearest deadline first within time and block budgets, a payment search that
-keeps its place, ended jobs archived, capped intake, a token beyond loopback),
+keeps its place, a cancelled job only on a confirmed spend of the payment's
+coins, finished jobs watched until buried and then archived, one job per claim
+and payment, reads without signed transactions, capped intake, a token beyond
+loopback),
 and the `paylock` command for every step. Its `README.md` says how to run it
 and its regtest proof.
 

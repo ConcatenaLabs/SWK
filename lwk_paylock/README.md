@@ -44,7 +44,8 @@ transaction index (`-txindex=1`).
    offer.
 3. **The buyer's check.** `paylock check-lock` runs the buyer's own checks (the
    lock's script leaf for leaf, the asset and amount in the clear, `F` not above
-   the lock's anchor, `D` far enough ahead), the node's `checklock`, and that
+   the lock's anchor, `D` far enough ahead and at most 1,008 blocks above
+   Bitcoin's tip, the lock spanning at most 1,008 blocks), the node's `checklock`, and that
    the claim can pay its fee in an asset the node accepts (`getfeeassetinfo`):
    the locked asset, the fee pot, or a coin of the buyer's own named with
    `--fee-coin`. The buyer pays only when it answers `payable: true`.
@@ -76,7 +77,8 @@ transaction index (`-txindex=1`).
 ```sh
 PAYLOCK_SEQ_URL=http://127.0.0.1:<port> PAYLOCK_SEQ_COOKIE=<datadir>/<chain>/.cookie \
 PAYLOCK_BTC_URL=http://127.0.0.1:<port> PAYLOCK_BTC_COOKIE=<datadir>/.cookie \
-  paylock serve --data <dir> --listen 127.0.0.1:<port> [--token-file <file>] [--max-jobs 1000]
+  paylock serve --data <dir> --listen 127.0.0.1:<port> [--token-file <file>] [--max-jobs 1000] \
+    [--watch-depth 6] [--watch-every 30]
 ```
 
 Beyond loopback it refuses to start without `--token-file`; every request then
@@ -92,30 +94,51 @@ It holds no key. A buyer's wallet posts one job:
 
 to `POST /jobs`, and reads its state at `GET /jobs/<id>` (`waiting`, `pooled`,
 `mined`, `final`, `cancelled`, `never`, `refunded`). The claims may be tiers in
-two fee assets. On every round the service reads both chains as they are now:
+two fee assets. The cancel and the signed payment must be Bitcoin transactions:
+the signed payment's id must be `payment`, and the cancel must spend exactly the
+payment's coins.
+
+A job is named by its first claim and its payment. Posting the same job again
+returns its id; a post that only adds what the held job lacks (the cancel, the
+signed payment) is merged into it; any other difference from the job held for
+that claim and payment is refused with `409`. A read returns where a job stands
+and never its signed claims, cancel, payment or terms.
+
+On every round the service reads both chains as they are now:
 
 - it completes the claim and submits it once the payment is anchored, and proves
   it again after every reorganization that disconnects it;
 - it raises the claim to the top tier as soon as a block made after the claim
-  was pooled leaves it out;
+  was first seen pooled, by whoever pooled it, leaves it out;
 - it submits the tiers of the first fee asset the node still accepts whose fee
   coin is unspent;
 - it sends the buyer's payment again if a reorganization evicted it before `D`;
 - it broadcasts the cancel if the payment is still unconfirmed two blocks before
-  `D`;
-- it calls the swap done only when the claim's block is final.
+  `D`, and sends it again until a spend of the payment's coins other than the
+  payment is confirmed: only then is the job `cancelled`;
+- it shows the swap done (`final`) as soon as the claim's block is final, and
+  goes on watching in the background (`watching: true`) until the Bitcoin block
+  that decided it is `--watch-depth` blocks deep: a Bitcoin reorganization
+  before then is followed by proving the claim again. No one waits for that
+  depth; it only sets how long the service keeps a finished swap in view.
 
-Its work is bounded. Cancels have a thread of their own that reads only
-Bitcoin's tip, so no slow or stale job delays a cancel. The rest runs jobs
-nearest deadline first, each within a time and block budget and the round
-within its own; the search for a payment keeps its place between rounds and
-reads each Bitcoin block once, from `F` to six blocks past `D`. A failing job
-backs off, up to a minute. Intake caps a request at 512 KiB, a job at eight
-claims and a lock at 1,008 Bitcoin blocks from `F` to `D`.
+Its work is bounded. Cancels have a thread of their own, with clients of their
+own that give up on a call after 3 seconds. Each pass takes at most 2 seconds:
+cancels never tried go first, nearest deadline first, then those tried before,
+the longest ago first, so what one pass does not reach the next one does. A
+cancel whose lock the node does not know (or whose lock does not pay the terms'
+script), or whose deadline is more than 144 blocks past, is dropped before it
+costs a send. The rest runs live jobs nearest deadline first, each within a time
+and block budget and the round within its own, and watched jobs after them; the
+search for a payment keeps its place between rounds and reads each Bitcoin block
+once, from `F` to six blocks past `D` (to Bitcoin's tip while a broadcast cancel
+is unconfirmed). A failing job backs off, up to a minute. Intake caps a request
+at 512 KiB, a job at eight claims and a lock at 1,008 Bitcoin blocks from `F` to
+`D`.
 
 Jobs are one JSON file each under `--data`, so a restart carries on. A job that
-has ended (final, cancelled, never payable, or refunded) moves to
-`--data/archive/` and is still answered at `GET /jobs/<id>`.
+has ended and is buried moves to `--data/archive/`, where it is still answered at
+`GET /jobs/<id>`, and is removed after 30 days.
 
 ## The regtest proof
 

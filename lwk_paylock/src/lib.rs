@@ -407,6 +407,9 @@ pub struct PaymentScan {
     pub scanned: Option<(u32, String)>,
     /// The payment's block, once found.
     pub found: Option<Found>,
+    /// The buyer's cancel's block, once found: a spend of the payment's coins other than
+    /// the payment, confirmed.
+    pub cancel: Option<Found>,
 }
 
 /// How many blocks above `D` a search reads, to tell a late payment from none.
@@ -439,6 +442,22 @@ impl BtcChain {
         max_blocks: u32,
         until: Instant,
     ) -> Result<bool, Error> {
+        self.scan_for(txid, None, terms, scan, max_blocks, until)
+    }
+
+    /// [`BtcChain::scan_payment`], looking for the buyer's cancel `cancel` as well. While
+    /// the cancel is named and neither it nor the payment is found, the search reads on
+    /// to Bitcoin's tip, a block at a time as they come, since only a confirmed cancel
+    /// settles that the payment can no longer be mined.
+    pub fn scan_for(
+        &self,
+        txid: &str,
+        cancel: Option<&str>,
+        terms: &PayLockTerms,
+        scan: &mut PaymentScan,
+        max_blocks: u32,
+        until: Instant,
+    ) -> Result<bool, Error> {
         let tip = self.tip()?;
         if let Some(f) = &scan.found {
             if f.height <= tip && self.block_hash(f.height)? == f.block {
@@ -447,13 +466,23 @@ impl BtcChain {
             scan.found = None;
             scan.scanned = None;
         }
-        if let Some((h, hash)) = &scan.scanned {
-            if *h > tip || self.block_hash(*h)? != *hash {
+        if let Some(c) = &scan.cancel {
+            if c.height > tip || self.block_hash(c.height)? != c.block {
+                scan.cancel = None;
                 scan.scanned = None;
             }
         }
+        if let Some((h, hash)) = &scan.scanned {
+            if *h > tip || self.block_hash(*h)? != *hash {
+                scan.scanned = None;
+                scan.cancel = None;
+            }
+        }
         let first = terms.floor.max(1);
-        let last = tip.min(terms.deadline.saturating_add(LATE_SCAN));
+        let mut last = tip.min(terms.deadline.saturating_add(LATE_SCAN));
+        if cancel.is_some() && scan.cancel.is_none() {
+            last = tip;
+        }
         let mut h = scan.scanned.as_ref().map(|(h, _)| h + 1).unwrap_or(first);
         let mut read = 0;
         while h <= last {
@@ -463,18 +492,23 @@ impl BtcChain {
             let hash = self.block_hash(h)?;
             let b = self.rpc.call("getblock", json!([hash, 1]))?;
             read += 1;
-            let has = b
-                .get("tx")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().any(|t| t.as_str() == Some(txid)))
-                .unwrap_or(false);
+            let ids = b.get("tx").and_then(Value::as_array);
+            let has = |t: &str| ids.map(|a| a.iter().any(|x| x.as_str() == Some(t))).unwrap_or(false);
             scan.scanned = Some((h, hash.clone()));
-            if has {
+            if has(txid) {
                 scan.found = Some(Found {
                     height: h,
                     block: hash,
                 });
                 return Ok(true);
+            }
+            if let Some(c) = cancel {
+                if scan.cancel.is_none() && has(c) {
+                    scan.cancel = Some(Found {
+                        height: h,
+                        block: hash,
+                    });
+                }
             }
             h += 1;
         }
@@ -520,6 +554,13 @@ impl BtcChain {
             }
         }
         Ok(None)
+    }
+
+    /// Whether an output is unspent in Bitcoin's best chain, whatever the mempool holds.
+    /// `false` also for an output that does not exist.
+    pub fn unspent_in_chain(&self, txid: &str, vout: u32) -> Result<bool, Error> {
+        let v = self.rpc.call("gettxout", json!([txid, vout, false]))?;
+        Ok(!v.is_null())
     }
 
     /// Whether the daemon's mempool holds the transaction (unconfirmed).
@@ -927,6 +968,16 @@ pub fn activation_from(v: &Value) -> Activation {
     }
 }
 
+/// The node's `checklock` verdict as reasons a lock is not payable: its own reasons, and
+/// one more when it answers not payable without saying why. Its `payable` decides, not
+/// only the reasons it gives.
+pub fn checklock_reasons(payable: bool, reasons: Vec<String>) -> Vec<String> {
+    if !payable && reasons.is_empty() {
+        return vec!["the node's checklock does not call the lock payable".into()];
+    }
+    reasons
+}
+
 /// Parses `txid:vout`.
 pub fn outpoint(s: &str) -> Result<OutPoint, Error> {
     let (t, v) = s
@@ -960,6 +1011,14 @@ mod tests {
             "btc_payment": {"active": false}, "lost_blocks": {"active": true}}}))
         .payment_lock());
         assert!(!activation_from(&json!({})).payment_lock());
+    }
+
+    #[test]
+    fn checklock_payable_decides() {
+        assert!(checklock_reasons(true, vec![]).is_empty());
+        assert_eq!(checklock_reasons(false, vec![]).len(), 1);
+        let r = vec!["the lock's block is not final yet".to_string()];
+        assert_eq!(checklock_reasons(false, r.clone()), r);
     }
 
     #[test]

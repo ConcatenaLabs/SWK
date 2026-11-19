@@ -16,10 +16,11 @@
 //! paylock sign-claim --terms T --lock TXID:VOUT --key-file F --to SPK --fee N [--top-fee N|auto|none] [--value N]
 //!                    [--fee-pot | --fee-coin TXID:VOUT [--change SPK] [--wallet-signed HEX,...]]
 //! paylock complete   --terms T --lock TXID:VOUT --claim HEX --payment TXID [--send]
-//! paylock cancel     --payment-hex HEX --values V,V --to SPK --fee SAT
+//! paylock cancel     --payment-hex HEX --values V,V --to SPK [--fee SAT]
 //! paylock sign-refund --terms T --lock TXID:VOUT --key-file F --to SPK --fee N [--send] [--despite-payment]
 //!                    [--fee-pot | --fee-coin TXID:VOUT [--change SPK] [--wallet-signed HEX]]
 //! paylock serve      --data DIR --listen HOST:PORT [--interval SECS] [--token-file F] [--max-jobs N]
+//!                    [--watch-depth 6] [--watch-every 30]
 //! ```
 //!
 //! `T` is a terms file, or the terms' JSON itself.
@@ -38,8 +39,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use lwk_paylock::{
-    activation, complete_claim, fee_routes, outpoint, service, BtcChain, Completion, Error, Rpc,
-    SeqChain, TxStatus,
+    activation, checklock_reasons, complete_claim, fee_routes, outpoint, service, BtcChain,
+    Completion, Error, Rpc, SeqChain, TxStatus,
 };
 use lwk_wollet::bitcoin;
 use lwk_wollet::btc::paylock::{
@@ -337,8 +338,8 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
                         btc_tip: btc.tip()?,
                     };
                     reasons.extend(check_lock(&t, &facts));
-                    let (_, node) = seq.checklock(&lock.txid)?;
-                    reasons.extend(node);
+                    let (node_payable, node) = seq.checklock(&lock.txid)?;
+                    reasons.extend(checklock_reasons(node_payable, node));
                     // The claim must be able to pay its fee in an asset producers accept,
                     // or it is never mined and the seller refunds (section 8.1).
                     let coins = coins_of(a)?;
@@ -540,15 +541,21 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
                         .map_err(|_| Error("--values".into()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let tx = paylock::cancel_template(
-                &hex_decode(arg(a, "payment-hex")?)?,
-                &values,
-                bitcoin::ScriptBuf::from(hex_decode(arg(a, "to")?)?),
-                num(a, "fee")?,
-            )?;
-            Ok(
-                json!({"hex": hex_encode(&bitcoin::consensus::encode::serialize(&tx)), "txid": tx.compute_txid().to_string()}),
-            )
+            let pay = hex_decode(arg(a, "payment-hex")?)?;
+            let to = bitcoin::ScriptBuf::from(hex_decode(arg(a, "to")?)?);
+            // The least fee that still replaces the payment (BIP125), unless more is asked.
+            let floor = paylock::cancel_fee_floor(&pay, &values, to.clone())?;
+            let fee = match a.get("fee") {
+                Some(_) => num(a, "fee")?,
+                None => floor,
+            };
+            let tx = paylock::cancel_template(&pay, &values, to, fee)?;
+            Ok(json!({
+                "hex": hex_encode(&bitcoin::consensus::encode::serialize(&tx)),
+                "txid": tx.compute_txid().to_string(),
+                "fee": fee,
+                "fee_floor": floor,
+            }))
         }
         "sign-refund" => {
             let t = terms_of(a)?;
@@ -643,17 +650,31 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
             if let Some(n) = a.get("max-jobs") {
                 limits.max_jobs = n.parse().map_err(|_| Error("--max-jobs".into()))?;
             }
-            // A slow node is given up on after 15 s, so one job's call cannot hold the round.
-            let t = Duration::from_secs(15);
+            if let Some(n) = a.get("watch-depth") {
+                limits.watch_depth = n.parse().map_err(|_| Error("--watch-depth".into()))?;
+            }
+            if let Some(n) = a.get("watch-every") {
+                limits.watch_every = Duration::from_secs_f64(
+                    n.parse().map_err(|_| Error("--watch-every".into()))?,
+                );
+            }
+            // A slow node is given up on after 15 s, so one job's call cannot hold the
+            // round; the cancel thread gives up after 3 s, so no send holds a cancel back.
+            let (t, tc) = (Duration::from_secs(15), Duration::from_secs(3));
             service::serve(
-                SeqChain {
-                    rpc: rpc_with("SEQ", t)?,
-                },
-                BtcChain {
-                    rpc: rpc_with("BTC", t)?,
-                },
-                BtcChain {
-                    rpc: rpc_with("BTC", t)?,
+                service::Clients {
+                    seq: SeqChain {
+                        rpc: rpc_with("SEQ", t)?,
+                    },
+                    btc: BtcChain {
+                        rpc: rpc_with("BTC", t)?,
+                    },
+                    seq_cancels: SeqChain {
+                        rpc: rpc_with("SEQ", tc)?,
+                    },
+                    btc_cancels: BtcChain {
+                        rpc: rpc_with("BTC", tc)?,
+                    },
                 },
                 std::path::Path::new(arg(a, "data")?),
                 arg(a, "listen")?,

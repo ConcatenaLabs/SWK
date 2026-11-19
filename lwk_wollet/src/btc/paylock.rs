@@ -73,6 +73,16 @@ pub const CLAIM_SEQUENCE: u32 = 0xffff_fffd;
 pub const DEFAULT_DEADLINE_MARGIN: u32 = 6;
 /// The buyer cancels a still-unconfirmed payment once Bitcoin's tip is this many blocks below `D`.
 pub const CANCEL_BEFORE_DEADLINE: u32 = 2;
+/// The highest height a script number holds: a height in the leaves above it is a
+/// five-byte number, which the comparison opcodes refuse, so no claim or refund opens.
+pub const MAX_HEIGHT: u32 = 0x7fff_ffff;
+/// How far above Bitcoin's tip a deadline may be, and how many Bitcoin blocks a lock may
+/// span from its floor to its deadline: a week. A buyer calls nothing payable beyond it,
+/// and a completion service carries nothing beyond it.
+pub const MAX_DEADLINE_AHEAD: u32 = 1008;
+/// The fee rate a replacement pays for its own size above the fee it replaces (Bitcoin
+/// Core's incremental relay fee, BIP125 rule 4), in satoshis per virtual byte.
+pub const INCREMENTAL_RELAY_SAT_VB: u64 = 1;
 /// The chain's block limit in virtual bytes, which the top fee tier is sized against.
 pub const BLOCK_VSIZE: u64 = 89_999;
 /// Sequentia blocks the top tier must hold the claim for (section 8.5: the 59 after the
@@ -217,6 +227,17 @@ impl PayLockTerms {
             return Err(gen(
                 "the price must be between 1 satoshi and 21 million bitcoin",
             ));
+        }
+        for (name, h) in [
+            ("floor F", self.floor),
+            ("deadline D", self.deadline),
+            ("refund height R", self.refund_at),
+        ] {
+            if h > MAX_HEIGHT {
+                return Err(gen(format!(
+                    "the {name} ({h}) is above {MAX_HEIGHT}, the highest height a script compares"
+                )));
+            }
         }
         if self.deadline <= self.floor {
             return Err(gen("the deadline D must be above the floor F"));
@@ -481,6 +502,18 @@ pub fn check_lock(terms: &PayLockTerms, facts: &LockFacts<'_>) -> Vec<String> {
         why.push(format!(
             "the lock's floor F ({}) is above the anchor of its own block ({})",
             terms.floor, facts.lock_anchor
+        ));
+    }
+    if terms.deadline > facts.btc_tip.saturating_add(MAX_DEADLINE_AHEAD) {
+        why.push(format!(
+            "the deadline (Bitcoin block {}) is more than {MAX_DEADLINE_AHEAD} blocks above Bitcoin's tip {}",
+            terms.deadline, facts.btc_tip
+        ));
+    }
+    if terms.deadline - terms.floor > MAX_DEADLINE_AHEAD {
+        why.push(format!(
+            "the lock spans {} Bitcoin blocks from its floor to its deadline, more than {MAX_DEADLINE_AHEAD}",
+            terms.deadline - terms.floor
         ));
     }
     if facts.btc_tip.saturating_add(CANCEL_BEFORE_DEADLINE) >= terms.deadline {
@@ -1233,24 +1266,35 @@ pub fn cancel_template(
     fee_sat: u64,
 ) -> Result<bitcoin::Transaction, Error> {
     let pay: bitcoin::Transaction = btc_deserialize(payment_raw).map_err(gen)?;
+    let pay_fee = payment_fee(&pay, prevout_values)?;
+    let floor = cancel_fee_floor(payment_raw, prevout_values, to.clone())?;
+    if fee_sat < floor {
+        return Err(gen(format!(
+            "the cancel must pay at least {floor} sat: the payment's own fee ({pay_fee} sat) and \
+             {INCREMENTAL_RELAY_SAT_VB} sat per virtual byte of its own size, or Bitcoin nodes do not let it replace the payment"
+        )));
+    }
+    let total: u64 = prevout_values.iter().sum();
+    let value = total
+        .checked_sub(fee_sat)
+        .filter(|v| *v > 330)
+        .ok_or_else(|| gen("the cancel's fee leaves nothing to return"))?;
+    Ok(cancel_tx(&pay, value, to))
+}
+
+fn payment_fee(pay: &bitcoin::Transaction, prevout_values: &[u64]) -> Result<u64, Error> {
     if prevout_values.len() != pay.input.len() {
         return Err(gen("one amount per payment input is needed"));
     }
     let total: u64 = prevout_values.iter().sum();
     let pay_out: u64 = pay.output.iter().map(|o| o.value.to_sat()).sum();
-    let pay_fee = total
+    total
         .checked_sub(pay_out)
-        .ok_or_else(|| gen("the payment spends less than it pays"))?;
-    if fee_sat <= pay_fee {
-        return Err(gen(format!(
-            "the cancel must pay more than the payment's own fee ({pay_fee} sat)"
-        )));
-    }
-    let value = total
-        .checked_sub(fee_sat)
-        .filter(|v| *v > 330)
-        .ok_or_else(|| gen("the cancel's fee leaves nothing to return"))?;
-    Ok(bitcoin::Transaction {
+        .ok_or_else(|| gen("the payment spends less than it pays"))
+}
+
+fn cancel_tx(pay: &bitcoin::Transaction, value: u64, to: bitcoin::ScriptBuf) -> bitcoin::Transaction {
+    bitcoin::Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: bitcoin::absolute::LockTime::ZERO,
         input: pay
@@ -1267,7 +1311,38 @@ pub fn cancel_template(
             value: bitcoin::Amount::from_sat(value),
             script_pubkey: to,
         }],
-    })
+    }
+}
+
+/// The least fee a cancel of this payment pays and still replaces it under BIP125: the
+/// payment's own fee, and the incremental relay fee for the cancel's own virtual size.
+/// The cancel spends the payment's own coins, so its signatures are sized from the
+/// payment's (an unsigned input is taken as a P2WPKH spend), with a byte to spare per
+/// input for a signature's varying length.
+pub fn cancel_fee_floor(
+    payment_raw: &[u8],
+    prevout_values: &[u64],
+    to: bitcoin::ScriptBuf,
+) -> Result<u64, Error> {
+    let pay: bitcoin::Transaction = btc_deserialize(payment_raw).map_err(gen)?;
+    let pay_fee = payment_fee(&pay, prevout_values)?;
+    let mut sized = cancel_tx(&pay, 0, to);
+    for (c, p) in sized.input.iter_mut().zip(&pay.input) {
+        c.script_sig = p.script_sig.clone();
+        c.witness = if p.witness.is_empty() && p.script_sig.is_empty() {
+            bitcoin::Witness::from_slice(&[vec![0u8; 72], vec![0u8; 33]])
+        } else {
+            p.witness.clone()
+        };
+    }
+    let vsize = sized.vsize() as u64 + sized.input.len() as u64;
+    let mut floor = pay_fee + INCREMENTAL_RELAY_SAT_VB * vsize;
+    // And a higher rate than the payment's, should the cancel be the larger of the two.
+    let pay_vsize = pay.vsize() as u64;
+    if pay_vsize > 0 && floor * pay_vsize <= pay_fee * vsize {
+        floor = (pay_fee * vsize).div_ceil(pay_vsize) + 1;
+    }
+    Ok(floor)
 }
 
 // ------------------------------------------------------------ the timeline
@@ -1625,6 +1700,111 @@ mod tests {
         );
         let over = FeePlan { fee: 9_001, ..plan };
         assert!(lock_spend(&t, lock, to, &over, CLAIM_SEQUENCE).is_err());
+    }
+
+    #[test]
+    fn heights_a_script_cannot_compare_are_refused() {
+        let t = terms();
+        for k in ["floor", "deadline", "refund_at"] {
+            let mut j = t.to_json();
+            j[k] = serde_json::json!(u64::from(MAX_HEIGHT) + 1);
+            if k != "floor" {
+                j["deadline"] = serde_json::json!(u64::from(MAX_HEIGHT) + 1);
+                j["refund_at"] = serde_json::json!(u64::from(MAX_HEIGHT) + 1);
+            }
+            let e = PayLockTerms::from_json(&j).unwrap_err().to_string();
+            assert!(e.contains("highest height"), "{k}: {e}");
+        }
+        // The review's terms: D = 2^31.
+        let mut bad = t.clone();
+        bad.deadline = 1 << 31;
+        bad.refund_at = 1 << 31;
+        assert!(bad.sane().is_err());
+        // The highest height that compares is allowed.
+        let mut top = t.clone();
+        top.deadline = MAX_HEIGHT;
+        top.refund_at = MAX_HEIGHT;
+        top.floor = MAX_HEIGHT - 6;
+        assert!(top.sane().is_ok());
+    }
+
+    #[test]
+    fn a_lock_whose_deadline_is_too_far_is_not_payable() {
+        let t = terms();
+        let spk = t.tree().unwrap().script_pubkey;
+        let lock_tx = Transaction {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            input: vec![],
+            output: vec![explicit_out(t.asset, t.atoms, spk)],
+        };
+        let facts = |tip| LockFacts {
+            lock_tx: &lock_tx,
+            vout: 0,
+            lock_anchor: 900_000,
+            btc_tip: tip,
+        };
+        assert!(check_lock(&t, &facts(900_000)).is_empty());
+        // D more than a week above Bitcoin's tip, or a lock spanning more than a week.
+        let mut far = t.clone();
+        far.deadline = 900_000 + MAX_DEADLINE_AHEAD + 1;
+        far.refund_at = far.deadline;
+        let far_tx = Transaction {
+            output: vec![explicit_out(far.asset, far.atoms, far.tree().unwrap().script_pubkey)],
+            ..lock_tx.clone()
+        };
+        let why = check_lock(
+            &far,
+            &LockFacts {
+                lock_tx: &far_tx,
+                ..facts(900_000)
+            },
+        );
+        assert!(why.iter().any(|w| w.contains("above Bitcoin's tip")), "{why:?}");
+        assert!(why.iter().any(|w| w.contains("spans")), "{why:?}");
+    }
+
+    #[test]
+    fn a_cancel_pays_what_replacing_the_payment_costs() {
+        // A payment of one P2WPKH-signed input, to the seller and back to the buyer.
+        let pay = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([4; 32]),
+                    vout: 1,
+                },
+                sequence: bitcoin::Sequence(0xffff_fffd),
+                witness: bitcoin::Witness::from_slice(&[vec![0x30; 72], vec![0x02; 33]]),
+                ..Default::default()
+            }],
+            output: vec![
+                bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(50_000_000),
+                    script_pubkey: bitcoin::ScriptBuf::from(vec![0x00; 34]),
+                },
+                bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(49_990_000),
+                    script_pubkey: bitcoin::ScriptBuf::from(vec![0x00; 22]),
+                },
+            ],
+        };
+        let raw = btc_serialize(&pay);
+        let values = [100_000_000u64];
+        let pay_fee = 10_000;
+        let to = bitcoin::ScriptBuf::from(vec![0x00; 22]);
+        let floor = cancel_fee_floor(&raw, &values, to.clone()).unwrap();
+        let cancel = cancel_template(&raw, &values, to.clone(), floor).unwrap();
+        // The floor: the payment's fee and 1 sat for each virtual byte of the signed cancel.
+        let mut signed = cancel.clone();
+        signed.input[0].witness = pay.input[0].witness.clone();
+        assert!(floor >= pay_fee + signed.vsize() as u64, "{floor}");
+        assert!(floor <= pay_fee + signed.vsize() as u64 + 2, "{floor}");
+        // The review's cancel, at the payment's fee and one satoshi: refused.
+        let e = cancel_template(&raw, &values, to.clone(), pay_fee + 1).unwrap_err();
+        assert!(e.to_string().contains("at least"), "{e}");
+        assert!(cancel_template(&raw, &values, to, floor - 1).is_err());
     }
 
     #[test]
