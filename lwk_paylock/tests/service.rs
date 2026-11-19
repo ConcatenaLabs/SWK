@@ -1024,13 +1024,24 @@ fn every_answer_of_the_daemon_is_judged() {
         judge_cancel(&Accept::Allowed { fee: 1_761 }),
         CancelCheck::Valid {
             fee: Some(1_761),
+            vouched: true,
             note: None
         }
     );
+    // Pooled under this very witness: vouched for. Mined: only its id is, not this copy.
     assert!(matches!(
         judge_cancel(&refused("txn-already-in-mempool")),
         CancelCheck::Valid {
             fee: None,
+            vouched: true,
+            note: Some(_)
+        }
+    ));
+    assert!(matches!(
+        judge_cancel(&refused("txn-already-known")),
+        CancelCheck::Valid {
+            fee: None,
+            vouched: false,
             note: Some(_)
         }
     ));
@@ -1442,4 +1453,577 @@ fn a_node_without_a_transaction_index_drops_no_cancel() {
     assert_eq!(n, 1);
     assert_eq!(*sent.lock().unwrap(), vec![cancel]);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A cancel with a P2WPKH-shaped witness, spending the coin named by `n`; and a copy of it
+/// with one byte of its signature changed: the same `txid`, another `wtxid`.
+fn witnessed_cancel(n: u32) -> (bitcoin::Transaction, bitcoin::Transaction) {
+    let mut good = btc_spend(n, 90_000);
+    good.input[0].witness = bitcoin::Witness::from_slice(&[vec![0x30; 71], vec![0x02; 33]]);
+    let mut bad = good.clone();
+    let mut sig = vec![0x30; 71];
+    sig[10] ^= 1;
+    bad.input[0].witness = bitcoin::Witness::from_slice(&[sig, vec![0x02; 33]]);
+    assert_eq!(good.compute_txid(), bad.compute_txid());
+    assert_ne!(good.compute_wtxid(), bad.compute_wtxid());
+    (good, bad)
+}
+
+/// KR109's high and Opus's `rv5_samewit`: the payment's parent is not broadcast, so the
+/// daemon can check no cancel. Another client posts first the buyer's own cancel with one
+/// byte of its signature changed (same txid), then the buyer posts its valid one. Each
+/// copy is held on its own; both are tried at D - 2 while neither can be checked; once
+/// the parent is broadcast the bad one is dropped, the buyer's is checked, kept and sent.
+/// In the other order too. Through the binary.
+#[test]
+fn a_bad_witness_copy_never_stands_in_for_the_buyers_cancel() {
+    const T: u32 = 1_000;
+    for bad_first in [true, false] {
+        let tip = Arc::new(AtomicU32::new(T));
+        let sent = Arc::new(Mutex::new(Vec::<String>::new()));
+        let parent_known = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let t = terms(T - 1, T + 5);
+        let (pay, _) = payment_for(&t, 61, 1_000);
+        let (good, bad) = witnessed_cancel(61);
+        let (good, bad) = (btc_hex(&good), btc_hex(&bad));
+        let (pk, g) = (parent_known.clone(), good.clone());
+        let btc_url = judged_daemon(
+            tip.clone(),
+            sent.clone(),
+            Box::new(move |hex| {
+                if !pk.load(Ordering::SeqCst) {
+                    json!({"allowed": false, "reject-reason": "missing-inputs"})
+                } else if hex == g {
+                    json!({"allowed": true, "fees": {"base": 0.0001}})
+                } else if hex.len() == g.len() {
+                    json!({"allowed": false, "reject-reason":
+                        "mandatory-script-verify-flag-failed (Signature must be zero for failed CHECK(MULTI)SIG operation)"})
+                } else {
+                    // The payment: its parent known, it is valid.
+                    json!({"allowed": true, "fees": {"base": 0.00001}})
+                }
+            }),
+            Arc::new(true.into()),
+        );
+        let locks: Locks = Default::default();
+        let ltx = lock_tx(&t);
+        let lock = OutPoint::new(ltx.txid(), 0);
+        locks.lock().unwrap().insert(lock.txid.to_string(), ltx);
+        let seq_url = fake_seq(locks, Arc::new(true.into()));
+        let dir = tmpdir(&format!("samewit-{bad_first}"));
+        let (_serve, port) = serve(&dir, &seq_url, &btc_url);
+        let pay_id = pay.compute_txid().to_string();
+        let post_cancel = |c: &str, client: &str| {
+            let mut r = request_for(&t, lock, &pay_id, Some(c.to_string()));
+            r["payment_hex"] = json!(btc_hex(&pay));
+            post_as(port, "/jobs", &r, Some(client))
+        };
+        let order = if bad_first {
+            [(&bad, "198.51.100.7"), (&good, "203.0.113.9")]
+        } else {
+            [(&good, "203.0.113.9"), (&bad, "198.51.100.7")]
+        };
+        let mut id = String::new();
+        for (c, who) in order {
+            let (code, r) = post_cancel(c, who);
+            assert_eq!(code, 200, "{r}");
+            id = r["id"].as_str().unwrap().to_string();
+        }
+        let (_, j) = get(port, &format!("/jobs/{id}"));
+        assert_eq!(
+            (j["cancels"].as_u64(), j["pending_cancels"].as_u64()),
+            (Some(0), Some(2)),
+            "each copy is held on its own: {j}"
+        );
+        // D - 2, the parent still unbroadcast: both are tried.
+        tip.store(T + 3, Ordering::SeqCst);
+        let w = Instant::now();
+        while !(sent.lock().unwrap().contains(&good) && sent.lock().unwrap().contains(&bad))
+            && w.elapsed() < Duration::from_secs(10)
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            sent.lock().unwrap().contains(&good),
+            "the buyer's cancel was not tried"
+        );
+        // The parent and payment are broadcast: the bad copy is dropped, the buyer's kept.
+        parent_known.store(true, Ordering::SeqCst);
+        let w = Instant::now();
+        loop {
+            let (_, j) = get(port, &format!("/jobs/{id}"));
+            if j["cancels"].as_u64() == Some(1) && j["pending_cancels"].as_u64() == Some(0) {
+                eprintln!(
+                    "bad first {bad_first}: the buyer's cancel checked and kept after {:?}: {}",
+                    w.elapsed(),
+                    j["note"]
+                );
+                break;
+            }
+            assert!(
+                w.elapsed() < Duration::from_secs(20),
+                "the buyer's cancel was never kept: {j}"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        // The one kept is the buyer's: stored, and sent again.
+        let stored: Value =
+            serde_json::from_slice(&std::fs::read(dir.join(format!("{id}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(stored["cancels"][0]["hex"], json!(good), "{stored}");
+        assert_eq!(stored["cancels"][0]["vouched"], json!(true));
+        let n = sent.lock().unwrap().len();
+        let w = Instant::now();
+        while sent.lock().unwrap()[n..].iter().all(|h| *h != good)
+            && w.elapsed() < Duration::from_secs(15)
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(sent.lock().unwrap()[n..].contains(&good));
+        // The bad copy posted now is refused outright: its signatures can be checked.
+        let (code, r) = post_cancel(&bad, "198.51.100.8");
+        assert_eq!(code, 400, "{r}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The same rules at the library's level: copies are told apart by `wtxid`; a vouched
+/// copy makes the unchecked copies of its transaction redundant and is never displaced.
+#[test]
+fn cancels_are_held_by_witness_id() {
+    let dir = tmpdir("wtxid");
+    let mut st = Store::open(&dir).unwrap();
+    let t = terms(1_000, 1_006);
+    let lock = OutPoint::new(Txid::from_byte_array([9; 32]), 0);
+    let (good, bad) = witnessed_cancel(71);
+    let base = Job::from_request(&request_for(&t, lock, &"ab".repeat(32), None))
+        .unwrap()
+        .to_json();
+    let with = |cancels: Value, pending: Value| {
+        let mut v = base.clone();
+        v["cancels"] = cancels;
+        v["pending"] = pending;
+        Job::from_stored(&v).unwrap()
+    };
+    let l = Limits::default();
+    let (id, a) = st
+        .add(
+            with(json!([]), json!([{"hex": btc_hex(&bad), "by": "x"}])),
+            &l,
+        )
+        .unwrap();
+    assert_eq!(a, Added::New);
+    // The buyer's copy, same txid: held beside the bad one.
+    let (_, a) = st
+        .add(
+            with(json!([]), json!([{"hex": btc_hex(&good), "by": "y"}])),
+            &l,
+        )
+        .unwrap();
+    assert_eq!(a, Added::Merged(vec!["pending_cancels"]));
+    assert_eq!(st.jobs[&id].pending.len(), 2);
+    // Checked and vouched for: it is kept, and the unchecked copies give way.
+    let (_, a) = st
+        .add(
+            with(
+                json!([{"hex": btc_hex(&good), "fee": 1_000, "vouched": true}]),
+                json!([]),
+            ),
+            &l,
+        )
+        .unwrap();
+    assert_eq!(a, Added::Merged(vec!["cancels"]));
+    assert_eq!(
+        (st.jobs[&id].cancels.len(), st.jobs[&id].pending.len()),
+        (1, 0)
+    );
+    // No copy of it, unchecked or unvouched, is taken beside it, nor displaces it.
+    for j in [
+        with(json!([]), json!([{"hex": btc_hex(&bad), "by": "z"}])),
+        with(
+            json!([{"hex": btc_hex(&bad), "fee": 5_000, "vouched": false}]),
+            json!([]),
+        ),
+    ] {
+        assert_eq!(st.add(j, &l).unwrap().1, Added::Same);
+    }
+    assert_eq!(st.jobs[&id].cancels[0].hex, btc_hex(&good));
+    // Stored and read back, the same.
+    let st = Store::open(&dir).unwrap();
+    assert_eq!(st.jobs[&id].cancels[0].hex, btc_hex(&good));
+    assert!(st.jobs[&id].cancels[0].vouched);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// KR109's medium and Opus's `rv5_wirepending`: a request never names what the service
+/// keeps of its own. Unchecked cancels (`pending`), a cancel's fee or standing, and the
+/// client are not read from it; a post carrying 17 made-up `pending` entries holds none.
+#[test]
+fn a_request_names_nothing_the_service_keeps_of_its_own() {
+    let t = terms(1_000, 1_006);
+    let lock = OutPoint::new(Txid::from_byte_array([9; 32]), 0);
+    let mut v = request_for(&t, lock, &"ab".repeat(32), None);
+    v["pending"] = json!((0..17)
+        .map(|i| json!({"hex": btc_hex(&btc_spend(500 + i, 1_000)), "by": "someone"}))
+        .collect::<Vec<_>>());
+    v["client"] = json!("10.1.1.1");
+    v["state"] = json!("final");
+    v["cancel_sent"] = json!(true);
+    let j = Job::from_request(&v).unwrap();
+    assert!(j.pending.is_empty());
+    assert_eq!(j.client, "");
+    assert_eq!(j.state, State::Waiting);
+    assert!(!j.cancel_sent);
+    // A cancel is a raw transaction: the stored form, with its fee, is refused.
+    let mut w = request_for(&t, lock, &"ab".repeat(32), None);
+    w["cancels"] = json!([{"hex": btc_hex(&btc_spend(42, 90_000)), "fee": 99_999}]);
+    let e = Job::from_request(&w).unwrap_err();
+    assert!(e.0.contains("raw Bitcoin transaction"), "{e}");
+    let mut w = request_for(&t, lock, &"ab".repeat(32), None);
+    w["cancels"] = json!([btc_hex(&btc_spend(42, 90_000))]);
+    let j = Job::from_request(&w).unwrap();
+    assert_eq!(
+        (j.cancels.len(), j.cancels[0].fee, j.cancels[0].vouched),
+        (1, 0, false)
+    );
+
+    // Through the binary: the post is a job with no unchecked cancel at all.
+    let btc_url = judged_daemon(
+        Arc::new(AtomicU32::new(1_000)),
+        Default::default(),
+        Box::new(|_| json!({"allowed": true, "fees": {"base": 0.0001}})),
+        Arc::new(true.into()),
+    );
+    let locks: Locks = Default::default();
+    let ltx = lock_tx(&t);
+    let real = OutPoint::new(ltx.txid(), 0);
+    locks.lock().unwrap().insert(real.txid.to_string(), ltx);
+    let seq_url = fake_seq(locks, Arc::new(true.into()));
+    let dir = tmpdir("wirepending");
+    let (_serve, port) = serve(&dir, &seq_url, &btc_url);
+    let mut v = request_for(&t, real, &"ab".repeat(32), None);
+    v["pending"] = json!((0..17)
+        .map(|i| json!({"hex": btc_hex(&btc_spend(500 + i, 1_000)), "by": "someone"}))
+        .collect::<Vec<_>>());
+    let (code, r) = post_as(port, "/jobs", &v, Some("198.51.100.20"));
+    assert_eq!(code, 200, "{r}");
+    let (_, j) = get(port, &format!("/jobs/{}", r["id"].as_str().unwrap()));
+    assert_eq!(
+        (j["cancels"].as_u64(), j["pending_cancels"].as_u64()),
+        (Some(0), Some(0)),
+        "{j}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Opus J2 (`rv4_onelock`): one real lock carries a payment and its replacements, a few
+/// jobs, and no more, whoever posts them; jobs on other locks never count, and a post
+/// that merges into a job held starts none. Through the binary.
+#[test]
+fn one_lock_carries_a_few_jobs() {
+    const T: u32 = 1_000;
+    let btc_url = judged_daemon(
+        Arc::new(AtomicU32::new(T)),
+        Default::default(),
+        Box::new(|_| json!({"allowed": true, "fees": {"base": 0.0001}})),
+        Arc::new(true.into()),
+    );
+    let t = terms(T - 1, T + 5);
+    let locks: Locks = Default::default();
+    for n in 6_000..6_002 {
+        locks
+            .lock()
+            .unwrap()
+            .insert(lock_named(n).txid.to_string(), lock_tx(&t));
+    }
+    let seq_url = fake_seq(locks, Arc::new(true.into()));
+    let dir = tmpdir("onelock");
+    let (_serve, port) = serve(&dir, &seq_url, &btc_url);
+    let one = lock_named(6_000);
+    for i in 0..service::JOBS_PER_LOCK {
+        let (code, r) = post_as(
+            port,
+            "/jobs",
+            &request_for(&t, one, &format!("{:064x}", 0xab00 + i), None),
+            Some("10.7.7.7"),
+        );
+        assert_eq!(code, 200, "{r}");
+    }
+    for who in ["10.7.7.7", "10.7.7.8"] {
+        let (code, r) = post_as(
+            port,
+            "/jobs",
+            &request_for(&t, one, &format!("{:064x}", 0xabff), None),
+            Some(who),
+        );
+        assert_eq!(code, 429, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("this lock"), "{r}");
+    }
+    // A buyer on another lock, from the same address: taken.
+    let (code, r) = post_as(
+        port,
+        "/jobs",
+        &request_for(&t, lock_named(6_001), &"cd".repeat(32), None),
+        Some("10.7.7.7"),
+    );
+    assert_eq!(code, 200, "{r}");
+    // A post into a job held on the full lock merges.
+    let more = request_tiers(&t, one, &format!("{:064x}", 0xab00), None, &[1_000, 9_000]);
+    let (code, r) = post_as(port, "/jobs", &more, Some("10.7.7.8"));
+    assert_eq!(code, 200, "{r}");
+    assert_eq!(r["merged"], json!(["claims"]), "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A connection from `source` (a loopback address of its own) to the service.
+fn connect_from(source: &str, port: u16) -> std::io::Result<TcpStream> {
+    let s = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
+    s.bind(
+        &format!("{source}:0")
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+            .into(),
+    )?;
+    s.connect_timeout(
+        &format!("127.0.0.1:{port}")
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+            .into(),
+        Duration::from_secs(2),
+    )?;
+    Ok(s.into())
+}
+
+/// A raw request to the service; its status line and JSON body, or what went wrong.
+fn try_request(port: u16, req: &str) -> Result<(u16, Value), String> {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    let mut out = String::new();
+    s.read_to_string(&mut out).map_err(|e| e.to_string())?;
+    let code = out
+        .get(9..12)
+        .and_then(|c| c.parse().ok())
+        .ok_or(out.clone())?;
+    let body = out.split("\r\n\r\n").nth(1).unwrap_or("null");
+    Ok((
+        code,
+        serde_json::from_str(body).map_err(|e| format!("{e}: {out}"))?,
+    ))
+}
+
+/// Opus L2 (`rv4_conns`): one client keeps 300 connections open that send nothing,
+/// opening a new one for each the service closes. A buyer's posts and reads beside it
+/// are answered at once, whether the flood comes from another address or from the
+/// buyer's own (its idle connections give way to the buyer's). Through the binary.
+#[test]
+fn idle_connections_take_no_one_elses_slot() {
+    let btc_url = judged_daemon(
+        Arc::new(AtomicU32::new(1_000)),
+        Default::default(),
+        Box::new(|_| json!({"allowed": true, "fees": {"base": 0.0001}})),
+        Arc::new(true.into()),
+    );
+    let t = terms(999, 1_005);
+    let locks: Locks = Default::default();
+    let ltx = lock_tx(&t);
+    let lock = OutPoint::new(ltx.txid(), 0);
+    locks.lock().unwrap().insert(lock.txid.to_string(), ltx);
+    let seq_url = fake_seq(locks, Arc::new(true.into()));
+    let dir = tmpdir("idleconns");
+    let (_serve, port) = serve(&dir, &seq_url, &btc_url);
+    for source in ["127.0.0.2", "127.0.0.1"] {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let opened = Arc::new(AtomicU32::new(0));
+        let (st, op, src) = (stop.clone(), opened.clone(), source.to_string());
+        let flood = std::thread::spawn(move || {
+            let mut held: Vec<TcpStream> = vec![];
+            while !st.load(Ordering::SeqCst) {
+                // Drop those the service closed, and open new ones in their place.
+                held.retain(|k| {
+                    k.set_nonblocking(true).unwrap();
+                    let mut b = [0u8; 1];
+                    matches!({ let mut r: &TcpStream = k; r.read(&mut b) }, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+                });
+                while held.len() < 300 && !st.load(Ordering::SeqCst) {
+                    match connect_from(&src, port) {
+                        Ok(k) => {
+                            held.push(k);
+                            op.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Err(_) => break,
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        std::thread::sleep(Duration::from_secs(3));
+        let mut posts = vec![];
+        let mut reads = vec![];
+        for i in 0..10 {
+            let mut r = request_for(&t, lock, &format!("{:064x}", 0xee00 + i % 3), None);
+            r["payment_hex"] = Value::Null;
+            let b = r.to_string();
+            let started = Instant::now();
+            let p = try_request(
+                port,
+                &format!(
+                    "POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}",
+                    b.len()
+                ),
+            );
+            posts.push((
+                p.as_ref().map(|x| x.0).map_err(|e| e.clone()),
+                started.elapsed(),
+            ));
+            let started = Instant::now();
+            let g = try_request(
+                port,
+                "GET /jobs HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            );
+            reads.push((
+                g.as_ref().map(|x| x.0).map_err(|e| e.clone()),
+                started.elapsed(),
+            ));
+            assert_eq!(
+                p.as_ref().map(|x| x.0),
+                Ok(200),
+                "the buyer's post {i}: {p:?}"
+            );
+            assert_eq!(g.as_ref().map(|x| x.0), Ok(200), "read {i}: {g:?}");
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        stop.store(true, Ordering::SeqCst);
+        flood.join().unwrap();
+        eprintln!(
+            "flood from {source} ({} connections opened): posts {posts:?}; reads {reads:?}",
+            opened.load(Ordering::SeqCst)
+        );
+        assert!(opened.load(Ordering::SeqCst) >= 300);
+        // The flood gone, the buyer is served at once.
+        let (code, r) = post(
+            port,
+            "/jobs",
+            &request_for(&t, lock, &format!("{:064x}", 0xee00), None),
+        );
+        assert_eq!(code, 200, "{r}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Kimi's low (KR109): a connection refused because every slot is taken reads its JSON
+/// answer, never a reset. Every slot is held by a body being sent slowly, each from an
+/// address of its own; the next connection sends its request and reads `503` with a JSON
+/// body, to its end. Through the binary.
+#[test]
+fn a_refused_connection_reads_its_answer() {
+    let btc_url = judged_daemon(
+        Arc::new(AtomicU32::new(1_000)),
+        Default::default(),
+        Box::new(|_| json!({"allowed": true, "fees": {"base": 0.0001}})),
+        Arc::new(true.into()),
+    );
+    let seq_url = fake_seq(Default::default(), Arc::new(true.into()));
+    let dir = tmpdir("refused");
+    let (_serve, port) = serve(&dir, &seq_url, &btc_url);
+    let mut slow = vec![];
+    let started = Instant::now();
+    for i in 0..256 {
+        // Each from an address of its own, so none waits on its own address's share.
+        let mut s = connect_from(&format!("127.0.1.{i}"), port).unwrap();
+        write!(
+            s,
+            "POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n{{"
+        )
+        .unwrap();
+        slow.push(s);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    // Every slow body holds its slot, unanswered.
+    let answered: Vec<(usize, String)> = slow
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            s.set_nonblocking(true).unwrap();
+            let mut b = [0u8; 200];
+            let mut r: &TcpStream = s;
+            let r = r.read(&mut b);
+            s.set_nonblocking(false).unwrap();
+            match r {
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+                Ok(n) => Some((i, String::from_utf8_lossy(&b[..n]).to_string())),
+                Err(e) => Some((i, e.to_string())),
+            }
+        })
+        .collect();
+    assert!(
+        answered.is_empty(),
+        "slow bodies answered before the deadline: {answered:?}"
+    );
+    let mut answers = vec![];
+    for _ in 0..3 {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _ = write!(
+            s,
+            "GET /jobs HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        );
+        let mut out = String::new();
+        let r = s.read_to_string(&mut out);
+        let reset = r.is_err();
+        answers.push(format!(
+            "{:?} {}",
+            r.err().map(|e| e.kind()),
+            out.lines().next().unwrap_or("")
+        ));
+        assert!(out.starts_with("HTTP/1.1 503"), "{answers:?}");
+        // Read to its end: closed, not reset.
+        assert!(!reset, "{answers:?}");
+        let body = out.split("\r\n\r\n").nth(1).unwrap_or_default();
+        let v: Value = serde_json::from_str(body).unwrap();
+        assert!(v["error"].as_str().unwrap().contains("busy"), "{v}");
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(9),
+        "the slow bodies timed out first"
+    );
+    eprintln!("past every slot: {answers:?}");
+    drop(slow);
+    // The slots come back.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(get(port, "/jobs").0, 200);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What a client hands over is kept no larger than the buyer's own: a claim's unsigned
+/// witness parts (which completing it writes) are cleared, so a copy padded there is the
+/// buyer's claim byte for byte; a cancel or a payment over the size cap is refused.
+#[test]
+fn intake_keeps_nothing_larger_than_the_buyers_own() {
+    let t = terms(1_000, 1_006);
+    let lock = OutPoint::new(Txid::from_byte_array([9; 32]), 0);
+    let plain = request_for(&t, lock, &"ab".repeat(32), None);
+    let mut padded = plain.clone();
+    let mut c: Transaction = lwk_wollet::elements::encode::deserialize(
+        &paylock::hex_decode(plain["claims"][0].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    c.input[0].witness.script_witness[0] = vec![0x77; 100_000];
+    c.input[0].witness.pegin_witness = vec![vec![0x66; 100_000]];
+    padded["claims"] = json!([hex_encode(&serialize(&c))]);
+    let a = Job::from_request(&plain).unwrap();
+    let b = Job::from_request(&padded).unwrap();
+    assert_eq!(serialize(&a.claims[0]), serialize(&b.claims[0]));
+    assert!(serialize(&b.claims[0]).len() < 2_000);
+    // A cancel over the cap.
+    let mut big = btc_spend(42, 90_000);
+    big.input[0].witness = bitcoin::Witness::from_slice(&[vec![0x30; service::MAX_TX_BYTES]]);
+    let e = Job::from_request(&request_for(
+        &t,
+        lock,
+        &"ab".repeat(32),
+        Some(btc_hex(&big)),
+    ))
+    .unwrap_err();
+    assert!(e.0.contains("at most"), "{e}");
 }

@@ -33,10 +33,10 @@ Cases (PAYLOCK_CASES):
            every node's list before the payment, and the other tier completes;
   raise    a block leaves the pooled claim out: the service raises it to the top tier;
   resend   the payment reaches only the service, which sends it to Bitcoin;
-  crowd    150 stale jobs from three clients, on a real lock whose terms reach back to
-           Bitcoin height 1, beside a live one: the live one's cancel still goes out at
-           D - 2, a client's fifty-first job is refused, and the stale ones end and are
-           archived;
+  crowd    150 stale jobs from three clients, on 38 real locks (four jobs each, the most
+           one lock carries) whose terms reach back to Bitcoin height 1, beside a live
+           one: the live one's cancel still goes out at D - 2, a client's fifty-first job
+           is refused, and the stale ones end and are archived;
   overflow terms with D = 2^31 are refused; a lock whose D is more than a week above
            Bitcoin's tip is never payable;
   noraise  the counterparty pools the going tier itself and a block leaves it out: the
@@ -68,7 +68,19 @@ Cases (PAYLOCK_CASES):
   afterbroadcast the buyer's first post comes after its cancel is broadcast, or mined: the
            cancel and the claims are kept, and the job ends cancelled;
   fakelock a job on a lock that does not exist, or on a real lock under terms it does not
-           pay, is refused; the buyer's job on the real lock is taken.
+           pay, is refused; the buyer's job on the real lock is taken;
+  samewit  the payment's parent is not broadcast; another client posts first the buyer's
+           own cancel with one byte of its signature changed (the same txid), then the
+           buyer posts its valid one: both are held, the bad one is dropped once the
+           parent and payment are broadcast, the buyer's goes out at D - 2, and the job
+           ends cancelled;
+  wirepending  a post naming 17 unchecked cancels in the stored field `pending` holds
+           none of them; a cancel with a fee of the poster's choosing is refused;
+  onelock  one real lock, made-up payment ids: the lock carries four jobs from any number
+           of addresses, and a real buyer, from the same address or its own, is taken;
+  idleconns    300 connections that send nothing, opened again as the service closes
+           them, from another address and then from the buyer's own: the buyer's posts and
+           reads are answered, and its cancel goes out at D - 2.
 
 Each negative is forced into a block: a block node 1 produced is rewritten to
 carry the transaction, certified again (`recertifyposblock`) and submitted, and
@@ -81,8 +93,10 @@ Run from anywhere:
 
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from decimal import Decimal
@@ -105,7 +119,7 @@ from test_framework.util import assert_equal, get_auth_cookie, p2p_port, rpc_por
 CASES = os.environ.get("PAYLOCK_CASES", "path,unpaid,late,gone,remined,anchor,wrongamount,wrongaddress,"
                        "unaccepted,feecoin,feepot,twoasset,raise,resend,crowd,overflow,noraise,preempt,"
                        "cancelstate,afterfinal,unconf,bumplate,bumpin,block,nopayment,unknownparent,afterbroadcast,"
-                       "fakelock").split(",")
+                       "fakelock,samewit,wirepending,onelock,idleconns").split(",")
 RESULTS = os.environ.get("PAYLOCK_RESULTS", "")
 BUYER = 1  # the buyer's node, which the completion service also reads
 COIN = Decimal(100_000_000)
@@ -917,9 +931,14 @@ class PayLockRegtest(LostSwapTest):
         # whose deadline is before the live job's, so that the work round reaches them first.
         # Three clients (behind a proxy) start fifty each, the most one client may.
         n_stale = int(os.environ.get("PAYLOCK_CROWD", "150"))
-        tmpl = self.new_swap("crowd", extra=["--floor", max(1, tip + 4 - 1000), "--deadline", tip + 4])
-        self.lock_and_confirm(tmpl)
-        self.buyer_sign(tmpl)
+        tmpl = self.new_swap("crowd", atoms=1_000_000, extra=["--floor", max(1, tip + 4 - 1000), "--deadline", tip + 4])
+        # One lock carries four live jobs: the stale jobs are spread over locks of these terms,
+        # outputs of one transaction, each with the buyer's claims.
+        locks = self.more_locks(tmpl, (n_stale + 3) // 4 + 1)
+        claims = {}
+        for lk in locks:
+            claims[lk] = self.pl("sign-claim", "--terms", tmpl["tfile"], "--lock", lk, "--key-file", tmpl["bkey"],
+                                 "--to", "51", "--fee", 5000)["claims"]
         # Every stale job's payment and cancel spend one coin of the buyer's: each is valid
         # alone (intake takes nothing else), and once one of them is pooled the rest are
         # refused, as a flood of real cancels would be.
@@ -935,20 +954,27 @@ class PayLockRegtest(LostSwapTest):
         stale = []
         t0 = time.time()
         for i in range(n_stale):
+            lk = locks[i // 4]
             pay = w.signrawtransactionwithwallet(w.createrawtransaction(x_in, [{back: Decimal(999_000 - i) / COIN}]))["hex"]
             can = w.signrawtransactionwithwallet(w.createrawtransaction(x_in, [{back: Decimal(995_000 - i) / COIN}]))["hex"]
-            r = self.http("POST", "/jobs", {"terms": tmpl["terms"], "lock": tmpl["lock"], "claims": tmpl["claims"],
+            r = self.http("POST", "/jobs", {"terms": tmpl["terms"], "lock": lk, "claims": claims[lk],
                                             "payment": w.decoderawtransaction(pay)["txid"], "payment_hex": pay,
                                             "cancel": can}, client="10.0.0.%d" % (i % 3))
             assert "id" in r, r
             stale.append(r["id"])
         assert all(self.http("GET", "/jobs/" + i)["cancels"] == 1 for i in stale)
-        r = self.http("POST", "/jobs", {"terms": tmpl["terms"], "lock": tmpl["lock"], "claims": tmpl["claims"],
+        # A fifth job on a full lock is refused for the lock; a fifty-first from a client, on
+        # a lock with room, for the client.
+        r5 = self.http("POST", "/jobs", {"terms": tmpl["terms"], "lock": locks[0], "claims": claims[locks[0]],
+                                         "payment": "%064x" % 0xc0de}, client="10.0.0.9")
+        assert "this lock carries" in r5.get("error", ""), r5
+        r = self.http("POST", "/jobs", {"terms": tmpl["terms"], "lock": locks[-1], "claims": claims[locks[-1]],
                                         "payment": "%064x" % 0xc0de}, client="10.0.0.1")
-        assert "fifty" in r.get("error", "") or "live jobs" in r.get("error", ""), r
-        self.record("crowd", "stale jobs", "%d handed over in %.1f s by three clients, each from F = %d to D = %d; "
-                    "a fifty-first from one of them: %s" % (n_stale, time.time() - t0, tmpl["terms"]["floor"],
-                                                            tmpl["terms"]["deadline"], r["error"]))
+        assert "this client has started" in r.get("error", ""), r
+        self.record("crowd", "stale jobs", "%d handed over in %.1f s by three clients on %d locks, each from F = %d to D = %d; "
+                    "a fifth on one lock: %s; a fifty-first from one client: %s" % (
+                        n_stale, time.time() - t0, len(locks), tmpl["terms"]["floor"], tmpl["terms"]["deadline"],
+                        r5["error"], r["error"]))
         # The live job: paid, never mined, with its cancel.
         s = self.new_swap("crowd")
         self.lock_and_confirm(s)
@@ -1439,6 +1465,254 @@ class PayLockRegtest(LostSwapTest):
         code, r = self.http_code("POST", "/jobs", base)
         assert_equal(code, 200)
         self.record(c, "the buyer's job on the real lock", "%d" % code)
+
+    def more_locks(self, s, k):
+        """k locks of s's terms, outputs of one transaction of the seller's, mined and certified."""
+        a = self.nodes[SELLER]
+        spk = self.lock_spk(s)
+        spares = [a.getnewaddress() for _ in range(k)]
+        raw = a.createrawtransaction([], [{x: Decimal(s["atoms"]) / COIN, "asset": s["asset"]} for x in spares])
+        tx = tx_from_hex(raw)
+        want = {bytes.fromhex(a.getaddressinfo(x)["scriptPubKey"]) for x in spares}
+        for o in tx.vout:
+            if bytes(o.scriptPubKey) in want:
+                o.scriptPubKey = CScript(spk)
+        funded = a.fundrawtransaction(tx.serialize().hex(), {"fee_asset": "bitcoin", "replaceable": False,
+                                                             "change_type": "bech32"})["hex"]
+        lock_hex = a.signrawtransactionwithwallet(funded)["hex"]
+        lt = tx_from_hex(lock_hex)
+        txid = lt.rehash()
+        outs = ["%s:%d" % (txid, i) for i, o in enumerate(lt.vout) if bytes(o.scriptPubKey) == spk]
+        assert_equal(len(outs), k)
+        self.lock_and_confirm(dict(s, lock_hex=lock_hex, txid=txid))
+        return outs
+
+    def lock_spk(self, s):
+        """The lock script s's lock pays, read from the lock transaction."""
+        lt = tx_from_hex(s["lock_hex"])
+        return bytes(lt.vout[s["vout"]].scriptPubKey)
+
+    def unbroadcast_parent_payment(self, s):
+        """A payment of s's price spending a parent the buyer's wallet signs and does not broadcast,
+        and the buyer's cancel of it. Returns the parent."""
+        w = self.bbuyer
+        a = w.getnewaddress("", "bech32")
+        f = w.fundrawtransaction(w.createrawtransaction([], [{a: Decimal("0.7")}]), {"replaceable": True, "lockUnspents": True})
+        parent_hex = w.signrawtransactionwithwallet(f["hex"])["hex"]
+        pd = w.decoderawtransaction(parent_hex)
+        vout = [o["n"] for o in pd["vout"] if o["scriptPubKey"].get("address") == a][0]
+        prev = [{"txid": pd["txid"], "vout": vout, "scriptPubKey": pd["vout"][vout]["scriptPubKey"]["hex"],
+                 "amount": Decimal("0.7")}]
+        change = w.getnewaddress("", "bech32")
+        raw = w.createrawtransaction([{"txid": pd["txid"], "vout": vout, "sequence": 0xfffffffd}],
+                                     [{s["recv"]: Decimal(s["price"]) / COIN},
+                                      {change: Decimal("0.7") - Decimal(s["price"]) / COIN - Decimal("0.00002")}])
+        r = w.signrawtransactionwithwallet(raw, prev)
+        assert r["complete"], r
+        s["pay_hex"] = r["hex"]
+        s["pay"] = w.decoderawtransaction(s["pay_hex"])["txid"]
+        to = w.getaddressinfo(w.getnewaddress())["scriptPubKey"]
+        cx = self.pl("cancel", "--payment-hex", s["pay_hex"], "--values", 70_000_000, "--to", to)
+        r = w.signrawtransactionwithwallet(cx["hex"], prev)
+        assert r["complete"], r
+        s["cancel_hex"], s["cancel_id"] = r["hex"], cx["txid"]
+        return parent_hex
+
+    @staticmethod
+    def mutate_sig(hexstr):
+        """The same transaction (same txid) with one byte inside its last input's signature changed."""
+        b = bytearray(bytes.fromhex(hexstr))
+        end = len(b) - 4 - 34  # locktime, then <0x21><33-byte pubkey>
+        assert b[end] == 0x21, "not a P2WPKH witness at the end"
+        for L in (71, 72, 73, 70):
+            if b[end - L - 1] == L and b[end - L] == 0x30:
+                b[end - L + 10] ^= 0x01
+                return b.hex()
+        raise AssertionError("signature not found")
+
+    def post_as(self, body, client):
+        """(status, body) of a post to the service as `client` (a proxy's X-Forwarded-For)."""
+        req = urllib.request.Request("http://127.0.0.1:%d/jobs" % self.svc_port, method="POST",
+                                     data=json.dumps(body).encode(), headers={"X-Forwarded-For": client})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def case_samewit(self):
+        self.log.info("(samewit) a copy of the buyer's cancel with a bad witness, posted first")
+        c = "samewit"
+        b = self.btc()
+        s = self.ready(c)
+        parent_hex = self.unbroadcast_parent_payment(s)
+        bad = self.mutate_sig(s["cancel_hex"])
+        db, dg = b.decoderawtransaction(bad), b.decoderawtransaction(s["cancel_hex"])
+        assert_equal(db["txid"], dg["txid"])
+        assert db["hash"] != dg["hash"]
+        body = {"terms": s["terms"], "lock": s["lock"], "claims": s["claims"], "payment": s["pay"],
+                "payment_hex": s["pay_hex"]}
+        c1, r1 = self.post_as(dict(body, cancel=bad), "198.51.100.7")
+        c2, r2 = self.post_as(dict(body, cancel=s["cancel_hex"]), "203.0.113.9")
+        assert_equal((c1, c2), (200, 200))
+        s["job"] = r2["id"]
+        j = self.job(s)
+        self.record(c, "posts while the parent is unbroadcast", "the bad copy (same txid %s, wtxid %s and %s) first: %d; "
+                    "the buyer's: %d %s; the job holds %d checked, %d unchecked" % (
+                        dg["txid"][:16], db["hash"][:16], dg["hash"][:16], c1, c2, r2.get("merged"),
+                        j["cancels"], j["pending_cancels"]))
+        assert_equal((j["cancels"], j["pending_cancels"]), (0, 2))
+        b.sendrawtransaction(parent_hex)
+        self.send_pay(s)
+        self.wait_until(lambda: self.job(s)["cancels"] == 1 and self.job(s)["pending_cancels"] == 0, timeout=30)
+        j = self.job(s)
+        self.record(c, "after the parent and payment are broadcast", "%d checked, %d unchecked; note: %s" % (
+            j["cancels"], j["pending_cancels"], j["note"]))
+        D = s["terms"]["deadline"]
+        self.empty_btc_blocks(D - 2 - b.getblockcount())
+        self.wait_until(lambda: s["cancel_id"] in b.getrawmempool(), timeout=30)
+        mp = b.getrawmempool(True)
+        assert s["pay"] not in mp
+        assert_equal(mp[s["cancel_id"]]["wtxid"], dg["hash"])
+        self.record(c, "at tip D - 2 (%d)" % b.getblockcount(), "the buyer's cancel (its own witness) replaced the payment: %s"
+                    % self.job(s)["note"])
+        self.btc_mine(1)
+        self.cancelled_and_archived(s, c)
+
+    def case_wirepending(self):
+        self.log.info("(wirepending) a request naming the service's own fields")
+        c = "wirepending"
+        s = self.ready(c)
+        self.make_payment(s)
+        junk = [{"by": "someone", "hex": self.btc().createrawtransaction([{"txid": "%064x" % (0xdd0000 + i), "vout": 0}],
+                                                                       [{self.bseller.getnewaddress(): Decimal("0.001")}])}
+                for i in range(17)]
+        body = {"terms": s["terms"], "lock": s["lock"], "claims": s["claims"], "payment": s["pay"], "pending": junk,
+                "client": "10.1.1.1", "state": "final"}
+        code, r = self.post_as(body, "198.51.100.20")
+        assert_equal(code, 200)
+        s["job"] = r["id"]
+        j = self.job(s)
+        assert_equal((j["cancels"], j["pending_cancels"], j["state"]), (0, 0, "waiting"))
+        self.record(c, "a post with 17 transactions in 'pending'", "%d; the job holds %d checked, %d unchecked, %s" % (
+            code, j["cancels"], j["pending_cancels"], j["state"]))
+        code, r = self.post_as(dict(body, pending=None, cancels=[{"hex": s["cancel_hex"], "fee": 99_999_999}],
+                                    payment_hex=s["pay_hex"]), "198.51.100.20")
+        assert_equal(code, 400)
+        assert "raw Bitcoin transaction" in r["error"], r
+        self.record(c, "a cancel with its fee named", "%d: %s" % (code, r["error"]))
+
+    def case_onelock(self):
+        self.log.info("(onelock) one real lock, made-up payment ids, from one address and from many")
+        c = "onelock"
+        att = self.new_swap(c + "-own", atoms=1000, price=1000)
+        self.lock_and_confirm(att)
+        cl = self.pl("sign-claim", "--terms", att["tfile"], "--lock", att["lock"], "--key-file", att["bkey"],
+                     "--to", "51", "--fee", 10, "--top-fee", "none")
+        base = {"terms": att["terms"], "lock": att["lock"], "claims": cl["claims"]}
+        taken, last = 0, None
+        for i in range(60):
+            code, r = self.post_as(dict(base, payment="%064x" % (0xab000000 + i)), "198.51.100.30")
+            if code != 200:
+                last = (code, r.get("error"))
+                break
+            taken += 1
+        assert_equal(taken, 4)
+        assert_equal(last[0], 429)
+        assert "this lock carries" in last[1], last
+        self.record(c, "one address", "%d jobs taken, then %s" % (taken, last))
+        more = 0
+        for a in range(1, 21):
+            code, r = self.post_as(dict(base, payment="%064x" % (0xac000000 + a)), "100.64.0.%d" % a)
+            more += code == 200
+        assert_equal(more, 0)
+        self.record(c, "20 more addresses", "%d more jobs taken" % more)
+        s = self.ready(c)
+        self.make_payment(s)
+        body = {"terms": s["terms"], "lock": s["lock"], "claims": s["claims"], "payment": s["pay"],
+                "payment_hex": s["pay_hex"], "cancel": s["cancel_hex"]}
+        code, r = self.post_as(body, "198.51.100.30")
+        assert_equal(code, 200)
+        self.record(c, "a real buyer from the same address", "%d" % code)
+        code, r = self.post_as(body, "198.18.0.1")
+        assert_equal(code, 200)
+        assert r.get("held") or r.get("merged") is not None or "id" in r, r
+        self.record(c, "and from its own address", "%d" % code)
+
+    def case_idleconns(self):
+        self.log.info("(idleconns) 300 idle connections from one address beside a buyer")
+        c = "idleconns"
+        b = self.btc()
+        for source in ("127.0.0.2", "127.0.0.1"):
+            s = self.ready(c)
+            self.make_payment(s)
+            self.hand_over(s)
+            self.send_pay(s)
+            D = s["terms"]["deadline"]
+            self.empty_btc_blocks(D - 3 - b.getblockcount())
+            stop = [False]
+            held = []
+            opened = [0]
+
+            def flood():
+                while not stop[0]:
+                    for k in list(held):
+                        try:
+                            k.setblocking(False)
+                            if k.recv(1) is not None:
+                                k.close()
+                                held.remove(k)
+                        except BlockingIOError:
+                            pass
+                        except OSError:
+                            held.remove(k)
+                    while len(held) < 300 and not stop[0]:
+                        try:
+                            k = socket.create_connection(("127.0.0.1", self.svc_port), timeout=2,
+                                                         source_address=(source, 0))
+                            held.append(k)
+                            opened[0] += 1
+                        except OSError:
+                            break
+                    time.sleep(0.05)
+            t = threading.Thread(target=flood, daemon=True)
+            t.start()
+            time.sleep(3)
+            posts, reads = [], []
+            body = {"terms": s["terms"], "lock": s["lock"], "claims": s["claims"], "payment": s["pay"],
+                    "payment_hex": s["pay_hex"], "cancel": s["cancel_hex"]}
+            for i in range(10):
+                t0 = time.time()
+                try:
+                    posts.append((self.http_code("POST", "/jobs", body)[0], round(time.time() - t0, 3)))
+                except Exception as e:  # noqa: BLE001
+                    posts.append((type(e).__name__, round(time.time() - t0, 3)))
+                t0 = time.time()
+                try:
+                    reads.append((self.http_code("GET", "/jobs/" + s["job"])[0], round(time.time() - t0, 3)))
+                except Exception as e:  # noqa: BLE001
+                    reads.append((type(e).__name__, round(time.time() - t0, 3)))
+                time.sleep(0.3)
+            self.record(c, "flood from %s" % source, "buyer's posts %s; reads %s; connections opened so far %d" % (
+                posts, reads, opened[0]))
+            assert all(p[0] == 200 for p in posts + reads), (posts, reads)
+            self.empty_btc_blocks(1)
+            t0 = time.time()
+            self.wait_until(lambda: s["cancel_id"] in b.getrawmempool(), timeout=30)
+            took = time.time() - t0
+            stop[0] = True
+            t.join(timeout=10)
+            for k in held:
+                try:
+                    k.close()
+                except OSError:
+                    pass
+            self.record(c, "cancel at D - 2 under the flood from %s" % source, "in the mempool %.1f s after; %d connections opened" % (
+                took, opened[0]))
+            assert took < 5, took
+            assert opened[0] >= 300
+            self.btc_mine(1)
+            self.cancelled_and_archived(s, c)
 
     def run_test(self):
         try:

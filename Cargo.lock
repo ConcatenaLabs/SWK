@@ -2772,6 +2772,7 @@ dependencies = [
  "jsonrpc",
  "lwk_wollet",
  "serde_json",
+ "socket2",
  "tiny_http",
 ]
 

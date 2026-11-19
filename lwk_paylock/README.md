@@ -78,21 +78,29 @@ transaction index (`-txindex=1`).
 PAYLOCK_SEQ_URL=http://127.0.0.1:<port> PAYLOCK_SEQ_COOKIE=<datadir>/<chain>/.cookie \
 PAYLOCK_BTC_URL=http://127.0.0.1:<port> PAYLOCK_BTC_COOKIE=<datadir>/.cookie \
   paylock serve --data <dir> --listen 127.0.0.1:<port> [--token-file <file>] [--max-jobs 1000] \
-    [--jobs-per-client 50] [--watch-depth 6] [--watch-every 30]
+    [--jobs-per-client 50] [--jobs-per-lock 4] [--watch-depth 6] [--watch-every 30]
 ```
 
 Beyond loopback it refuses to start without `--token-file`; every request then
 carries `Authorization: Bearer <token>`. A request's client is the peer's
-address; behind a reverse proxy on the same host (the peer is loopback) it is
-the last address in `X-Forwarded-For`, the one that proxy wrote.
+address (an IPv6 address by its /64); behind a reverse proxy on the same host
+(the peer is loopback) it is the last address in `X-Forwarded-For`, the one that
+proxy wrote.
 
 Each connection is served on a thread of its own, one request per connection,
 under deadlines: the request line and headers within 5 seconds, the whole
 request within 10 (`408` beyond). A body needs `Content-Length` (`411`) of at
-most 512 KiB (`413`). The service serves 256 connections at once (`503` beyond),
-and a client may be sending four bodies at a time (`429` beyond). So a slow
-client holds only its own connection, and reads and other posts are answered
-meanwhile.
+most 512 KiB (`413`). The service serves 256 connections at once. One address
+holds at most 16 of them (`429` beyond; behind the proxy, the client its
+headers name), and the last 32 go only to an address holding none. A
+connection that has sent no headers is idle: a new one from its own address
+takes its place when that address holds its share, and when every slot is
+taken a new one takes the place of the oldest idle one (idle for a second) of
+the address holding the most; with none idle it is answered `503`. A client
+may be sending four bodies at a time (`429` beyond). Every refusal is a JSON
+answer the client reads: what it sent is read before the connection closes.
+So a slow or crowding client holds only its own connections, and reads and
+other posts are answered meanwhile.
 
 It holds no key. A buyer's wallet posts one job:
 
@@ -127,7 +135,25 @@ and refuses what fails, whoever posts it:
   only if its signatures then fail. A cancel whose signatures fail, or that the
   daemon will not take as it stands (too low a fee to replace the payment, say),
   is refused. A cancel whose payment the service does not know yet is refused:
-  give `payment_hex`. The answer's `notes` say what was kept and how.
+  give `payment_hex`. The answer's `notes` say what was kept and how;
+- a cancel is known by its witness id, not its transaction id alone, which does
+  not cover the witness. A copy of the buyer's cancel with another witness is
+  held as a copy of its own beside the buyer's, never in its place: while
+  neither can be checked both are kept and sent, and once the daemon knows the
+  coins the bad one is dropped and the buyer's kept. A copy the daemon vouched
+  for (accepted, or pools) is never displaced by another;
+- a cancel or a signed payment is at most 32 KiB, and a claim is kept without
+  the witness parts its signature does not cover (the payment's output index
+  and the proof, which completing it writes). A post carries at most eight
+  claims, spending at most 16 fee coins between them;
+- a signed payment the daemon could not vouch for at intake is checked again on
+  every round: the daemon's pooled copy takes its place, and one whose
+  signatures fail is dropped.
+
+A request names only what a wallet hands over (`terms`, `lock`, `claims`,
+`cancel` or `cancels` as raw transactions, `payment`, `payment_hex`). Nothing
+the service keeps of its own (the unchecked cancels, a cancel's fee, the
+client, the job's progress) is read from it.
 
 A job is named by its terms, its lock and its payment's id. Whatever is posted
 under that name is merged into the one job and never refused for coming
@@ -135,10 +161,13 @@ second: claims it lacks are added, each cancel is kept (up to four; a further
 one takes the place of the cheapest when it pays more), and so is a signed
 payment it lacked. So a client that posts the buyer's claims first, with no
 payment, a subset of the claims or no cancel, holds nothing of the buyer's out.
-The answer is `200` with the job's `id` (and `merged` or `held`), `400` for a
-request that fails a check, `429` when a limit is reached (the client's live
-jobs, the service's, a job's unchecked cancels), `503` when a chain does not
-answer (try again). A read returns where a job stands and never its signed
+One lock carries at most `--jobs-per-lock` live jobs (a payment and its
+replacements; the job follows a replacement of the payment by its coins, so it
+needs no job of its own), so every few jobs cost a real lock; jobs on other
+locks never count. The answer is `200` with the job's `id` (and `merged` or
+`held`), `400` for a request that fails a check, `429` when a limit is reached
+(the client's live jobs, the lock's, the service's, a job's unchecked cancels),
+`503` when a chain does not answer (try again). A read returns where a job stands and never its signed
 claims, cancels, payment or terms.
 
 On every round the service reads both chains as they are now:
@@ -182,9 +211,10 @@ blocks past `D` (on to Bitcoin's tip, up to 144 blocks past `D`, while the
 payment's coins are known and no spend of them is mined). A failing job backs
 off, up to a minute. Intake caps a request at 512 KiB, a job at eight claims and
 four cancels (and 16 not yet checkable), a lock at 1,008 Bitcoin blocks from `F`
-to `D`, the service at `--max-jobs` live jobs and each client at
-`--jobs-per-client` live jobs it started (`0` for no limit); a job whose outcome
-is decided no longer counts, and a post that merges into a job held starts none.
+to `D`, the service at `--max-jobs` live jobs, each client at
+`--jobs-per-client` live jobs it started and each lock at `--jobs-per-lock`
+(`0` for no limit); a job whose outcome is decided no longer counts, and a post
+that merges into a job held starts none.
 
 Jobs are one JSON file each under `--data`, so a restart carries on. A job that
 has ended and is buried moves to `--data/archive/`, where it is still answered at
@@ -209,7 +239,7 @@ PAYLOCK_NODE_FUNCTIONAL=<node>/test/functional PAYLOCK_BIN=target/debug/paylock 
 `PAYLOCK_CASES` picks cases (`path,unpaid,late,gone,remined,anchor,wrongamount,
 wrongaddress,unaccepted,feecoin,feepot,twoasset,raise,resend,crowd,overflow,
 noraise,preempt,cancelstate,afterfinal,unconf,bumplate,bumpin,block,nopayment,
-unknownparent,afterbroadcast,fakelock`;
+unknownparent,afterbroadcast,fakelock,samewit,wirepending,onelock,idleconns`;
 the script's docstring says what each shows), and
 `PAYLOCK_RESULTS` names a file for the observed outcomes and refusal reasons.
 
