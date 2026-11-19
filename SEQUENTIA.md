@@ -33,10 +33,9 @@ Crates touched only mechanically:
   uses the vendored `rust-elements` (see below).
 - `elements` workspace dependency enables features
   `["base64", "serde", "sequentia"]`. The `sequentia` serialization is therefore
-  ON for every crate in the workspace. Consequence: upstream Liquid test
-  fixtures that hard-code the Liquid wire format fail to deserialize, so a plain
-  `cargo test -p lwk_wollet --lib` has known failures in upstream fixture tests;
-  the Sequentia-specific test modules all pass.
+  ON for every crate in the workspace. Consequence: test vectors are in
+  Sequentia's wire format, not Liquid's (see `lwk_test_util/test_data/README.md`),
+  and a vector taken from Liquid does not deserialize until it is re-encoded.
 - `bitcoin = "=0.32.8"` pinned exactly to the version `elements-miniscript`
   pulls transitively, so the parent-chain crate can never drift and silently
   change HTLC redeemScript bytes.

@@ -214,13 +214,13 @@ cargo test -p lwk_wollet --lib --features sequentia sequentia_          # stakin
 Notes:
 
 - Unit tests run without any node or network access.
-- Known issue: a plain `cargo test -p lwk_wollet --lib` reports a number of
-  failing upstream fixture tests. The workspace enables the vendored `elements`
-  crate's `sequentia` feature globally, which changes the transaction and
-  header wire format, so upstream Liquid test vectors no longer deserialize.
-  The Sequentia-specific test modules (`btc`, `seqdex_htlc`, `seqdex_swap`,
-  `sequentia_delegation`, `sequentia_stake_records`) all pass; use the filtered
-  commands above.
+- The workspace enables the vendored `elements` crate's `sequentia` feature
+  globally, which changes the transaction and header wire format (an issuance
+  carries a denomination byte, a block header a 36-byte Bitcoin anchor). The
+  block, header, transaction and update vectors in `lwk_test_util/test_data`
+  and `lwk_wollet/tests/data` are therefore in Sequentia's format, and a plain
+  `cargo test --lib` passes. A vector taken from Liquid has to be re-encoded
+  before a test can read it; `lwk_test_util/test_data/README.md` says how.
 - `lwk_wollet/tests/sequentia_stake_records.rs` has a proof-of-stake
   `sequentiad` on a regtest chain confirm every staking transaction the kit
   builds, and refuse each wrong one in the mempool and in a block:
