@@ -671,7 +671,7 @@ fn judged_daemon(
     }))
 }
 
-/// Kimi's: the payment's parent is signed but not broadcast, so the service's Bitcoin
+/// The payment's parent is signed but not broadcast, so the service's Bitcoin
 /// daemon knows neither it nor the payment, and answers `missing-inputs` for the cancel.
 /// The cancel is kept unchecked (never read as a spend in a block), sent at D - 2, and
 /// checked again once the parent and the payment are broadcast.
@@ -757,7 +757,7 @@ fn a_cancel_whose_coins_are_not_known_yet_is_kept_and_sent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Opus K: a cancel the buyer already broadcast (or that is already mined) is valid:
+/// A cancel the buyer already broadcast (or that is already mined) is valid:
 /// kept, with a note; never a refusal that would lose the post's claims.
 #[test]
 fn a_cancel_already_broadcast_is_kept_with_the_claims() {
@@ -815,7 +815,7 @@ fn a_cancel_already_broadcast_is_kept_with_the_claims() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Opus J: a thousand jobs on made-up locks are refused, and do not lock a real buyer
+/// A thousand jobs on made-up locks are refused, and do not lock a real buyer
 /// out; and one client starts at most its quota of live jobs, while another client, and a
 /// post that merges into a job held, are taken.
 #[test]
@@ -899,7 +899,7 @@ fn made_up_locks_and_one_client_cannot_fill_the_service() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Opus L: a client that sends its body slowly holds only its own connection, and only
+/// A client that sends its body slowly holds only its own connection, and only
 /// until the request's deadline; reads and other posts are answered meanwhile.
 #[test]
 fn a_slow_body_stalls_nothing() {
@@ -1245,11 +1245,11 @@ fn no_client_can_block_a_buyers_job() {
     let e = post_job(&mut st, &intake, &other).unwrap_err();
     assert!(e.contains("not an unspent output"), "{e}");
 
-    // Kimi's: no payment_hex, a dummy cancel spending a coin the payment does not.
+    // No payment_hex, and a dummy cancel spending a coin the payment does not.
     let dummy = request_for(&t, lock, &pay_id, Some(btc_hex(&btc_spend(43, 90_000))));
     let e = post_job(&mut st, &intake, &dummy).unwrap_err();
     assert!(e.contains("exactly the payment's coins"), "{e}");
-    // Opus's: the payment itself and an unsigned spend of its coins.
+    // The payment itself and an unsigned spend of its coins.
     let mut unsigned = request_for(&t, lock, &pay_id, Some(btc_hex(&btc_spend(42, 1_000))));
     unsigned["payment_hex"] = json!(btc_hex(&pay));
     let e = post_job(&mut st, &intake, &unsigned).unwrap_err();
@@ -1469,7 +1469,7 @@ fn witnessed_cancel(n: u32) -> (bitcoin::Transaction, bitcoin::Transaction) {
     (good, bad)
 }
 
-/// KR109's high and Opus's `rv5_samewit`: the payment's parent is not broadcast, so the
+/// The payment's parent is not broadcast, so the
 /// daemon can check no cancel. Another client posts first the buyer's own cancel with one
 /// byte of its signature changed (same txid), then the buyer posts its valid one. Each
 /// copy is held on its own; both are tried at D - 2 while neither can be checked; once
@@ -1655,7 +1655,7 @@ fn cancels_are_held_by_witness_id() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// KR109's medium and Opus's `rv5_wirepending`: a request never names what the service
+/// A request never names what the service
 /// keeps of its own. Unchecked cancels (`pending`), a cancel's fee or standing, and the
 /// client are not read from it; a post carrying 17 made-up `pending` entries holds none.
 #[test]
@@ -1716,7 +1716,7 @@ fn a_request_names_nothing_the_service_keeps_of_its_own() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Opus J2 (`rv4_onelock`): one real lock carries a payment and its replacements, a few
+/// One real lock carries a payment and its replacements, a few
 /// jobs, and no more, whoever posts them; jobs on other locks never count, and a post
 /// that merges into a job held starts none. Through the binary.
 #[test]
@@ -1812,7 +1812,7 @@ fn try_request(port: u16, req: &str) -> Result<(u16, Value), String> {
     ))
 }
 
-/// Opus L2 (`rv4_conns`): one client keeps 300 connections open that send nothing,
+/// One client keeps 300 connections open that send nothing,
 /// opening a new one for each the service closes. A buyer's posts and reads beside it
 /// are answered at once, whether the flood comes from another address or from the
 /// buyer's own (its idle connections give way to the buyer's). Through the binary.
@@ -1911,7 +1911,7 @@ fn idle_connections_take_no_one_elses_slot() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Kimi's low (KR109): a connection refused because every slot is taken reads its JSON
+/// A connection refused because every slot is taken reads its JSON
 /// answer, never a reset. Every slot is held by a body being sent slowly, each from an
 /// address of its own; the next connection sends its request and reads `503` with a JSON
 /// body, to its end. Through the binary.
