@@ -1926,13 +1926,16 @@ fn the_payment_is_whatever_bitcoin_mines_paying_the_terms() {
     let mut settled = vec![None];
     btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
         .unwrap();
+    // The scan takes nothing: the stranger's payment is a candidate, not yet the payment.
+    assert!(scan.found.is_none());
     let f = scan
-        .found
-        .clone()
-        .expect("the stranger's payment opens the lock");
+        .ordered()
+        .first()
+        .cloned()
+        .expect("the stranger's payment may open the lock");
     assert_eq!(
-        (f.height, f.txid),
-        (1002, stranger.compute_txid().to_string())
+        (f.at.height, f.at.txid, f.held),
+        (1002, stranger.compute_txid().to_string(), false)
     );
     let s = settled[0].clone().expect("the held payment is settled");
     assert_eq!((s.at.height, s.paid), (1001, false));
@@ -1944,7 +1947,7 @@ fn the_payment_is_whatever_bitcoin_mines_paying_the_terms() {
     let mut settled = vec![None];
     btc.scan_lock(&t, &coins, &mut settled, false, &mut scan, 100, far)
         .unwrap();
-    assert!(scan.found.is_none());
+    assert!(scan.found.is_none() && scan.candidates.is_empty());
     assert_eq!(scan.late.map(|f| f.height), Some(1007));
     assert_eq!(settled[0].clone().map(|s| s.paid), Some(true));
 }
@@ -2006,17 +2009,19 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     let far = Instant::now() + Duration::from_secs(30);
     let id = |t: &bitcoin::Transaction| t.compute_txid().to_string();
 
-    // 1001: the unprovable payment; 1002: the buyer's. The first is passed over.
+    // 1001: the unprovable payment; 1002: the buyer's. The first is no candidate.
     *blocks.lock().unwrap() = vec![vec![], vec![big.clone()], vec![held.clone()]];
     let mut scan = lwk_paylock::PaymentScan::default();
     let mut settled = vec![None];
     btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
         .unwrap();
-    let f = scan
-        .found
-        .clone()
-        .expect("the buyer's payment opens the lock");
-    assert_eq!((f.height, f.txid), (1002, id(&held)));
+    let ids = |s: &lwk_paylock::PaymentScan| {
+        s.ordered()
+            .into_iter()
+            .map(|c| (c.at.height, c.at.txid))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&scan), vec![(1002, id(&held))]);
     let u = scan
         .unprovable
         .clone()
@@ -2027,7 +2032,7 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
         Some((1002, true))
     );
 
-    // Only the unprovable payment in the window: nothing found, so nothing is paid in it.
+    // Only the unprovable payment in the window: no candidate, so nothing is paid in it.
     *blocks.lock().unwrap() = (0..8)
         .map(|h| if h == 1 { vec![big.clone()] } else { vec![] })
         .collect();
@@ -2036,7 +2041,7 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     assert!(btc
         .scan_lock(&t, &coins, &mut settled, false, &mut scan, 100, far)
         .unwrap());
-    assert!(scan.found.is_none() && scan.late.is_none());
+    assert!(scan.found.is_none() && scan.late.is_none() && scan.candidates.is_empty());
     assert_eq!(scan.unprovable.as_ref().map(|f| f.height), Some(1001));
     assert_eq!(
         lwk_paylock::payment_position(&t, &scan, true, 1_007),
@@ -2053,47 +2058,83 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     let mut settled = vec![None];
     btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
         .unwrap();
-    assert!(scan.found.is_none());
+    assert!(scan.candidates.is_empty());
     assert_eq!(
         settled[0].clone().map(|s| (s.at.height, s.paid)),
         Some((1001, false))
     );
 
-    // Two in one block: the payment held is taken first, wherever it stands.
-    *blocks.lock().unwrap() = vec![vec![], vec![stranger.clone(), held.clone()]];
+    // Across the whole window, a payment held comes first, then the rest by the lightest
+    // proof they make: here a stranger's padded but provable payment in an earlier block
+    // and a plain one in a later block.
+    let heavy = padded_payment(&t, 80, 90_000);
+    assert!(lwk_paylock::provable(&heavy));
+    *blocks.lock().unwrap() = vec![
+        vec![],
+        vec![heavy.clone()],
+        vec![stranger.clone()],
+        vec![held.clone(), other.clone()],
+    ];
     let mut scan = lwk_paylock::PaymentScan::default();
     let mut settled = vec![None];
     btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
         .unwrap();
-    assert_eq!(scan.found.clone().map(|f| f.txid), Some(id(&held)));
+    assert_eq!(
+        ids(&scan),
+        vec![
+            (1003, id(&held)),
+            (1002, id(&stranger)),
+            (1003, id(&other)),
+            (1001, id(&heavy)),
+        ]
+    );
+    let order = scan.ordered();
+    assert!(order[0].held && !order[1].held);
+    assert!(order[3].min_proof > 90_000);
 
-    // A payment whose proof failed is passed over: the scan reads its block again and takes
-    // the next one there, then the next block's; it never settles anything.
-    *blocks.lock().unwrap() = vec![
-        vec![],
-        vec![stranger.clone(), other.clone()],
-        vec![held.clone()],
-    ];
+    // A candidate passed over (the node refused every claim on it for its weight) passes
+    // over every candidate whose lightest proof is as heavy, until Bitcoin moves on.
+    let tip = 1_003;
+    scan.passed.push(lwk_paylock::Passed {
+        at: order[3].at.clone(),
+        proof: order[3].min_proof,
+        why: "min relay fee not met".into(),
+        tip,
+    });
+    assert!(scan.is_passed(&order[3], tip).is_some());
+    assert!(scan.is_passed(&order[0], tip).is_none());
+    scan.passed[0].proof = order[1].min_proof;
+    assert!(scan.is_passed(&order[1], tip).is_some() && scan.is_passed(&order[2], tip).is_some());
+    assert!(scan.is_passed(&order[1], tip + 1).is_none());
+
+    // A reorganization below the scan's place drops every candidate and everything passed
+    // over: the scan reads again from the floor, on the new branch.
+    let mut reorged = blocks.lock().unwrap().clone();
+    reorged[2] = vec![];
+    *blocks.lock().unwrap() = reorged;
+    scan.scanned = Some((1003, format!("{:064x}", 0xdead)));
+    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
+        .unwrap();
+    assert!(scan.passed.is_empty());
+    assert_eq!(
+        ids(&scan),
+        vec![(1003, id(&held)), (1003, id(&other)), (1001, id(&heavy))]
+    );
+
+    // Only the lightest non-held candidates are kept.
+    let many: Vec<bitcoin::Transaction> = (0..40)
+        .map(|n| padded_payment(&t, 200 + n, 100 + 10 * n as usize))
+        .collect();
+    *blocks.lock().unwrap() = vec![vec![], many.clone(), vec![held.clone()]];
     let mut scan = lwk_paylock::PaymentScan::default();
-    btc.scan_lock(&t, &[], &mut [], false, &mut scan, 100, far)
+    let mut settled = vec![None];
+    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
         .unwrap();
-    assert_eq!(scan.found.clone().map(|f| f.txid), Some(id(&stranger)));
-    btc.pass_over(&mut scan).unwrap();
-    assert!(scan.found.is_none());
-    assert_eq!(scan.unusable, vec![id(&stranger)]);
-    btc.scan_lock(&t, &[], &mut [], false, &mut scan, 100, far)
-        .unwrap();
-    assert_eq!(
-        scan.found.clone().map(|f| (f.height, f.txid)),
-        Some((1001, id(&other)))
-    );
-    btc.pass_over(&mut scan).unwrap();
-    btc.scan_lock(&t, &[], &mut [], false, &mut scan, 100, far)
-        .unwrap();
-    assert_eq!(
-        scan.found.clone().map(|f| (f.height, f.txid)),
-        Some((1002, id(&held)))
-    );
+    assert_eq!(scan.candidates.len(), lwk_paylock::MAX_CANDIDATES + 1);
+    let kept = ids(&scan);
+    assert_eq!(kept[0], (1002, id(&held)));
+    assert_eq!(kept[1], (1001, id(&many[0])));
+    assert!(!kept.contains(&(1001, id(&many[39]))));
 }
 
 /// A connection from `source` (a loopback address of its own) to the service.

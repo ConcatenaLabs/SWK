@@ -436,8 +436,12 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
                             }
                         }
                     };
-                    // Sized for a proof of about 1.2 kilobytes, the usual completed claim.
-                    let v = paylock::claim_vsize(&with_claim_witness(&t, &going), 1_200);
+                    // Sized for the heaviest proof of a payment our wallets make
+                    // (`PRICED_PROOF_BYTES`): a heavier claim would lower its fee rate.
+                    let v = paylock::claim_vsize(
+                        &with_claim_witness(&t, &going),
+                        paylock::PRICED_PROOF_BYTES,
+                    );
                     Some(paylock::top_tier_fee(
                         value,
                         v,

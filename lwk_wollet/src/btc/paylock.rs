@@ -88,6 +88,36 @@ pub const BLOCK_VSIZE: u64 = 89_999;
 /// Sequentia blocks the top tier must hold the claim for (section 8.5: the 59 after the
 /// first block anchored at the payment, less the one the going rate is tried in).
 pub const TOP_TIER_BLOCKS: u64 = 58;
+/// The largest payment, without its witness, a wallet makes for a swap: seven P2WPKH
+/// inputs and two outputs fit. The fee tiers are priced for a proof that carries it
+/// ([`PRICED_PROOF_BYTES`]); a heavier payment makes a heavier claim, whose fee rate is
+/// lower than the tiers were priced for, so [`cancel_template`] refuses it.
+pub const MAX_OWN_PAYMENT_BYTES: usize = 400;
+/// The merkle depth the fee tiers allow a proof: a Bitcoin block of up to 16,384
+/// transactions.
+pub const PRICED_DEPTH: usize = 14;
+/// The linking headers the fee tiers allow a proof: the lowest anchor recorded at or
+/// above the payment is at most two blocks above it.
+pub const PRICED_LINKS: usize = 2;
+/// The proof the fee tiers are priced for: a payment of [`MAX_OWN_PAYMENT_BYTES`] at
+/// [`PRICED_DEPTH`] with [`PRICED_LINKS`] headers, 1,584 bytes.
+pub const PRICED_PROOF_BYTES: usize =
+    proof_bytes(MAX_OWN_PAYMENT_BYTES, PRICED_DEPTH, PRICED_LINKS);
+
+/// A proof's size in bytes ([`PaymentProof::encode`]) for a payment of `payment` bytes
+/// without its witness, a merkle branch `depth` levels deep and `links` linking headers.
+pub const fn proof_bytes(payment: usize, depth: usize, links: usize) -> usize {
+    128 + 64 * depth + 80 * links + payment
+}
+
+/// The depth of the merkle branch of a transaction in a block of `txs` transactions.
+pub fn merkle_depth(txs: usize) -> usize {
+    let mut d = 0;
+    while (1usize << d) < txs {
+        d += 1;
+    }
+    d.max(1)
+}
 
 /// The unspendable internal key of the lock (the BIP341 "H" point).
 pub const NUMS_HEX: &str = "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0";
@@ -1393,6 +1423,7 @@ pub fn cancel_template(
     fee_sat: u64,
 ) -> Result<bitcoin::Transaction, Error> {
     let pay: bitcoin::Transaction = btc_deserialize(payment_raw).map_err(gen)?;
+    check_own_payment(&pay)?;
     let pay_fee = payment_fee(&pay, prevout_values)?;
     let floor = cancel_fee_floor(payment_raw, prevout_values, to.clone())?;
     if fee_sat < floor {
@@ -1407,6 +1438,23 @@ pub fn cancel_template(
         .filter(|v| *v > 330)
         .ok_or_else(|| gen("the cancel's fee leaves nothing to return"))?;
     Ok(cancel_tx(&pay, value, to))
+}
+
+/// Refuses a swap's payment heavier than the fee tiers are priced for: above
+/// [`MAX_OWN_PAYMENT_BYTES`] without its witness. A wallet checks its payment so before
+/// it signs the claims and the cancel (the cancel's template checks it too): a claim
+/// proving a heavier payment pays a lower fee rate than its tiers were priced for, so it
+/// may not relay at the going tier, and the top tier no longer costs a seller more than
+/// the swap is worth to keep out. Pay from fewer inputs instead.
+pub fn check_own_payment(pay: &bitcoin::Transaction) -> Result<(), Error> {
+    let n = pay.base_size();
+    if n > MAX_OWN_PAYMENT_BYTES {
+        return Err(gen(format!(
+            "the payment is {n} bytes without its witness, above the {MAX_OWN_PAYMENT_BYTES} \
+             the claim's fee tiers are priced for: pay from fewer inputs"
+        )));
+    }
+    Ok(())
 }
 
 fn payment_fee(pay: &bitcoin::Transaction, prevout_values: &[u64]) -> Result<u64, Error> {
@@ -2053,7 +2101,47 @@ mod tests {
         // The review's cancel, at the payment's fee and one satoshi: refused.
         let e = cancel_template(&raw, &values, to.clone(), pay_fee + 1).unwrap_err();
         assert!(e.to_string().contains("at least"), "{e}");
-        assert!(cancel_template(&raw, &values, to, floor - 1).is_err());
+        assert!(cancel_template(&raw, &values, to.clone(), floor - 1).is_err());
+
+        // A payment heavier than the tiers are priced for is refused: with these two
+        // outputs, 84 + 41 bytes per input, so seven inputs fit (371) and eight do not (412).
+        let with_inputs = |n: usize| {
+            let mut p = pay.clone();
+            p.input = (0..n)
+                .map(|i| bitcoin::TxIn {
+                    previous_output: bitcoin::OutPoint {
+                        txid: bitcoin::Txid::from_byte_array([i as u8; 32]),
+                        vout: 1,
+                    },
+                    ..pay.input[0].clone()
+                })
+                .collect();
+            p
+        };
+        assert_eq!(with_inputs(1).base_size(), 125);
+        assert!(check_own_payment(&with_inputs(1)).is_ok());
+        assert_eq!(with_inputs(7).base_size(), 371);
+        assert!(check_own_payment(&with_inputs(7)).is_ok());
+        let heavy = with_inputs(8);
+        assert_eq!(heavy.base_size(), 412);
+        assert!(heavy.base_size() > MAX_OWN_PAYMENT_BYTES);
+        let e = check_own_payment(&heavy).unwrap_err();
+        assert!(e.to_string().contains("fewer inputs"), "{e}");
+        let values = vec![100_000_000u64; 8];
+        assert!(cancel_template(&btc_serialize(&heavy), &values, to, 1_000_000).is_err());
+    }
+
+    #[test]
+    fn the_tiers_are_priced_for_our_own_payments() {
+        assert_eq!(PRICED_PROOF_BYTES, 1_584);
+        assert_eq!(merkle_depth(2), 1);
+        assert_eq!(merkle_depth(3), 2);
+        assert_eq!(merkle_depth(16_384), PRICED_DEPTH);
+        assert_eq!(merkle_depth(16_385), PRICED_DEPTH + 1);
+        // The largest payment a priced proof carries, by the block it is in.
+        let room = |depth, links| PRICED_PROOF_BYTES - proof_bytes(0, depth, links);
+        assert_eq!(room(PRICED_DEPTH, PRICED_LINKS), MAX_OWN_PAYMENT_BYTES);
+        assert_eq!(room(13, 0), 624);
     }
 
     #[test]
@@ -2124,6 +2212,10 @@ mod tests {
         assert_eq!(
             e.len(),
             1 + 4 + 4 + 80 + 32 + 1 + 4 + 64 * 2 + 2 + 80 + p.payment.len()
+        );
+        assert_eq!(
+            e.len(),
+            proof_bytes(p.payment.len(), merkle_depth(txs.len()), 1)
         );
         let mut bad = p.clone();
         bad.index = 3;

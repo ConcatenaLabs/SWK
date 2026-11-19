@@ -90,7 +90,20 @@ Cases (PAYLOCK_CASES):
   bigcancel    the same unprovable payment mined in the window while the buyer's waits
            unmined: a claim proving it, forced into a block, is refused; it withholds
            nothing, the buyer's cancel goes out at D - 2 and the job ends cancelled; the
-           seller's wallet is not held back from its refund by it.
+           seller's wallet is not held back from its refund by it;
+  heavy    a standard, relayed payment to the seller of about 98,000 bytes without its
+           witness is mined first in the window, then the buyer's: the node refuses the
+           heavy one's claim at the going tier, so the service completes the claim with the
+           buyer's (tried first, as one handed over), and the seller's wallet does not refund;
+  edge     a payment of exactly 100,000 bytes without its witness (provable, not relayed)
+           is the only one mined in the window: its claim is refused at the going tier and
+           carried by the top tier, and the swap completes on it;
+  links    the buyer's payment, mined, has no anchor within 2,016 Bitcoin blocks above it
+           (Bitcoin runs 2,100 blocks ahead before Sequentia records one): the job waits,
+           never passes it over, and once Bitcoin reorganizes to an anchor 29 blocks above
+           it, completes the claim on it;
+  ownpay   a payment of eight inputs (412 bytes without its witness, above the 400 the fee
+           tiers are priced for): `paylock cancel` refuses it.
 
 Each negative is forced into a block: a block node 1 produced is rewritten to
 carry the transaction, certified again (`recertifyposblock`) and submitted, and
@@ -129,7 +142,8 @@ from test_framework.util import assert_equal, get_auth_cookie, p2p_port, rpc_por
 CASES = os.environ.get("PAYLOCK_CASES", "path,unpaid,late,gone,remined,anchor,wrongamount,wrongaddress,"
                        "unaccepted,feecoin,feepot,twoasset,raise,resend,crowd,overflow,noraise,preempt,"
                        "cancelstate,afterfinal,unconf,bumplate,bumpin,block,nopayment,unknownparent,afterbroadcast,"
-                       "fakelock,samewit,wirepending,onelock,idleconns,bigpay,bigcancel").split(",")
+                       "fakelock,samewit,wirepending,onelock,idleconns,bigpay,bigcancel,heavy,edge,links,"
+                       "ownpay").split(",")
 RESULTS = os.environ.get("PAYLOCK_RESULTS", "")
 BUYER = 1  # the buyer's node, which the completion service also reads
 COIN = Decimal(100_000_000)
@@ -1811,6 +1825,135 @@ class PayLockRegtest(LostSwapTest):
         self.btc_mine(1)
         self.cancelled_and_archived(s, c)
         b.prioritisetransaction(s["pay"], 0, 100_000_000)
+
+    def case_heavy(self):
+        self.log.info("(heavy) a standard heavy payment to the seller mined first, then the buyer's")
+        c = "heavy"
+        b, w = self.btc(), self.bbuyer
+        s = self.ready(c)
+        self.make_payment(s)
+        self.hand_over(s)
+        self.send_pay(s)
+        b.prioritisetransaction(s["pay"], 0, -100_000_000)
+        # The price to the seller beside 3,150 dust outputs: standard, so anyone relays it.
+        coin = [u for u in w.listunspent(1) if u["amount"] >= Decimal("2")][0]
+        outs = [{s["recv"]: Decimal(s["price"]) / COIN}]
+        outs += [{w.getnewaddress("", "bech32"): Decimal("0.00001")} for _ in range(3150)]
+        spent = Decimal(s["price"]) / COIN + Decimal("0.00001") * 3150 + Decimal("0.0012")
+        outs.append({w.getnewaddress("", "bech32"): coin["amount"] - spent})
+        raw = w.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}], outs)
+        heavy = w.signrawtransactionwithwallet(raw)["hex"]
+        d = b.decoderawtransaction(heavy)
+        stripped = (d["weight"] - d["size"]) // 3
+        t = b.testmempoolaccept([heavy])[0]
+        assert t["allowed"] and 90_000 < stripped <= 100_000, (t, stripped)
+        hid = b.sendrawtransaction(heavy)
+        h1 = b.getblockheader(b.generateblock(self.btc("miner").getnewaddress(), [hid])["hash"])["height"]
+        b.prioritisetransaction(s["pay"], 0, 100_000_000)
+        h2 = b.getblockheader(b.generateblock(self.btc("miner").getnewaddress(), [s["pay"]])["hash"])["height"]
+        assert s["terms"]["floor"] < h1 < h2 <= s["terms"]["deadline"], (h1, h2)
+        self.record(c, "mined", "the heavy payment (%d bytes without its witness, relayed) at %d, the buyer's at %d" % (
+            stripped, h1, h2))
+        self.anchored_block(h2)
+        j = self.wait_job(s, ["final"], timeout=90)
+        assert_equal((j["payment_height"], j["failures"]), (h2, 0))
+        self.record(c, "the service", "%s; the payment at %d, %d failures: %s" % (
+            j["state"], j["payment_height"], j["failures"], j["note"][:200]))
+        self.assert_buyer_paid(s, j)
+        to = self.nodes[SELLER].getaddressinfo(self.nodes[SELLER].getnewaddress())["scriptPubKey"]
+        r = self.pl("sign-refund", "--terms", s["tfile"], "--lock", s["lock"], "--key-file", s["skey"],
+                    "--to", to, "--fee", 5000, ok=False)
+        assert "does not refund" in r.get("error", ""), r
+        self.record(c, "the seller's refund", r["error"][:160])
+        self.sync_tips(range(N))
+
+    def case_edge(self):
+        self.log.info("(edge) a 100,000-byte payment, the only one in the window")
+        c = "edge"
+        b, w = self.btc(), self.btc("miner")
+        s = self.ready(c)
+        self.make_payment(s)
+        self.hand_over(s)
+        self.send_pay(s)
+        b.prioritisetransaction(s["pay"], 0, -100_000_000)
+        coin = [u for u in w.listunspent(1) if u["amount"] >= Decimal("1")][0]
+        change = w.getnewaddress("", "bech32")
+
+        def build(n):
+            raw = w.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}],
+                                         [{s["recv"]: Decimal(s["price"]) / COIN},
+                                          {change: coin["amount"] - Decimal(s["price"]) / COIN - Decimal("0.02")},
+                                          {"data": "ab" * n}])
+            return w.signrawtransactionwithwallet(raw)["hex"]
+
+        def stripped(h):
+            d = b.decoderawtransaction(h)
+            return (d["weight"] - d["size"]) // 3
+        edge = build(100_000 - 300)
+        edge = build(100_000 - 300 + 100_000 - stripped(edge))
+        assert_equal(stripped(edge), 100_000)
+        t = b.testmempoolaccept([edge])[0]
+        h1 = b.getblockheader(b.generateblock(w.getnewaddress(), [edge])["hash"])["height"]
+        self.record(c, "mined", "a payment of exactly 100,000 bytes without its witness (the mempool: %s) at %d" % (
+            t.get("reject-reason"), h1))
+        self.anchored_block(h1)
+        j = self.wait_job(s, ["final"], timeout=90)
+        assert_equal((j["payment_height"], j["tier"]), (h1, 1))
+        txid, d = self.assert_buyer_paid(s, j)
+        self.record(c, "the service", "%s on the 100,000-byte payment at the top tier: %s" % (j["state"], j["note"][:200]))
+        b.prioritisetransaction(s["pay"], 0, 100_000_000)
+        self.sync_tips(range(N))
+
+    def case_links(self):
+        self.log.info("(links) no anchor within 2,016 blocks of the payment, then a reorganization")
+        c = "links"
+        b, n1 = self.btc(), self.nodes[1]
+        s = self.ready(c)
+        self.make_payment(s)
+        self.hand_over(s)
+        self.send_pay(s)
+        h = b.getblockheader(b.generateblock(self.btc("miner").getnewaddress(), [s["pay"]])["hash"])["height"]
+        # Bitcoin runs 2,100 blocks ahead before Sequentia records an anchor above the payment.
+        self.btc_mine(2100)
+        self.produce(1, ALL_KEYS)
+        a = n1.getblockheader(n1.getbestblockhash())["anchorheight"]
+        assert a - h > 2016, (a, h)
+        time.sleep(8)
+        j = self.job(s)
+        self.record(c, "first anchor at %d, %d above the payment at %d" % (a, a - h, h), "%s: %s" % (j["state"], j["note"][:200]))
+        assert_equal(j["state"], "waiting")
+        assert "more than a proof links" in j["note"], j
+        # Bitcoin reorganizes below that anchor; Sequentia then records one 29 above the payment.
+        cut = b.getblockhash(h + 30)
+        b.invalidateblock(cut)
+        self.wait_until(lambda: n1.getblockheader(n1.getbestblockhash())["anchorheight"] < h + 30, timeout=60)
+        j = self.wait_job(s, ["final"], timeout=90)
+        assert_equal((j["payment_height"], j["failures"]), (h, 0))
+        self.assert_buyer_paid(s, j)
+        self.record(c, "after the reorganization", "%s: %s" % (j["state"], j["note"][:200]))
+        b.reconsiderblock(cut)
+        self.sync_tips(range(N))
+
+    def case_ownpay(self):
+        self.log.info("(ownpay) a payment heavier than the tiers are priced for")
+        c = "ownpay"
+        w = self.bbuyer
+        s = self.new_swap(c)
+        coins = sorted(w.listunspent(1), key=lambda u: -u["amount"])[:8]
+        assert len(coins) == 8, len(coins)
+        total = sum(Decimal(str(u["amount"])) for u in coins)
+        raw = w.createrawtransaction([{"txid": u["txid"], "vout": u["vout"]} for u in coins],
+                                     [{s["recv"]: Decimal(s["price"]) / COIN},
+                                      {w.getnewaddress("", "bech32"): total - Decimal(s["price"]) / COIN - Decimal("0.001")}])
+        pay = w.signrawtransactionwithwallet(raw)["hex"]
+        d = w.decoderawtransaction(pay)
+        stripped = (d["weight"] - d["size"]) // 3
+        values = [int(Decimal(str(u["amount"])) * COIN) for u in coins]
+        to = w.getaddressinfo(w.getnewaddress())["scriptPubKey"]
+        r = self.pl("cancel", "--payment-hex", pay, "--values", ",".join(map(str, values)), "--to", to, ok=False)
+        assert stripped > 400 and "fewer inputs" in r.get("error", ""), (stripped, r)
+        self.record(c, "paylock cancel", "a payment of %d inputs, %d bytes without its witness: %s" % (
+            len(coins), stripped, r["error"]))
 
     def run_test(self):
         try:

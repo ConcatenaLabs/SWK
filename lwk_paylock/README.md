@@ -62,6 +62,19 @@ transaction index (`-txindex=1`).
    is mined or the refund is valid. The buyer's Bitcoin wallet makes the
    payment without sending it, and signs the cancel that `paylock cancel`
    builds. All of them go to the completion service.
+
+   **The payment is at most 400 bytes without its witness**: seven ordinary
+   (P2WPKH) inputs and two outputs fit, eight do not. The fee tiers are priced
+   for the claim that proves such a payment: a proof of 1,584 bytes (the payment,
+   a merkle branch of 14 levels, for a Bitcoin block of up to 16,384
+   transactions, and two linking headers; `PRICED_PROOF_BYTES`). A heavier
+   payment makes a heavier claim, whose fee rate is lower than its tiers were
+   priced for: it may not relay at the going tier, and the top tier no longer
+   costs a seller more than the swap is worth to keep out. `paylock cancel`
+   (and the library's `cancel_template` and `check_own_payment`) refuse a
+   heavier payment; a wallet pays from fewer inputs instead. A wallet sizes the
+   going fee for the same claim: `claim_vsize(claim, PRICED_PROOF_BYTES)`
+   virtual bytes at the going rate, with headroom.
 5. **The payment**, an ordinary Bitcoin transaction to the receiving address.
 6. **Completion.** Once a Sequentia block anchors at the payment's height or
    above, the service attaches the proof and submits the claim. The swap is
@@ -123,18 +136,36 @@ are payments and cancels. So a client that posts the buyer's claims first, with
 a made-up payment id, no payment, a subset of the claims or no cancel, holds
 nothing of the buyer's out.
 
-The claim needs nothing a client posts besides the claims. The payment is the
-first transaction Bitcoin mines above `F` and at or below `D` that pays the
-terms' receiving script at least the price and that a proof can carry, whoever
-made it and whatever coins it spends, since that is what the claim accepts. A
-proof carries a transaction that is not a coinbase and is, without its witness,
-neither 64 bytes long nor above 100,000 bytes (the specification's section
-4.1). A paying transaction outside those bounds (a miner can mine one Bitcoin
-would not relay) opens nothing: it is passed over, the search reads on, and it
-withholds no cancel; a read shows its height as `unprovable_payment_height`. So
-does one whose proof fails when the claim is completed. Of several payments in
-one block, one handed over is taken first. A payment handed over is held so
-that its cancels are: a cancel spends exactly the coins of a payment held.
+The claim needs nothing a client posts besides the claims. The payment is a
+transaction mined above `F` and at or below `D` that pays the terms' receiving
+script at least the price, whoever made it and whatever coins it spends, since
+that is what the claim accepts, **and whose completed claim the node accepts**.
+Any such transaction a proof can carry is a candidate: one that is not a
+coinbase and is, without its witness, neither 64 bytes long nor above 100,000
+bytes (the specification's section 4.1). A paying transaction outside those
+bounds (a miner can mine one Bitcoin would not relay) opens nothing and is no
+candidate; a read shows its height as `unprovable_payment_height`.
+
+The candidates are tried in turn, across the whole window: a payment handed
+over first, then the rest by the lightest proof they make. Each is tried at
+every tier the buyer signed, cheapest first. A refusal for the claim's weight
+(`min relay fee not met`, `mempool min fee not met`, `mempool full`, `tx-size`:
+the only refusals that depend on which payment the claim proves) moves to the
+next tier; refused at every tier, the candidate is passed over, with every one
+whose proof would be as heavy, and the next is tried in the same round. A
+candidate is passed over only for that, and only until Bitcoin's next block
+(the floor its fee rate is judged against moves) or a reorganization below the
+scan's place, which drops everything passed over. Anything else that keeps a
+claim from being made waits on the chain and never passes a payment over: no
+Sequentia block anchored at the payment yet, the Bitcoin daemon and the node's
+anchors not agreeing (or the daemon switching branches between reading a block
+and its headers), the lowest recorded anchor more than 2,016 blocks above the
+payment. A refusal that does not depend on the payment (the lock spent, a
+conflicting spend pooled, the fee's asset) would meet every candidate alike,
+and is retried. A read shows `candidates`, `passed_over` (each with the node's
+reason), and `payment_claimed`: whether the node accepted a claim proving
+`payment_height`'s payment. A payment handed over is held so that its cancels
+are: a cancel spends exactly the coins of a payment held.
 
 Intake checks what it is handed against the chains before holding any of it,
 and refuses what fails, whoever posts it:
@@ -206,9 +237,10 @@ On every round the service reads both chains as they are now:
   was first seen pooled, by whoever pooled it, leaves it out;
 - it submits the tiers of the first fee asset the node still accepts whose fee
   coin is unspent;
-- it completes the claim with the first provable paying transaction Bitcoin
-  mines in the lock's heights, so the buyer's fee bump completes it too; a
-  paying transaction mined only after `D` ends the job `never`;
+- it completes the claim with a paying transaction in the lock's heights whose
+  claim the node accepts (above), so the buyer's fee bump completes it too; a
+  paying transaction mined only after `D` ends the job `never`, and so does a
+  window whose every payment is passed over once Bitcoin is past `D`;
 - it knows each payment it holds by the coins it spends: a confirmed spend of
   them that does not pay is its cancel. Once every payment Bitcoin has shown
   real is spent so, the job is `cancelled` at the latest of those blocks; a
@@ -217,9 +249,10 @@ On every round the service reads both chains as they are now:
 - it sends a payment it holds vouched for again if a reorganization evicted it
   before `D`;
 - it broadcasts every cancel of every payment held that is not settled, the
-  checked ones highest fee first and then those not checkable yet, if no
-  provable payment is mined two blocks before `D`, whatever its Sequentia node says of the lock,
-  and sends them again until a spend of that payment's coins is confirmed;
+  checked ones highest fee first and then those not checkable yet, if two
+  blocks before `D` the node has accepted no claim on a payment mined in the
+  lock's heights, whatever its Sequentia node says of the lock, and sends them
+  again until a spend of that payment's coins is confirmed;
 - it shows the swap done (`final`) as soon as the claim's block is final, and
   goes on watching in the background (`watching: true`) until the Bitcoin block
   that decided it is `--watch-depth` blocks deep: a Bitcoin reorganization
@@ -239,7 +272,8 @@ jobs nearest deadline first, each within a time and block budget and the round
 within its own, and watched jobs after them; the search for the payment keeps
 its place between rounds and reads each Bitcoin block once, from `F` to six
 blocks past `D` (on to Bitcoin's tip, up to 144 blocks past `D`, while a
-payment held with cancels is not settled and no payment is mined). A failing
+payment held with cancels is not settled). It keeps every payment handed over
+and the 32 lightest others as candidates. A failing
 job backs off, up to a minute. Intake caps a request at 512 KiB, a job at eight
 claims, eight unvouched payments and, per payment, four cancels (and 16 not yet
 checkable), a lock at 1,008 Bitcoin blocks from `F` to `D`, the service at

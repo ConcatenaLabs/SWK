@@ -1,10 +1,14 @@
 //! The completion service: it holds a buyer's signed claims, its signed cancels and
 //! its payment, and holds no key. It
 //!
-//! - knows the payment from Bitcoin alone: a transaction mined above `F` and at or
-//!   below `D` that pays the seller's receiving script at least the price is the
-//!   payment, whoever made it and whatever its id or coins, since that is what the
-//!   claim's script accepts. No payment handed over is needed to complete the claim;
+//! - knows the payment from Bitcoin alone: any transaction mined above `F` and at or
+//!   below `D` that pays the seller's receiving script at least the price, in a form a
+//!   proof can carry, may be the payment, whoever made it and whatever its id or coins,
+//!   since that is what the claim's script accepts. It is the payment once the node
+//!   accepts a claim proving it: the candidates are tried in turn (one handed over first,
+//!   then the rest by the lightest proof they make), and one whose completed claim the
+//!   node refuses for the claim's weight, at every tier, is passed over for the next.
+//!   No payment handed over is needed to complete the claim;
 //! - knows each payment it holds by the coins it spends: a confirmed spend of them that
 //!   does not pay is its cancel. Nothing is inferred from a coin that is merely missing;
 //! - completes the claim as soon as a Sequentia block anchors at the payment's
@@ -15,9 +19,10 @@
 //!   claim was pooled (by anyone) and does not include it;
 //! - pays the fee in whichever asset the node still accepts, when the buyer signed
 //!   tiers in two;
-//! - broadcasts the cancels if the payment is still unconfirmed two blocks before `D`,
-//!   whatever its Sequentia node says of the lock (the cancel concerns Bitcoin alone),
-//!   and sends them again until a spend of the payment's coins is confirmed;
+//! - broadcasts the cancels if the payment is still unconfirmed two blocks before `D`
+//!   and no claim on another payment is accepted, whatever its Sequentia node says of the
+//!   lock (the cancel concerns Bitcoin alone), and sends them again until a spend of the
+//!   payment's coins is confirmed;
 //! - shows the claim complete once its block is final, and goes on watching in the
 //!   background until the Bitcoin blocks that decided the swap are buried
 //!   ([`Limits::watch_depth`]): a later Bitcoin reorganization is followed by proving
@@ -86,8 +91,8 @@ use serde_json::{json, Value};
 
 pub use crate::CANCEL_KEEP_BLOCKS;
 use crate::{
-    http, outpoint, payment_position, prove_claim, Accept, BtcChain, Completion, Error, Found,
-    PaymentScan, Position, SeqChain, Settled, TxStatus,
+    http, outpoint, prove_claim, proven_payment, refused_for_weight, Accept, BtcChain, Candidate,
+    Completion, Error, Found, Passed, PaymentScan, SeqChain, Settled, TxStatus,
 };
 
 /// How often a lock the node did not know is looked up again, in seconds.
@@ -854,7 +859,24 @@ impl Job {
         v["found"] = f(&self.scan.found);
         v["late"] = f(&self.scan.late);
         v["unprovable"] = f(&self.scan.unprovable);
-        v["unusable"] = json!(self.scan.unusable);
+        v["candidates"] = json!(self
+            .scan
+            .candidates
+            .iter()
+            .map(
+                |c| json!({"height": c.at.height, "block": c.at.block, "txid": c.at.txid,
+                "held": c.held, "min_proof": c.min_proof})
+            )
+            .collect::<Vec<_>>());
+        v["passed"] = json!(self
+            .scan
+            .passed
+            .iter()
+            .map(
+                |p| json!({"height": p.at.height, "block": p.at.block, "txid": p.at.txid,
+                "proof": p.proof, "why": p.why, "tip": p.tip})
+            )
+            .collect::<Vec<_>>());
         v["lock_known"] = json!(self.lock_known);
         v["lock_checked_at"] = json!(self.lock_checked_at);
         v["cancel_at"] = json!(self.cancel_at);
@@ -868,6 +890,9 @@ impl Job {
     /// claim, no cancel, no payment, no terms.
     pub fn public_json(&self) -> Value {
         let held = |f: fn(&Payment) -> usize| self.payments.iter().map(f).sum::<usize>();
+        // The payment the claim proves, else the candidate tried first, else a late one.
+        let first = self.scan.ordered().into_iter().next().map(|c| c.at);
+        let payment = self.scan.found.clone().or(first).or(self.scan.late.clone());
         let cancelled = self
             .payments
             .iter()
@@ -886,11 +911,17 @@ impl Job {
             "pooled_at": self.pooled_at,
             "mined_at": self.mined_at,
             // Where a payment was mined: in the lock's heights, or else after `D`.
-            "payment_height": self.scan.found.as_ref().or(self.scan.late.as_ref()).map(|f| f.height),
-            "payment_bumped": self.scan.found.as_ref().or(self.scan.late.as_ref()).map(|f| !self.payments.iter().any(|p| p.txid == f.txid)),
+            "payment_height": payment.as_ref().map(|f| f.height),
+            "payment_bumped": payment.as_ref().map(|f| !self.payments.iter().any(|p| p.txid == f.txid)),
+            // Whether the node accepted a claim proving that payment.
+            "payment_claimed": self.scan.found.is_some(),
             // A transaction paying the seller in the lock's heights that no proof can carry:
-            // passed over, it opens nothing and withholds no cancel.
+            // it opens nothing and withholds no cancel.
             "unprovable_payment_height": self.scan.unprovable.as_ref().map(|f| f.height),
+            // Payments in the lock's heights a proof can carry, and those passed over: the
+            // node refused every claim on them for the claim's weight.
+            "candidates": self.scan.candidates.len(),
+            "passed_over": self.scan.passed.iter().map(|p| json!({"height": p.at.height, "txid": p.at.txid, "why": p.why})).collect::<Vec<_>>(),
             "payments": self.payments.len(),
             "unvouched_payments": self.payments.iter().filter(|p| !p.vouched).count(),
             "has_cancel": self.payments.iter().any(Payment::has_cancel),
@@ -935,12 +966,40 @@ impl Job {
             cancel: None,
             late: found("late"),
             unprovable: found("unprovable"),
-            unusable: v
-                .get("unusable")
+            candidates: v
+                .get("candidates")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|t| t.as_str().map(String::from))
+                .filter_map(|c| {
+                    Some(Candidate {
+                        at: Found {
+                            height: c.get("height")?.as_u64()? as u32,
+                            block: c.get("block")?.as_str()?.to_string(),
+                            txid: c.get("txid")?.as_str()?.to_string(),
+                        },
+                        held: c.get("held")?.as_bool()?,
+                        min_proof: c.get("min_proof")?.as_u64()? as usize,
+                    })
+                })
+                .collect(),
+            passed: v
+                .get("passed")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|p| {
+                    Some(Passed {
+                        at: Found {
+                            height: p.get("height")?.as_u64()? as u32,
+                            block: p.get("block")?.as_str()?.to_string(),
+                            txid: p.get("txid")?.as_str()?.to_string(),
+                        },
+                        proof: p.get("proof")?.as_u64()? as usize,
+                        why: p.get("why")?.as_str()?.to_string(),
+                        tip: p.get("tip")?.as_u64()? as u32,
+                    })
+                })
                 .collect(),
         };
         j.cancel_sent = b("cancel_sent");
@@ -961,7 +1020,9 @@ impl Job {
         Ok(j)
     }
 
-    /// Whether a payment is known to be mined at a height the claim accepts.
+    /// Whether the payment is known: mined at a height the claim accepts, and proven by a
+    /// claim the node accepted. A payment only mined, whose claim may never land, withholds
+    /// no cancel.
     fn paid_in_window(&self) -> bool {
         self.scan
             .found
@@ -1547,32 +1608,161 @@ fn lock_on_chain(seq: &SeqChain, job: &Job) -> Result<bool, Error> {
     }
 }
 
-/// The claim to submit now: the going tier, or the top once a block left the claim out,
-/// in the first fee asset the node accepts whose fee coin (if any) is still unspent.
-fn choose(seq: &SeqChain, job: &Job) -> Result<Option<usize>, Error> {
+/// The tiers to try a claim at now, cheapest first within each fee asset, in the order the
+/// buyer signed the assets: every tier of each asset the node accepts whose fee coin (if
+/// any) is still unspent; only the top tiers once a block left the claim out.
+fn tiers(seq: &SeqChain, job: &Job) -> Result<Vec<usize>, Error> {
     let leaf = job.terms.claim_leaf().to_bytes();
+    let mut out = vec![];
     for (asset, tiers) in job.fee_sets() {
         if !seq.fee_asset_accepted(&asset)? {
             continue;
         }
-        let i = if job.raised {
-            *tiers.last().expect("non-empty")
+        let take = if job.raised {
+            vec![*tiers.last().expect("non-empty")]
         } else {
-            tiers[0]
+            tiers
         };
-        let mut coins_unspent = true;
-        for input in &job.claims[i].input {
-            let w = &input.witness.script_witness;
-            let spends_lock = w.len() == 4 && w[2] == leaf;
-            if !spends_lock && !seq.unspent_in_chain(&input.previous_output)? {
-                coins_unspent = false;
+        for i in take {
+            let mut coins_unspent = true;
+            for input in &job.claims[i].input {
+                let w = &input.witness.script_witness;
+                let spends_lock = w.len() == 4 && w[2] == leaf;
+                if !spends_lock && !seq.unspent_in_chain(&input.previous_output)? {
+                    coins_unspent = false;
+                }
+            }
+            if coins_unspent {
+                out.push(i);
             }
         }
-        if coins_unspent {
-            return Ok(Some(i));
+    }
+    Ok(out)
+}
+
+/// Whether claim `i` is the top tier of its fee asset.
+fn is_top(job: &Job, i: usize) -> bool {
+    job.fee_sets().iter().any(|(_, v)| v.last() == Some(&i))
+}
+
+/// Takes the payment a claim on the chain proves as the swap's payment, when Bitcoin's
+/// best chain holds it: the node accepted a claim on it.
+fn note_proven(btc: &BtcChain, job: &mut Job, claim: &Transaction) -> Result<(), Error> {
+    if let Some(f) = proven_payment(claim) {
+        if job.scan.found.as_ref() != Some(&f) && btc.holds(f.height, &f.block)? {
+            job.scan.found = Some(f);
         }
     }
-    Ok(None)
+    Ok(())
+}
+
+/// What trying the candidates came to.
+enum Landing {
+    /// A claim is pooled, or the round's time ran out: nothing more this round.
+    Done,
+    /// No claim yet, and why: the chain's state, which a later round may find changed.
+    Waiting(String),
+    /// Every candidate is passed over.
+    Nothing,
+}
+
+/// Completes and submits a claim on the first candidate whose claim the node accepts: the
+/// candidates in [`PaymentScan::ordered`]'s order, each at every tier in [`tiers`]'
+/// order. A refusal for the claim's weight ([`refused_for_weight`]) moves to the next
+/// tier, and at the last passes the candidate over, with every heavier one; the next
+/// candidate is tried at once. A candidate whose proof waits on the chain (no anchor at
+/// its height yet, the two chains not agreeing, too many links) is left for a later round
+/// and the next one is tried. Any other refusal does not depend on the payment: it ends
+/// the round in error, to be retried.
+fn land(
+    seq: &SeqChain,
+    btc: &BtcChain,
+    job: &mut Job,
+    seq_tip: u32,
+    btc_tip: u32,
+    until: Instant,
+) -> Result<Landing, Error> {
+    let tiers = tiers(seq, job)?;
+    if tiers.is_empty() {
+        job.state = State::Waiting;
+        job.note =
+            "no signed tier pays its fee in an asset the node accepts, from a coin still unspent"
+                .into();
+        return Err(Error(job.note.clone()));
+    }
+    let mut waiting: Option<String> = None;
+    for c in job.scan.ordered() {
+        if job.scan.is_passed(&c, btc_tip).is_some() {
+            continue;
+        }
+        if Instant::now() >= until {
+            return Ok(Landing::Done);
+        }
+        let mut heavy: Option<(String, usize)> = None;
+        let mut every_tier = true;
+        for &t in &tiers {
+            match prove_claim(seq, btc, &job.terms, &job.lock, &job.claims[t], &c.at)? {
+                Completion::Ready {
+                    tx,
+                    height,
+                    proof_bytes,
+                    ..
+                } => match seq.send(&tx) {
+                    Ok(_) => {
+                        job.tier = t;
+                        job.pooled_at = Some(seq_tip);
+                        job.state = State::Pooled;
+                        job.decided_at = None;
+                        job.buried = false;
+                        job.scan.found = Some(c.at.clone());
+                        let passed = match job.scan.passed.len() {
+                            0 => String::new(),
+                            n => format!(
+                                "; {n} heavier payment(s) passed over, the node refusing every claim on them"
+                            ),
+                        };
+                        job.note = format!(
+                            "the claim ({} tier, fee {}) is pooled with a proof of the payment {} in Bitcoin block {height}{passed}",
+                            if is_top(job, t) { "top" } else { "going" },
+                            fee_of(&tx)
+                                .map(|(a, f)| format!("{f} atoms of {a}"))
+                                .unwrap_or_default(),
+                            c.at.txid,
+                        );
+                        return Ok(Landing::Done);
+                    }
+                    Err(e) if refused_for_weight(&e.0) => heavy = Some((e.0, proof_bytes)),
+                    Err(e) => {
+                        job.state = State::Waiting;
+                        job.note = format!("the node refused the completed claim: {e}");
+                        return Err(Error(job.note.clone()));
+                    }
+                },
+                Completion::Waiting(why) => {
+                    waiting.get_or_insert(why);
+                    every_tier = false;
+                    break;
+                }
+                Completion::Never(why) => {
+                    // No proof can carry it: this candidate alone, never a heavier one.
+                    heavy = Some((why, usize::MAX));
+                    break;
+                }
+            }
+        }
+        if let Some((why, proof)) = heavy.filter(|_| every_tier) {
+            job.scan.passed.push(Passed {
+                at: c.at.clone(),
+                proof,
+                why,
+                tip: btc_tip,
+            });
+        }
+    }
+    Ok(match waiting {
+        Some(w) => Landing::Waiting(w),
+        None => Landing::Nothing,
+    })
 }
 
 /// Ends a job with `state`, decided by Bitcoin height `at`; buried once the tip is
@@ -1600,10 +1790,14 @@ pub fn tick(
     let finalized = seq.finalized_height()?;
     let mut pooled = None;
     for (i, c) in job.claims.iter().enumerate() {
-        match seq.status(&c.txid())? {
+        let Some((tx, status)) = seq.tx(&c.txid())? else {
+            continue;
+        };
+        match status {
             TxStatus::Mined(h) => {
                 job.mined_at = Some(h);
                 job.tier = i;
+                note_proven(btc, job, &tx)?;
                 if h <= finalized {
                     // Final: shown at once. Watched until the payment's block and the
                     // claim's anchor are buried.
@@ -1615,17 +1809,17 @@ pub fn tick(
                         at,
                         btc.tip()?,
                         limits,
-                        format!("the claim {} is final at Sequentia height {h}", c.txid()),
+                        format!("the claim {} is final at Sequentia height {h}", tx.txid()),
                     );
                 } else {
                     job.state = State::Mined;
                     job.decided_at = None;
                     job.buried = false;
-                    job.note = format!("the claim {} is mined at {h}, not final yet", c.txid());
+                    job.note = format!("the claim {} is mined at {h}, not final yet", tx.txid());
                 }
                 return Ok(());
             }
-            TxStatus::Pooled => pooled = Some(i),
+            TxStatus::Pooled => pooled = Some((i, tx)),
             TxStatus::Unknown => {}
         }
     }
@@ -1646,7 +1840,7 @@ pub fn tick(
 
     // A block made after the claim was first seen pooled, by whoever pooled it, left it
     // out: the top tier, at once.
-    match pooled {
+    match pooled.as_ref().map(|(i, _)| *i) {
         Some(i) => match job.pooled_at {
             None => {
                 job.pooled_at = Some(seq_tip);
@@ -1714,163 +1908,166 @@ pub fn tick(
     }
     let btc_tip = btc.tip()?;
     let d = job.terms.deadline;
-    if job.scan.found.is_none() {
-        // The payments Bitcoin has shown real, or has settled. Unverified ones (coins the
-        // daemon has never seen) decide nothing.
-        let vouched: Vec<&Payment> = job
-            .payments
+    // What is passed over is tried again once Bitcoin moves on: the floor a claim's fee
+    // rate is judged against moves with the fee asset's rate and the mempool.
+    job.scan.passed.retain(|p| p.tip >= btc_tip);
+
+    // A claim pooled at the tier wanted: the node accepted it, so the payment it proves
+    // is the swap's. Raised, a lower tier pooled is replaced by a top one below.
+    if let Some((i, tx)) = &pooled {
+        if !job.raised || is_top(job, *i) {
+            note_proven(btc, job, tx)?;
+            job.state = State::Pooled;
+            job.decided_at = None;
+            job.buried = false;
+            return Ok(());
+        }
+    }
+    // The payment is the candidate whose completed claim the node accepts.
+    if !job.scan.candidates.is_empty() {
+        match land(seq, btc, job, seq_tip, btc_tip, until)? {
+            Landing::Done => return Ok(()),
+            Landing::Waiting(why) => {
+                job.state = State::Waiting;
+                job.decided_at = None;
+                job.buried = false;
+                job.note = why;
+                return Ok(());
+            }
+            Landing::Nothing => {}
+        }
+    }
+
+    // No candidate takes a claim now: none is mined in the lock's heights, or the node
+    // refuses every claim on those that are.
+    let passed = job.scan.passed.first().map(|p| {
+        format!(
+            "the payment {} in Bitcoin block {} pays the seller, but the node refuses every claim on it ({})",
+            p.at.txid, p.at.height, p.why
+        )
+    });
+    // The payments Bitcoin has shown real, or has settled. Unverified ones (coins the
+    // daemon has never seen) decide nothing.
+    let vouched: Vec<&Payment> = job
+        .payments
+        .iter()
+        .filter(|p| p.real() || p.settled.is_some())
+        .collect();
+    // Every one of them is settled: the swap's payment can no longer be mined, unless
+    // another comes (it is then found, and the job reopens), or a payment held becomes
+    // known (the job reopens with it).
+    if !vouched.is_empty() && vouched.iter().all(|p| p.settled.is_some()) {
+        let cancel = vouched
             .iter()
-            .filter(|p| p.real() || p.settled.is_some())
-            .collect();
-        // Every one of them is settled: the swap's payment can no longer be mined, unless
-        // another comes (it is then found, and the job reopens), or a payment held becomes
-        // known (the job reopens with it).
-        if !vouched.is_empty() && vouched.iter().all(|p| p.settled.is_some()) {
-            let cancel = vouched
+            .filter_map(|p| Some((p, p.settled.as_ref().filter(|s| !s.paid)?)))
+            .max_by_key(|(_, s)| s.at.height);
+        if let Some((p, s)) = cancel {
+            let ours = p
+                .cancels
                 .iter()
-                .filter_map(|p| Some((p, p.settled.as_ref().filter(|s| !s.paid)?)))
-                .max_by_key(|(_, s)| s.at.height);
-            match cancel {
-                Some((p, s)) => {
-                    let ours = p
-                        .cancels
-                        .iter()
-                        .chain(&p.pending)
-                        .any(|c| c.txid == s.at.txid);
-                    let (txid, h) = (s.at.txid.clone(), s.at.height);
-                    end(
-                        job,
-                        State::Cancelled,
-                        h.max(d),
-                        btc_tip,
-                        limits,
-                        if ours {
-                            format!("the cancel {txid} is confirmed in Bitcoin block {h}: the buyer keeps its bitcoin")
-                        } else {
-                            format!("the payment's coins are spent in Bitcoin block {h} by {txid}, which does not pay the seller the price in a form a proof can carry: the payment can no longer be mined")
-                        },
-                    );
-                }
-                None => {
-                    let late = job.scan.late.clone();
-                    let h = late.as_ref().map(|f| f.height).unwrap_or(d);
-                    end(
-                        job,
-                        State::Never,
-                        h.max(d),
-                        btc_tip,
-                        limits,
-                        format!(
-                            "the payment is mined at Bitcoin block {h}, after the deadline {d}"
-                        ),
-                    );
-                }
+                .chain(&p.pending)
+                .any(|c| c.txid == s.at.txid);
+            let (txid, h) = (s.at.txid.clone(), s.at.height);
+            end(
+                job,
+                State::Cancelled,
+                h.max(d),
+                btc_tip,
+                limits,
+                if ours {
+                    format!("the cancel {txid} is confirmed in Bitcoin block {h}: the buyer keeps its bitcoin")
+                } else {
+                    format!("the payment's coins are spent in Bitcoin block {h} by {txid}, which does not pay the seller the price in a form a proof can carry: the payment can no longer be mined")
+                },
+            );
+            return Ok(());
+        }
+        // Each payment held is mined, paying the seller: the latest names the outcome.
+        if let Some(s) = vouched
+            .iter()
+            .filter_map(|p| p.settled.as_ref())
+            .max_by_key(|s| s.at.height)
+        {
+            let (txid, h) = (s.at.txid.clone(), s.at.height);
+            let why = if h > d {
+                format!("the payment {txid} is mined at Bitcoin block {h}, after the deadline {d}")
+            } else if h <= job.terms.floor {
+                format!(
+                    "the payment {txid} is mined at Bitcoin block {h}, not above the lock's floor {}",
+                    job.terms.floor
+                )
+            } else {
+                passed.clone().unwrap_or_else(|| {
+                    format!("the payment {txid} in Bitcoin block {h} pays the seller, but no claim on it is accepted")
+                })
+            };
+            if h > job.terms.floor && h <= d && !(complete && btc_tip > d) {
+                // Another payment may still come before the deadline.
+                job.state = State::Waiting;
+                job.decided_at = None;
+                job.buried = false;
+                job.note = format!("{why}: passed over, looking for another payment");
+            } else {
+                end(job, State::Never, h.max(d), btc_tip, limits, why);
             }
             return Ok(());
         }
     }
-    match payment_position(&job.terms, &job.scan, complete, btc_tip) {
-        Position::Never(why) => {
-            let why = match &job.scan.unprovable {
-                Some(u) => format!(
-                    "{why} (the transaction {} in Bitcoin block {} pays the seller, but no proof can carry it: it opens nothing)",
-                    u.txid, u.height
-                ),
-                None => why,
-            };
-            let open = job
-                .payments
-                .iter()
-                .any(|p| p.real() && p.settled.is_none() && p.has_cancel());
-            if open && btc_tip <= d.saturating_add(CANCEL_KEEP_BLOCKS) {
-                // Not mined by D, and cancels to send. The swap has an outcome only once a
-                // spend of the payment's coins is confirmed, whatever the Sequentia node
-                // says of the lock: the cancel concerns Bitcoin alone.
-                job.state = State::Waiting;
-                job.decided_at = None;
-                job.buried = false;
-                job.note = if job.cancel_sent {
-                    format!("{why}; the cancel is broadcast and not confirmed yet: it is sent again until a spend of the payment's coins is")
-                } else {
-                    format!("{why}; the cancel is not accepted yet: it is sent again")
-                };
-            } else {
-                let why = match &job.scan.late {
-                    Some(f) => format!(
-                        "the payment is mined at Bitcoin block {}, after the deadline {d}",
-                        f.height
-                    ),
-                    None if open => format!("{why}; no spend of the payment's coins confirmed in {CANCEL_KEEP_BLOCKS} blocks"),
-                    None => why,
-                };
-                end(job, State::Never, d, btc_tip, limits, why);
-            }
-        }
-        Position::Waiting(why) => {
+    if complete && btc_tip > d {
+        let why = match (&passed, &job.scan.unprovable) {
+            (Some(p), _) => format!("{p}; no other payment was mined by the deadline (Bitcoin block {d})"),
+            (None, Some(u)) => format!(
+                "no payment was mined by the deadline (Bitcoin block {d}) (the transaction {} in Bitcoin block {} pays the seller, but no proof can carry it: it opens nothing)",
+                u.txid, u.height
+            ),
+            (None, None) => format!("no payment was mined by the deadline (Bitcoin block {d})"),
+        };
+        let open = job
+            .payments
+            .iter()
+            .any(|p| p.real() && p.settled.is_none() && p.has_cancel());
+        if open && btc_tip <= d.saturating_add(CANCEL_KEEP_BLOCKS) {
+            // Not mined by D, and cancels to send. The swap has an outcome only once a
+            // spend of the payment's coins is confirmed, whatever the Sequentia node
+            // says of the lock: the cancel concerns Bitcoin alone.
             job.state = State::Waiting;
             job.decided_at = None;
             job.buried = false;
-            job.note = why;
-            // A payment Bitcoin vouched for, unmined and not in the daemon's mempool (a
-            // reorganization evicted it, say): sent again while it can still open the lock.
-            if complete && !job.cancel_sent && btc_tip < d {
-                for p in job
-                    .payments
-                    .iter()
-                    .filter(|p| p.vouched && p.settled.is_none() && !p.hex.is_empty())
-                {
-                    if !btc.pooled(&p.txid)? && btc.send_raw(&p.hex).is_ok() {
-                        job.note = "the payment was not in the Bitcoin mempool: sent again".into();
-                    }
-                }
-            }
-        }
-        Position::InWindow => {
-            job.decided_at = None;
-            job.buried = false;
-            let Some(want) = choose(seq, job)? else {
-                job.state = State::Waiting;
-                job.note = "no signed tier pays its fee in an asset the node accepts, from a coin still unspent".into();
-                return Err(Error(job.note.clone()));
+            job.note = if job.cancel_sent {
+                format!("{why}; the cancel is broadcast and not confirmed yet: it is sent again until a spend of the payment's coins is")
+            } else {
+                format!("{why}; the cancel is not accepted yet: it is sent again")
             };
-            if pooled == Some(want) {
-                job.state = State::Pooled;
-                return Ok(());
-            }
-            if Instant::now() >= until {
-                return Ok(());
-            }
-            let found = job.scan.found.clone().expect("in window");
-            match prove_claim(seq, btc, &job.terms, &job.lock, &job.claims[want], &found)? {
-                Completion::Ready { tx, height, .. } => match seq.send(&tx) {
-                    Ok(_) => {
-                        job.tier = want;
-                        job.pooled_at = Some(seq_tip);
-                        job.state = State::Pooled;
-                        job.note = format!(
-                            "the claim ({}tier, fee {}) is pooled with a proof of the payment {} in Bitcoin block {height}",
-                            if job.raised { "top " } else { "going " },
-                            fee_of(&tx).map(|(a, f)| format!("{f} atoms of {a}")).unwrap_or_default(),
-                            found.txid,
-                        );
-                    }
-                    Err(e) => {
-                        job.note = format!("the node refused the completed claim: {e}");
-                        return Err(Error(job.note.clone()));
-                    }
-                },
-                Completion::Waiting(why) => {
-                    job.state = State::Waiting;
-                    job.note = why;
-                }
-                Completion::Never(why) => {
-                    // This payment opens nothing; another one may. Never settled by it: it
-                    // is passed over, and the scan reads on from its block. Until another
-                    // is found the job is waiting, its cancels due as if none were mined.
-                    btc.pass_over(&mut job.scan)?;
-                    job.state = State::Waiting;
-                    job.note = format!("{why}: passed over, looking for another payment");
-                }
+        } else {
+            let why = match &job.scan.late {
+                Some(f) => format!(
+                    "the payment {} is mined at Bitcoin block {}, after the deadline {d}",
+                    f.txid, f.height
+                ),
+                None if open => format!("{why}; no spend of the payment's coins confirmed in {CANCEL_KEEP_BLOCKS} blocks"),
+                None => why,
+            };
+            end(job, State::Never, d, btc_tip, limits, why);
+        }
+        return Ok(());
+    }
+    job.state = State::Waiting;
+    job.decided_at = None;
+    job.buried = false;
+    job.note = match passed {
+        Some(p) => format!("{p}: passed over, looking for another payment"),
+        None => "the payment is not mined on Bitcoin yet".into(),
+    };
+    // A payment Bitcoin vouched for, unmined and not in the daemon's mempool (a
+    // reorganization evicted it, say): sent again while it can still open the lock.
+    if complete && !job.cancel_sent && btc_tip < d {
+        for p in job
+            .payments
+            .iter()
+            .filter(|p| p.vouched && p.settled.is_none() && !p.hex.is_empty())
+        {
+            if !btc.pooled(&p.txid)? && btc.send_raw(&p.hex).is_ok() {
+                job.note = "the payment was not in the Bitcoin mempool: sent again".into();
             }
         }
     }
