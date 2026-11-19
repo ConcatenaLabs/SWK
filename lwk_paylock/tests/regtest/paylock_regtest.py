@@ -1939,7 +1939,11 @@ class PayLockRegtest(LostSwapTest):
         c = "ownpay"
         w = self.bbuyer
         s = self.new_swap(c)
-        coins = sorted(w.listunspent(1), key=lambda u: -u["amount"])[:8]
+        # Eight coins of the buyer's own, confirmed.
+        addrs = [w.getnewaddress("", "bech32") for _ in range(8)]
+        fund = w.sendmany("", {a: Decimal("0.1") for a in addrs})
+        self.btc_mine(1)
+        coins = [u for u in w.listunspent(1) if u["txid"] == fund]
         assert len(coins) == 8, len(coins)
         total = sum(Decimal(str(u["amount"])) for u in coins)
         raw = w.createrawtransaction([{"txid": u["txid"], "vout": u["vout"]} for u in coins],

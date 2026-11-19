@@ -36,11 +36,12 @@
 //! within each, cancels never sent go first, nearest deadline first, then those sent
 //! before, the longest ago first, so a cancel skipped in one pass is reached in the
 //! next. The node's answer orders the sends and never withholds one. The work of
-//! completing claims runs jobs nearest deadline first, each within a time and block
-//! budget, and the whole round within a budget of its own; ended jobs that are still
-//! watched come after the live ones. The search for a payment keeps its place between
-//! rounds, so each Bitcoin block is read once per job. A job that fails retries with a
-//! backoff. Intake caps the request's size, the size of each transaction it keeps, the
+//! completing claims follows what happens on the chains, never the number of jobs or
+//! clients ([`work_round`]): each Bitcoin block is read once for every job
+//! ([`BlockCache`]), a job's search passes blocks that hold nothing for it by a lookup,
+//! and the jobs with a payment or a claim in play are worked first, taking turns by
+//! receiving script; each job within a time and block budget, the whole round within a
+//! budget of its own. A job that fails retries with a backoff. Intake caps the request's size, the size of each transaction it keeps, the
 //! claims, payments and cancels per job, a lock's span of heights, the number of live
 //! jobs and those each client starts, and needs a token whenever it listens
 //! beyond loopback. Each request is served on a thread of its own under deadlines, and
@@ -91,8 +92,9 @@ use serde_json::{json, Value};
 
 pub use crate::CANCEL_KEEP_BLOCKS;
 use crate::{
-    http, outpoint, prove_claim, proven_payment, refused_for_weight, Accept, BtcChain, Candidate,
-    Completion, Error, Found, Passed, PaymentScan, SeqChain, Settled, TxStatus,
+    http, outpoint, prove_claim, proven_payment, refused_for_weight, script_key, Accept, Advance,
+    BlockCache, BtcChain, Candidate, Completion, Error, Found, Passed, PaymentScan, SeqChain,
+    Settled, TxStatus,
 };
 
 /// How often a lock the node did not know is looked up again, in seconds.
@@ -588,6 +590,16 @@ pub struct Job {
     pub retry_at: u64,
     /// What the service last saw, in words.
     pub note: String,
+    /// When the work thread last worked the job (an order, not a time); 0 never, since the
+    /// service started. Not stored.
+    pub worked: u64,
+    /// The tips of both chains when it was last worked. Not stored.
+    pub epoch: (u32, u32),
+    /// How many times intake merged something new in, and how many of those the work
+    /// thread had seen when it last worked the job. Not stored.
+    pub changed: u64,
+    /// See `changed`.
+    pub seen: u64,
 }
 
 fn now_secs() -> u64 {
@@ -794,6 +806,10 @@ impl Job {
             failures: 0,
             retry_at: 0,
             note: String::new(),
+            worked: 0,
+            epoch: (0, 0),
+            changed: 0,
+            seen: 0,
         };
         for c in claims {
             job.add_claim(c);
@@ -1785,6 +1801,19 @@ pub fn tick(
     limits: &Limits,
     until: Instant,
 ) -> Result<(), Error> {
+    tick_with(seq, btc, &mut BlockCache::default(), job, limits, until)
+}
+
+/// [`tick`], reading Bitcoin's blocks through `blocks`, which the work thread shares
+/// between every job: each block is read once, whatever the number of jobs.
+pub fn tick_with(
+    seq: &SeqChain,
+    btc: &BtcChain,
+    blocks: &mut BlockCache,
+    job: &mut Job,
+    limits: &Limits,
+    until: Instant,
+) -> Result<(), Error> {
     let now = now_secs();
     // Mined, and final? Any tier may be the one mined.
     let finalized = seq.finalized_height()?;
@@ -1895,6 +1924,7 @@ pub fn tick(
         .iter()
         .any(|p| p.real() && p.settled.is_none() && p.has_cancel());
     let complete = btc.scan_lock(
+        blocks,
         &job.terms,
         &coins,
         &mut settled,
@@ -2267,6 +2297,8 @@ pub struct Store {
     dir: PathBuf,
     /// The jobs being carried (watched ones included), by id.
     pub jobs: BTreeMap<String, Job>,
+    /// Bitcoin's blocks as the work thread reads them, shared by every job.
+    pub blocks: Arc<Mutex<BlockCache>>,
 }
 
 impl Store {
@@ -2306,6 +2338,7 @@ impl Store {
         let mut st = Store {
             dir: dir.to_path_buf(),
             jobs,
+            blocks: Arc::new(Mutex::new(BlockCache::default())),
         };
         let done: Vec<String> = st
             .jobs
@@ -2337,10 +2370,12 @@ impl Store {
             ))));
         }
         if let Some(held) = self.jobs.get(&id).cloned() {
-            let (m, what) = merge(held, job, limits)?;
+            let (mut m, what) = merge(held, job, limits)?;
             if what.is_empty() {
                 return Ok((id, Added::Same));
             }
+            // Something new to work on: the job's turn comes early.
+            m.changed += 1;
             self.save(&m).map_err(io)?;
             self.jobs.insert(id.clone(), m);
             return Ok((id, Added::Merged(what)));
@@ -2534,24 +2569,124 @@ fn fold_in(job: &mut Job, cur: &Job, before: &Value) {
     }
 }
 
-/// One round of work: the live jobs (not ended, not backing off), nearest deadline
-/// first, then the ended ones still watched whose turn has come, each within its budget,
-/// the whole within the round's. The store's lock is held only to copy a job out and to
-/// put it back, so intake and cancels never wait on the chains. An ended job is archived
-/// once the Bitcoin block that decided it is buried. Returns how many jobs it worked on.
+/// The order jobs are worked in: an increasing count.
+static WORK_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// One round of work. The work a job costs follows what happens to it on the chains, never
+/// the number of jobs or of the clients that posted them:
+///
+/// - Bitcoin's blocks are read once for every job ([`BlockCache`]): a job's search moves
+///   through blocks that neither pay its receiving script nor spend its payments' coins
+///   by a lookup, without a call to either chain ([`BlockCache::advance`]);
+/// - first, the jobs with a payment or a claim in play: a block that pays or spends for
+///   them, a payment found and not yet claimed, or a claim pooled or mined, each worked
+///   again whenever either chain moves; then the jobs new or changed since they were last
+///   worked, holding a payment or cancel Bitcoin cannot check yet, or whose search
+///   reached a block not read yet; then the rest whose chains moved, for the state they
+///   show;
+/// - within each of those, the jobs take turns by receiving script, each script's least
+///   recently worked first. A script is the seller's address for the swap: one more turn
+///   in a round costs one more output on Bitcoin, never one more address or post, so
+///   however many jobs and clients there are, a buyer whose payment is mined is worked
+///   in the round's first turns.
+///
+/// A job backing off, and an ended one still watched whose turn has not come, waits.
+/// Each job works within its budget, the whole round within the round's. The store's lock
+/// is held only to sort the jobs, copy one out and put it back, so intake and cancels
+/// never wait on the chains. An ended job is archived once the Bitcoin block that decided
+/// it is buried. Returns how many jobs it worked on.
 pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: &Limits) -> usize {
     let start = Instant::now();
     let round_end = start + limits.round_time;
     let now = now_secs();
-    let mut order: Vec<(bool, u32, String)> = lock(store)
-        .jobs
-        .values()
-        .filter(|j| j.retry_at <= now && (!j.state.ended() || j.watch_at <= now))
-        .map(|j| (j.state.ended(), j.terms.deadline, j.id.clone()))
+    let cache = lock(store).blocks.clone();
+    let mut blocks = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(btc_tip) = blocks.sync(btc, start + limits.round_time / 2) else {
+        return 0;
+    };
+    let Ok(seq_tip) = seq.height() else {
+        return 0;
+    };
+    let epoch = (seq_tip, btc_tip);
+    let pooled: std::collections::HashSet<String> = seq
+        .rpc
+        .call("getrawmempool", json!([]))
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| t.as_str().map(String::from))
         .collect();
-    order.sort();
+    // (class, receiving script, last worked, deadline, id)
+    let mut due: Vec<(u8, u64, u64, u32, String)> = vec![];
+    for j in lock(store).jobs.values_mut() {
+        if j.retry_at > now || (j.state.ended() && j.watch_at > now) {
+            continue;
+        }
+        let coins: Vec<Vec<bitcoin::OutPoint>> =
+            j.payments.iter().map(|p| p.coins.clone()).collect();
+        let open = j
+            .payments
+            .iter()
+            .any(|p| p.real() && p.settled.is_none() && p.has_cancel());
+        let moved = j.epoch != epoch;
+        let claim_pooled = j
+            .claims
+            .iter()
+            .any(|c| pooled.contains(&c.txid().to_string()));
+        let in_play = matches!(j.state, State::Pooled | State::Mined)
+            || (!j.scan.candidates.is_empty() && j.scan.found.is_none() && !j.state.ended());
+        let class = match blocks.advance(&j.terms, &coins, open, &mut j.scan, btc_tip) {
+            Advance::Hit => 0,
+            _ if claim_pooled && j.state != State::Pooled => 0,
+            _ if in_play && moved => 0,
+            Advance::Unread => 1,
+            _ if j.worked == 0 || j.changed != j.seen => 1,
+            // Held but not checked yet: checked again every round until Bitcoin can.
+            _ if j
+                .payments
+                .iter()
+                .any(|p| !p.vouched || !p.pending.is_empty()) =>
+            {
+                1
+            }
+            _ if moved => 2,
+            _ => continue,
+        };
+        let script = script_key(j.terms.receive_script_pubkey().as_bytes());
+        due.push((class, script, j.worked, j.terms.deadline, j.id.clone()));
+    }
+    let mut order: Vec<String> = vec![];
+    for class in 0..3u8 {
+        let mut groups: BTreeMap<u64, std::collections::VecDeque<(u64, u32, String)>> =
+            BTreeMap::new();
+        for (c, script, w, d, id) in due.iter().filter(|x| x.0 == class) {
+            let _ = c;
+            groups
+                .entry(*script)
+                .or_default()
+                .push_back((*w, *d, id.clone()));
+        }
+        let mut queues: Vec<std::collections::VecDeque<(u64, u32, String)>> = groups
+            .into_values()
+            .map(|q| {
+                let mut v: Vec<_> = q.into_iter().collect();
+                v.sort();
+                v.into()
+            })
+            .collect();
+        // The script whose next job waited longest takes the first turn.
+        queues.sort_by_key(|q| q.front().map(|x| (x.0, x.1)));
+        while queues.iter().any(|q| !q.is_empty()) {
+            for q in queues.iter_mut() {
+                if let Some((_, _, id)) = q.pop_front() {
+                    order.push(id);
+                }
+            }
+        }
+    }
     let mut worked = 0;
-    for (_, _, id) in order {
+    for id in order {
         let t = Instant::now();
         if t >= round_end {
             break;
@@ -2561,7 +2696,11 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
         };
         let until = (t + limits.job_time).min(round_end);
         let before = job.to_json();
-        match tick(seq, btc, &mut job, limits, until) {
+        let result = tick_with(seq, btc, &mut blocks, &mut job, limits, until);
+        job.worked = WORK_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        job.epoch = epoch;
+        job.seen = job.changed;
+        match result {
             Ok(()) => {
                 job.failures = 0;
                 job.retry_at = 0;
@@ -2603,6 +2742,8 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
             if cur.cancel_sent && !before["cancel_sent"].as_bool().unwrap_or(false) {
                 job.note = format!("{}; {}", cur.note, job.note);
             }
+            // What intake merged in while it was worked is still to be seen.
+            job.changed = cur.changed;
         }
         if job.to_json() != before {
             let _ = st.save(&job);

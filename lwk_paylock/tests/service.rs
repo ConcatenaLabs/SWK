@@ -1924,8 +1924,17 @@ fn the_payment_is_whatever_bitcoin_mines_paying_the_terms() {
     *blocks.lock().unwrap() = vec![vec![early], vec![cancel.clone()], vec![stranger.clone()]];
     let mut scan = lwk_paylock::PaymentScan::default();
     let mut settled = vec![None];
-    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
-        .unwrap();
+    btc.scan_lock(
+        &mut lwk_paylock::BlockCache::default(),
+        &t,
+        &coins,
+        &mut settled,
+        true,
+        &mut scan,
+        100,
+        far,
+    )
+    .unwrap();
     // The scan takes nothing: the stranger's payment is a candidate, not yet the payment.
     assert!(scan.found.is_none());
     let f = scan
@@ -1945,8 +1954,17 @@ fn the_payment_is_whatever_bitcoin_mines_paying_the_terms() {
         .collect();
     let mut scan = lwk_paylock::PaymentScan::default();
     let mut settled = vec![None];
-    btc.scan_lock(&t, &coins, &mut settled, false, &mut scan, 100, far)
-        .unwrap();
+    btc.scan_lock(
+        &mut lwk_paylock::BlockCache::default(),
+        &t,
+        &coins,
+        &mut settled,
+        false,
+        &mut scan,
+        100,
+        far,
+    )
+    .unwrap();
     assert!(scan.found.is_none() && scan.candidates.is_empty());
     assert_eq!(scan.late.map(|f| f.height), Some(1007));
     assert_eq!(settled[0].clone().map(|s| s.paid), Some(true));
@@ -2013,8 +2031,17 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     *blocks.lock().unwrap() = vec![vec![], vec![big.clone()], vec![held.clone()]];
     let mut scan = lwk_paylock::PaymentScan::default();
     let mut settled = vec![None];
-    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
-        .unwrap();
+    btc.scan_lock(
+        &mut lwk_paylock::BlockCache::default(),
+        &t,
+        &coins,
+        &mut settled,
+        true,
+        &mut scan,
+        100,
+        far,
+    )
+    .unwrap();
     let ids = |s: &lwk_paylock::PaymentScan| {
         s.ordered()
             .into_iter()
@@ -2039,7 +2066,16 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     let mut scan = lwk_paylock::PaymentScan::default();
     let mut settled = vec![None];
     assert!(btc
-        .scan_lock(&t, &coins, &mut settled, false, &mut scan, 100, far)
+        .scan_lock(
+            &mut lwk_paylock::BlockCache::default(),
+            &t,
+            &coins,
+            &mut settled,
+            false,
+            &mut scan,
+            100,
+            far
+        )
         .unwrap());
     assert!(scan.found.is_none() && scan.late.is_none() && scan.candidates.is_empty());
     assert_eq!(scan.unprovable.as_ref().map(|f| f.height), Some(1001));
@@ -2056,8 +2092,17 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     *blocks.lock().unwrap() = vec![vec![], vec![held_big]];
     let mut scan = lwk_paylock::PaymentScan::default();
     let mut settled = vec![None];
-    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
-        .unwrap();
+    btc.scan_lock(
+        &mut lwk_paylock::BlockCache::default(),
+        &t,
+        &coins,
+        &mut settled,
+        true,
+        &mut scan,
+        100,
+        far,
+    )
+    .unwrap();
     assert!(scan.candidates.is_empty());
     assert_eq!(
         settled[0].clone().map(|s| (s.at.height, s.paid)),
@@ -2077,8 +2122,17 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     ];
     let mut scan = lwk_paylock::PaymentScan::default();
     let mut settled = vec![None];
-    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
-        .unwrap();
+    btc.scan_lock(
+        &mut lwk_paylock::BlockCache::default(),
+        &t,
+        &coins,
+        &mut settled,
+        true,
+        &mut scan,
+        100,
+        far,
+    )
+    .unwrap();
     assert_eq!(
         ids(&scan),
         vec![
@@ -2113,8 +2167,17 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     reorged[2] = vec![];
     *blocks.lock().unwrap() = reorged;
     scan.scanned = Some((1003, format!("{:064x}", 0xdead)));
-    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
-        .unwrap();
+    btc.scan_lock(
+        &mut lwk_paylock::BlockCache::default(),
+        &t,
+        &coins,
+        &mut settled,
+        true,
+        &mut scan,
+        100,
+        far,
+    )
+    .unwrap();
     assert!(scan.passed.is_empty());
     assert_eq!(
         ids(&scan),
@@ -2128,8 +2191,17 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     *blocks.lock().unwrap() = vec![vec![], many.clone(), vec![held.clone()]];
     let mut scan = lwk_paylock::PaymentScan::default();
     let mut settled = vec![None];
-    btc.scan_lock(&t, &coins, &mut settled, true, &mut scan, 100, far)
-        .unwrap();
+    btc.scan_lock(
+        &mut lwk_paylock::BlockCache::default(),
+        &t,
+        &coins,
+        &mut settled,
+        true,
+        &mut scan,
+        100,
+        far,
+    )
+    .unwrap();
     assert_eq!(scan.candidates.len(), lwk_paylock::MAX_CANDIDATES + 1);
     let kept = ids(&scan);
     assert_eq!(kept[0], (1002, id(&held)));

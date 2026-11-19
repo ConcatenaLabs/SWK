@@ -267,13 +267,25 @@ it knows go first, then those it has not answered for, then those it says it doe
 not know. Within each, the clients that handed the payments over take turns, so
 one client's many payments get one send per turn like any other's; and each
 client's cancels never tried go first, nearest deadline first, then those tried
-before, the longest ago first, so what one pass does not reach the next one does. A cancel is sent until 144 blocks past `D`. The rest runs live
-jobs nearest deadline first, each within a time and block budget and the round
-within its own, and watched jobs after them; the search for the payment keeps
-its place between rounds and reads each Bitcoin block once, from `F` to six
-blocks past `D` (on to Bitcoin's tip, up to 144 blocks past `D`, while a
-payment held with cancels is not settled). It keeps every payment handed over
-and the 32 lightest others as candidates. A failing
+before, the longest ago first, so what one pass does not reach the next one does. A cancel is sent until 144 blocks past `D`.
+
+The rest of the work follows what happens on the chains, never the number of
+jobs or of the clients that posted them. Each Bitcoin block is read from the
+daemon once for every job, and kept (two weeks of blocks) as the scripts it pays
+and the coins it spends: a job's search for its payment, from `F` to six blocks
+past `D` (on to Bitcoin's tip, up to 144 blocks past `D`, while a payment held
+with cancels is not settled), passes a block that neither pays its receiving
+script nor spends its payments' coins by a lookup, and reads a block whole only
+when it does. A round works first the jobs with a payment or a claim in play (a
+block that pays or spends for them, a payment found and not yet claimed, a claim
+pooled or mined), whenever either chain moves; then the jobs new or changed
+since they were last worked, or holding a payment or cancel the daemon cannot
+check yet; then, as the round's time allows, the rest whose chains moved. Within
+each, the jobs take turns by receiving script, least recently worked first: a
+turn costs an output on Bitcoin, not an address, so a buyer whose payment is
+mined is worked in a round's first turns however many jobs and clients there
+are. Each job works within a time and block budget, the round within its own.
+A job keeps every payment handed over and the 32 lightest others as candidates. A failing
 job backs off, up to a minute. Intake caps a request at 512 KiB, a job at eight
 claims, eight unvouched payments and, per payment, four cancels (and 16 not yet
 checkable), a lock at 1,008 Bitcoin blocks from `F` to `D`, the service at

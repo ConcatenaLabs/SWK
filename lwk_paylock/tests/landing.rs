@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lwk_paylock::service::{self, Job, Limits};
+use lwk_paylock::service::{self, Job, Limits, Store};
 use lwk_paylock::{BtcChain, Rpc, SeqChain};
 use lwk_wollet::bitcoin;
 use lwk_wollet::bitcoin::hashes::Hash as _;
@@ -68,6 +68,11 @@ fn key(b: u8) -> SecretKey {
 const BASE: u32 = 1_000;
 
 fn terms() -> PayLockTerms {
+    terms_at(BASE, BASE + 6, 3)
+}
+
+/// Terms from `floor` to `deadline`, paying the seller's receiving key made from byte `r`.
+fn terms_at(floor: u32, deadline: u32, r: u8) -> PayLockTerms {
     let secp = Secp256k1::new();
     let x = |b| {
         Keypair::from_secret_key(&secp, &key(b))
@@ -76,7 +81,7 @@ fn terms() -> PayLockTerms {
     };
     let rk = bitcoin::PublicKey::new(bitcoin::secp256k1::PublicKey::from_secret_key(
         &bitcoin::secp256k1::Secp256k1::new(),
-        &bitcoin::secp256k1::SecretKey::from_slice(&[3u8; 32]).unwrap(),
+        &bitcoin::secp256k1::SecretKey::from_slice(&[r; 32]).unwrap(),
     ));
     PayLockTerms::new(
         AssetId::from_slice(&[5; 32]).unwrap(),
@@ -85,8 +90,8 @@ fn terms() -> PayLockTerms {
         x(1),
         x(2),
         rk,
-        BASE,
-        BASE + 6,
+        floor,
+        deadline,
     )
     .unwrap()
 }
@@ -176,6 +181,7 @@ struct Btc {
     best: usize,
     node: usize,
     switch_on_proof: Option<(String, usize)>,
+    fetched: u64,
 }
 
 impl Btc {
@@ -205,6 +211,7 @@ fn fake_btc(state: Arc<Mutex<Btc>>) -> String {
             "getblock" => {
                 let b = by(&p[0]).ok_or((-5, "Block not found".to_string()))?;
                 if p[1].as_u64() == Some(0) {
+                    s.fetched += 1;
                     return Ok(json!(hex_encode(&bitcoin::consensus::encode::serialize(
                         &b
                     ))));
@@ -251,6 +258,7 @@ struct Seq {
     pooled: HashMap<String, Transaction>,
     per_atom: usize,
     refused: Vec<String>,
+    first_pooled: Option<Instant>,
 }
 
 fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
@@ -307,6 +315,7 @@ fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
                     return Err((-26, m));
                 }
                 s.pooled.insert(tx.txid().to_string(), tx.clone());
+                s.first_pooled.get_or_insert_with(Instant::now);
                 Ok(json!(tx.txid().to_string()))
             }
             _ => Err((-32601, "Method not found".into())),
@@ -392,6 +401,7 @@ fn world(
         pooled: HashMap::new(),
         per_atom,
         refused: vec![],
+        first_pooled: None,
     }));
     let (su, bu) = (fake_seq(seq.clone(), btc.clone()), fake_btc(btc.clone()));
     World {
@@ -604,4 +614,106 @@ fn a_branch_switch_inside_one_round_passes_nothing_over() {
         (v["state"].clone(), v["payment_height"].clone()),
         (json!("pooled"), json!(1003))
     );
+}
+
+/// A flood of `jobs` jobs on the attacker's own terms (its floor 1,000 Bitcoin blocks back,
+/// its deadline a block before the buyer's), posted from `clients` addresses, beside the
+/// buyer's job. Every job is worked once; then the buyer's payment is mined and anchored.
+/// Returns how long the next round took to pool the buyer's claim, and how many blocks the
+/// daemon served.
+fn flood(jobs: usize, clients: usize) -> (Option<Duration>, u64) {
+    let tip = BASE + 1_000;
+    let buyer_terms = terms_at(tip - 1, tip + 6, 3);
+    let att = terms_at(BASE, tip + 5, 4);
+    let blocks = chain(bitcoin::BlockHash::all_zeros(), 1, &vec![vec![]; 1_001]);
+    let mut anchors = vec![BASE, BASE];
+    anchors.extend(BASE + 1..=tip);
+    let w = world(&buyer_terms, vec![blocks], anchors, 1);
+    let dir = std::env::temp_dir().join(format!("paylock-flood-{jobs}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let limits = Limits {
+        max_jobs: 1_000_000,
+        jobs_per_client: 0,
+        round_time: Duration::from_secs(10),
+        ..Limits::default()
+    };
+    let store = Mutex::new(Store::open(&dir).unwrap());
+    let att_lock = lock_tx(&att);
+    let att_claim = |i: u32| {
+        let lock = OutPoint::new(att_lock.txid(), i);
+        let c = paylock::sign_claim(
+            &att,
+            lock,
+            Script::from(vec![0x51]),
+            1_000,
+            BlockHash::all_zeros(),
+            &key(1),
+        )
+        .unwrap();
+        json!({"terms": att.to_json(), "lock": format!("{}:{}", lock.txid, lock.vout),
+               "claims": [hex_encode(&serialize(&c))]})
+    };
+    {
+        let mut st = store.lock().unwrap();
+        for i in 0..jobs {
+            let mut j = Job::from_request(&att_claim(i as u32)).unwrap();
+            j.client = format!("100.64.{}.{}", (i % clients) / 250, (i % clients) % 250);
+            st.add(j, &limits).unwrap();
+        }
+        let mut j = job(&buyer_terms, &w.seq.lock().unwrap().lock.clone(), None);
+        j.client = "203.0.113.91".into();
+        st.add(j, &limits).unwrap();
+    }
+    // Every job worked once, nothing paid yet.
+    for _ in 0..30 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+        let pending = store
+            .lock()
+            .unwrap()
+            .jobs
+            .values()
+            .filter(|j| j.note.is_empty())
+            .count();
+        if pending == 0 {
+            break;
+        }
+    }
+    // The buyer pays: its payment mined at the next block and anchored.
+    let buyer = payment(&buyer_terms, 42, 0);
+    {
+        let mut b = w.btc.lock().unwrap();
+        let p = b.branches[0].last().unwrap().block_hash();
+        b.branches[0].push(block(p, 200, &[buyer]));
+    }
+    w.seq.lock().unwrap().anchors.push(tip + 1);
+    let t0 = Instant::now();
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    let took = w.seq.lock().unwrap().first_pooled.map(|t| t - t0);
+    let fetched = w.btc.lock().unwrap().fetched;
+    let _ = std::fs::remove_dir_all(&dir);
+    (took, fetched)
+}
+
+#[test]
+fn a_flood_of_jobs_and_clients_does_not_delay_a_buyers_claim() {
+    let mut seen = vec![];
+    for (jobs, clients) in [(100, 8), (1_000, 8), (1_000, 500)] {
+        let (took, fetched) = flood(jobs, clients);
+        eprintln!("{jobs} attacker jobs from {clients} addresses: the buyer's claim pooled {took:?} into the round after its payment; {fetched} blocks served");
+        seen.push((jobs, clients, took, fetched));
+    }
+    for (jobs, clients, took, fetched) in seen {
+        let took = took.unwrap_or_else(|| {
+            panic!("{jobs} jobs from {clients}: the buyer's claim was not pooled in the round")
+        });
+        assert!(
+            took < Duration::from_secs(2),
+            "{jobs} jobs from {clients}: {took:?}"
+        );
+        // Each of the 1,002 blocks read about once, whatever the number of jobs.
+        assert!(
+            fetched < 1_100,
+            "{jobs} jobs from {clients}: {fetched} blocks served"
+        );
+    }
 }

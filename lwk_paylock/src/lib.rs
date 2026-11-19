@@ -582,6 +582,207 @@ fn classify(
     Some(named || pays)
 }
 
+/// A key for a receiving script in a [`BlockCache`].
+pub fn script_key(spk: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    spk.hash(&mut h);
+    h.finish()
+}
+
+/// A key for a coin in a [`BlockCache`].
+pub fn coin_key(c: &bitcoin::OutPoint) -> u64 {
+    use bitcoin::hashes::Hash as _;
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    c.txid.to_byte_array().hash(&mut h);
+    c.vout.hash(&mut h);
+    h.finish()
+}
+
+/// What a [`BlockCache`] keeps of a block: its hash, and keys of every script its
+/// transactions pay and every coin they spend (the coinbase's left out).
+#[derive(Debug, Clone)]
+struct Summary {
+    hash: String,
+    pays: std::collections::HashSet<u64>,
+    spends: std::collections::HashSet<u64>,
+}
+
+/// Bitcoin's best chain as the completion service reads it: each block is read from the
+/// daemon once and kept as keys of the scripts it pays and the coins it spends, so the
+/// work of looking for a lock's payment is a lookup per block, whatever the number of
+/// locks looked for. A block is read whole again only when it holds a key a lock looks
+/// for, and the few last read whole are kept. [`BlockCache::sync`] drops what a
+/// reorganization replaced.
+#[derive(Debug, Default)]
+pub struct BlockCache {
+    blocks: std::collections::BTreeMap<u32, Summary>,
+    whole: std::collections::VecDeque<(String, std::sync::Arc<bitcoin::Block>)>,
+    /// Blocks fetched from the daemon, in all.
+    pub fetched: u64,
+}
+
+/// Bitcoin blocks below the tip a [`BlockCache`] keeps: two weeks, more than a lock's
+/// heights and the watch after them span.
+pub const CACHE_BLOCKS: u32 = 2 * paylock::MAX_DEADLINE_AHEAD + CANCEL_KEEP_BLOCKS;
+
+/// Where [`BlockCache::advance`] stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Advance {
+    /// As far as the scan reads: nothing in the blocks passed concerns the lock.
+    Done,
+    /// At a block that pays the lock's script or spends one of its coins, or a block the
+    /// scan read is no longer the one the cache holds: the job has work.
+    Hit,
+    /// At a block the cache has not read.
+    Unread,
+}
+
+impl BlockCache {
+    /// Brings the cache in line with the daemon's best chain: what is above its tip, or
+    /// replaced by a reorganization, is dropped, and so is what is too deep to matter.
+    /// Then reads every block above what it holds, up to the tip. Returns the tip.
+    pub fn sync(&mut self, btc: &BtcChain, until: Instant) -> Result<u32, Error> {
+        let tip = btc.tip()?;
+        self.blocks
+            .retain(|h, _| *h <= tip && *h + CACHE_BLOCKS >= tip);
+        while let Some((&h, s)) = self.blocks.iter().next_back() {
+            if btc.block_hash(h)? == s.hash {
+                break;
+            }
+            self.blocks.remove(&h);
+        }
+        if let Some(&top) = self.blocks.keys().next_back() {
+            for h in top + 1..=tip {
+                if Instant::now() >= until {
+                    break;
+                }
+                self.summary(btc, h)?;
+            }
+        }
+        Ok(tip)
+    }
+
+    // The entry API would hold the map while the block is read and kept whole.
+    #[allow(clippy::map_entry)]
+    fn summary(&mut self, btc: &BtcChain, h: u32) -> Result<&Summary, Error> {
+        if !self.blocks.contains_key(&h) {
+            let hash = btc.block_hash(h)?;
+            let block = btc.block(&hash)?;
+            self.fetched += 1;
+            let mut pays = std::collections::HashSet::new();
+            let mut spends = std::collections::HashSet::new();
+            for tx in block.txdata.iter().skip(1) {
+                for o in &tx.output {
+                    pays.insert(script_key(o.script_pubkey.as_bytes()));
+                }
+                for i in &tx.input {
+                    spends.insert(coin_key(&i.previous_output));
+                }
+            }
+            self.keep_whole(hash.clone(), std::sync::Arc::new(block));
+            self.blocks.insert(h, Summary { hash, pays, spends });
+        }
+        Ok(self.blocks.get(&h).expect("inserted"))
+    }
+
+    fn keep_whole(&mut self, hash: String, b: std::sync::Arc<bitcoin::Block>) {
+        self.whole.retain(|(k, _)| *k != hash);
+        self.whole.push_back((hash, b));
+        while self.whole.len() > 8 {
+            self.whole.pop_front();
+        }
+    }
+
+    /// The hash of the best chain's block at `h`, as the cache holds it.
+    pub fn hash(&mut self, btc: &BtcChain, h: u32) -> Result<String, Error> {
+        match self.blocks.get(&h) {
+            Some(s) => Ok(s.hash.clone()),
+            None => btc.block_hash(h),
+        }
+    }
+
+    /// The block at `h`, its hash, and whether it pays `script` or spends any of `coins`.
+    fn hits(
+        &mut self,
+        btc: &BtcChain,
+        h: u32,
+        script: u64,
+        coins: &[u64],
+    ) -> Result<(String, bool), Error> {
+        let s = self.summary(btc, h)?;
+        let hit = s.pays.contains(&script) || coins.iter().any(|c| s.spends.contains(c));
+        Ok((s.hash.clone(), hit))
+    }
+
+    fn block(
+        &mut self,
+        btc: &BtcChain,
+        hash: &str,
+    ) -> Result<std::sync::Arc<bitcoin::Block>, Error> {
+        if let Some((_, b)) = self.whole.iter().find(|(k, _)| k == hash) {
+            return Ok(b.clone());
+        }
+        let b = std::sync::Arc::new(btc.block(hash)?);
+        self.fetched += 1;
+        self.keep_whole(hash.to_string(), b.clone());
+        Ok(b)
+    }
+
+    /// Moves a scan on through the blocks the cache holds, reading nothing from the
+    /// daemon, while none concerns the lock: none pays `terms`' receiving script and none
+    /// spends a coin of `coins`. What [`BtcChain::scan_lock`] would do over those blocks is
+    /// only to move on, so a lock nothing happens to costs a lookup per block. It stops
+    /// where the scan has work to do.
+    pub fn advance(
+        &self,
+        terms: &PayLockTerms,
+        coins: &[Vec<bitcoin::OutPoint>],
+        open: bool,
+        scan: &mut PaymentScan,
+        tip: u32,
+    ) -> Advance {
+        if let Some((h, hash)) = &scan.scanned {
+            match self.blocks.get(h) {
+                Some(s) if s.hash == *hash => {}
+                Some(_) => return Advance::Hit,
+                None if *h > tip => return Advance::Hit,
+                None => return Advance::Unread,
+            }
+        }
+        let script = script_key(terms.receive_script_pubkey().as_bytes());
+        let keys: Vec<u64> = coins.iter().flatten().map(coin_key).collect();
+        let last = scan_last(terms, open, tip);
+        let mut h = scan
+            .scanned
+            .as_ref()
+            .map(|(h, _)| h + 1)
+            .unwrap_or(terms.floor.max(1));
+        while h <= last {
+            let Some(s) = self.blocks.get(&h) else {
+                return Advance::Unread;
+            };
+            if s.pays.contains(&script) || keys.iter().any(|c| s.spends.contains(c)) {
+                return Advance::Hit;
+            }
+            scan.scanned = Some((h, s.hash.clone()));
+            h += 1;
+        }
+        Advance::Done
+    }
+}
+
+/// The last block a lock's scan reads: [`LATE_SCAN`] past `D`, or [`CANCEL_KEEP_BLOCKS`]
+/// while `open`, and not above the tip.
+fn scan_last(terms: &PayLockTerms, open: bool, tip: u32) -> u32 {
+    tip.min(
+        terms
+            .deadline
+            .saturating_add(if open { CANCEL_KEEP_BLOCKS } else { LATE_SCAN }),
+    )
+}
+
 impl BtcChain {
     /// Bitcoin's tip height.
     pub fn tip(&self) -> Result<u32, Error> {
@@ -727,6 +928,7 @@ impl BtcChain {
     #[allow(clippy::too_many_arguments)]
     pub fn scan_lock(
         &self,
+        blocks: &mut BlockCache,
         terms: &PayLockTerms,
         coins: &[Vec<bitcoin::OutPoint>],
         settled: &mut [Option<Settled>],
@@ -737,9 +939,9 @@ impl BtcChain {
     ) -> Result<bool, Error> {
         let tip = self.tip()?;
         let mut gone = false;
-        let kept = |f: &Option<Found>| -> Result<bool, Error> {
+        let mut kept = |f: &Option<Found>| -> Result<bool, Error> {
             Ok(match f {
-                Some(f) => f.height <= tip && self.block_hash(f.height)? == f.block,
+                Some(f) => f.height <= tip && blocks.hash(self, f.height)? == f.block,
                 None => true,
             })
         };
@@ -762,7 +964,7 @@ impl BtcChain {
             }
         }
         if let Some((h, hash)) = &scan.scanned {
-            if *h > tip || self.block_hash(*h)? != *hash {
+            if *h > tip || blocks.hash(self, *h)? != *hash {
                 gone = true;
             }
         }
@@ -778,20 +980,28 @@ impl BtcChain {
             settled.iter_mut().for_each(|s| *s = None);
         }
         let first = terms.floor.max(1);
-        let last = tip.min(terms.deadline.saturating_add(if open {
-            CANCEL_KEEP_BLOCKS
-        } else {
-            LATE_SCAN
-        }));
+        let last = scan_last(terms, open, tip);
         let spk = terms.receive_script_pubkey();
+        let script = script_key(spk.as_bytes());
+        let keys: Vec<u64> = coins.iter().flatten().map(coin_key).collect();
         let mut h = scan.scanned.as_ref().map(|(h, _)| h + 1).unwrap_or(first);
         let mut read = 0;
         while h <= last {
-            if read >= max_blocks || Instant::now() >= until {
+            if Instant::now() >= until {
                 return Ok(false);
             }
-            let hash = self.block_hash(h)?;
-            let block = self.block(&hash)?;
+            // Each block is read once for every lock (the cache); one that neither pays
+            // this lock's script nor spends its coins holds nothing for it.
+            let (hash, hit) = blocks.hits(self, h, script, &keys)?;
+            if !hit {
+                scan.scanned = Some((h, hash));
+                h += 1;
+                continue;
+            }
+            if read >= max_blocks {
+                return Ok(false);
+            }
+            let block = blocks.block(self, &hash)?;
             read += 1;
             scan.scanned = Some((h, hash.clone()));
             let depth = paylock::merkle_depth(block.txdata.len());
