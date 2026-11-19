@@ -15,6 +15,7 @@
 //! shown a claim on a payment that is in no Bitcoin block, and must not be used
 //! to decide that a swap is complete.
 
+pub mod http;
 pub mod service;
 
 use std::time::Duration;
@@ -694,6 +695,19 @@ impl BtcChain {
         }
     }
 
+    /// The fee in satoshis of a transaction the daemon's mempool holds; `None` when it
+    /// does not hold it.
+    pub fn mempool_fee(&self, txid: &str) -> Result<Option<u64>, Error> {
+        match self.rpc.call("getmempoolentry", json!([txid])) {
+            Ok(v) => Ok(v
+                .pointer("/fees/base")
+                .and_then(Value::as_f64)
+                .map(|b| (b * 1e8).round() as u64)),
+            Err(RpcError::Rpc { code: -5, .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// What the daemon would do with a transaction now, without relaying it
     /// (`testmempoolaccept`): it checks every signature and, against a transaction it
     /// pools that spends the same coins, the replacement rules.
@@ -739,8 +753,9 @@ impl Accept {
             || reason.contains("witness-program")
     }
 
-    /// Whether a refusal says the coins it spends are not there to spend (already spent in
-    /// a block, or never seen by the daemon).
+    /// Whether a refusal says the daemon does not have the coins it spends: never seen
+    /// (a parent not broadcast yet), or already spent. Which of the two it cannot say, so
+    /// it never settles anything.
     pub fn coins_missing(reason: &str) -> bool {
         reason.contains("missing-inputs") || reason.contains("missingorspent")
     }

@@ -650,13 +650,16 @@ fn run(cmd: &str, a: &Args) -> Result<Value, Error> {
             if let Some(n) = a.get("max-jobs") {
                 limits.max_jobs = n.parse().map_err(|_| Error("--max-jobs".into()))?;
             }
+            if let Some(n) = a.get("jobs-per-client") {
+                limits.jobs_per_client =
+                    n.parse().map_err(|_| Error("--jobs-per-client".into()))?;
+            }
             if let Some(n) = a.get("watch-depth") {
                 limits.watch_depth = n.parse().map_err(|_| Error("--watch-depth".into()))?;
             }
             if let Some(n) = a.get("watch-every") {
-                limits.watch_every = Duration::from_secs_f64(
-                    n.parse().map_err(|_| Error("--watch-every".into()))?,
-                );
+                limits.watch_every =
+                    Duration::from_secs_f64(n.parse().map_err(|_| Error("--watch-every".into()))?);
             }
             // A slow node is given up on after 15 s, so one job's call cannot hold the
             // round; the cancel thread and intake give up after 3 s, so no send holds a

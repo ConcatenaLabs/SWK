@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lwk_paylock::service::{self, Added, Intake, Job, Limits, Refused, State, Store};
+use lwk_paylock::service::{self, Added, Intake, Job, Limits, State, Store};
 use lwk_paylock::{BtcChain, Rpc, SeqChain};
 use lwk_wollet::bitcoin;
 use lwk_wollet::btc::paylock::{self, hex_encode, PayLockTerms};
@@ -255,7 +255,11 @@ fn a_stalled_round_does_not_hold_back_a_due_cancel() {
     let dir = tmpdir("stalled");
     {
         let mut st = Store::open(&dir).unwrap();
-        let limits = Limits::default();
+        // One client starts them all here; its quota is not what this case is about.
+        let limits = Limits {
+            jobs_per_client: 0,
+            ..Limits::default()
+        };
         // Thirty ended and buried jobs, as a long-running service accumulates them.
         for n in 0..30 {
             let mut j = Job::from_request(&request(n, 990, 996, None)).unwrap();
@@ -353,11 +357,19 @@ fn a_stalled_round_does_not_hold_back_a_due_cancel() {
 
 /// Posts JSON to the service; returns the status code and the body.
 fn post(port: u16, path: &str, body: &Value) -> (u16, Value) {
+    post_as(port, path, body, None)
+}
+
+/// Posts JSON to the service as the client `client` (a reverse proxy's `X-Forwarded-For`).
+fn post_as(port: u16, path: &str, body: &Value, client: Option<&str>) -> (u16, Value) {
     let b = body.to_string();
+    let fwd = client
+        .map(|c| format!("X-Forwarded-For: {c}\r\n"))
+        .unwrap_or_default();
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         s,
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}",
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{fwd}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}",
         b.len()
     )
     .unwrap();
@@ -410,6 +422,21 @@ fn serve(dir: &std::path::Path, seq_url: &str, btc_url: &str) -> (Serve, u16) {
     (serve, port)
 }
 
+/// Gets a path from the service; returns the status code and the body.
+fn get(port: u16, path: &str) -> (u16, Value) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let code = out.get(9..12).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let json = out.split("\r\n\r\n").nth(1).unwrap_or("null");
+    (code, serde_json::from_str(json).unwrap_or(Value::Null))
+}
+
 /// A fake Bitcoin daemon's answer to `testmempoolaccept`: every transaction allowed.
 fn allow_all(p: &Value) -> Result<Value, (i32, String)> {
     Ok(json!([{"txid": "00", "allowed": true, "fees": {"base": 0.0001}, "params": p}]))
@@ -420,9 +447,50 @@ fn genesis_answer(p: &Value) -> Option<Value> {
     (p[0].as_u64() == Some(0)).then(|| json!("00".repeat(32)))
 }
 
-/// The review's flood: stale jobs (locks no node knows) whose deadlines come first and
-/// whose cancels the Bitcoin daemon takes 50 ms each to refuse, beside one live job. Run
-/// against the `paylock` binary, so the same case judges any revision of the service.
+type Locks = Arc<Mutex<std::collections::HashMap<String, Transaction>>>;
+
+/// A fake Sequentia node that holds the locks in `locks` (each lock's id, as a job names
+/// it, and a transaction whose output at the lock's index pays the lock) unspent while
+/// `knows` is set, and answers what the service asks of a node.
+fn fake_seq(locks: Locks, knows: Arc<std::sync::atomic::AtomicBool>) -> String {
+    fake_node(Box::new(move |m, p| {
+        let id = p[0].as_str().unwrap_or_default().to_string();
+        let held = knows
+            .load(Ordering::SeqCst)
+            .then(|| locks.lock().unwrap().get(&id).cloned())
+            .flatten();
+        match m {
+            "getposfinality" => Ok(json!({"finalized_height": 0})),
+            "getrawtransaction" => match held {
+                Some(tx) => Ok(json!({"hex": hex_encode(&serialize(&tx))})),
+                None => Err((-5, "No such mempool or blockchain transaction".into())),
+            },
+            "gettxout" => Ok(if held.is_some() {
+                json!({"value": 1})
+            } else {
+                Value::Null
+            }),
+            "getblockhash" => genesis_answer(p).ok_or((-8, "out of range".into())),
+            "getblockcount" => Ok(json!(10)),
+            "getfeeassetinfo" => Ok(json!({})),
+            _ => Err((-32601, "no such method".into())),
+        }
+    }))
+}
+
+/// A made-up lock outpoint named by `n`, which a [`fake_seq`] holds when it is in its locks.
+fn lock_named(n: u32) -> OutPoint {
+    let mut id = [0u8; 32];
+    id[..4].copy_from_slice(&n.to_le_bytes());
+    id[31] = 0x10;
+    OutPoint::new(Txid::from_byte_array(id), 0)
+}
+
+/// The review's flood: 150 jobs from three other clients whose deadlines come first and
+/// whose cancels the Bitcoin daemon takes 50 ms each to refuse, beside one live job of a
+/// fourth client. Each has a real lock; the clients take turns, so the live cancel goes
+/// out at once. Run against the `paylock` binary, so the same case judges any revision of
+/// the service.
 #[test]
 fn a_flood_of_slow_stale_cancels_does_not_hold_back_a_live_one() {
     const T: u32 = 1_000;
@@ -454,41 +522,36 @@ fn a_flood_of_slow_stale_cancels_does_not_hold_back_a_live_one() {
             Err((-25, "bad-txns-inputs-missingorspent".into()))
         }
         "getmempoolentry" | "getrawtransaction" => Err((-5, "not in mempool".into())),
-        "gettxout" => Ok(Value::Null),
         _ => Err((-32601, "no such method".into())),
     }));
+    let locks: Locks = Default::default();
     let live_lock_tx = lock_tx(&live_terms);
     let live_lock = OutPoint::new(live_lock_tx.txid(), 0);
-    let (lock_id, lock_hex) = (
-        live_lock.txid.to_string(),
-        hex_encode(&serialize(&live_lock_tx)),
-    );
-    let seq_url = fake_node(Box::new(move |m, p| match m {
-        "getposfinality" => Ok(json!({"finalized_height": 0})),
-        "getrawtransaction" if p[0].as_str() == Some(&lock_id) => Ok(json!({"hex": lock_hex})),
-        "getrawtransaction" => Err((-5, "No such mempool or blockchain transaction".into())),
-        "getblockhash" => genesis_answer(p).ok_or((-8, "out of range".into())),
-        "getblockcount" => Ok(json!(10)),
-        "gettxout" => Ok(json!({"value": 1})),
-        "getfeeassetinfo" => Ok(json!({})),
-        _ => Err((-32601, "no such method".into())),
-    }));
+    locks
+        .lock()
+        .unwrap()
+        .insert(live_lock.txid.to_string(), live_lock_tx);
+    let stale_terms = terms(T - 1, T + 3);
+    for n in 0..STALE {
+        locks
+            .lock()
+            .unwrap()
+            .insert(lock_named(n).txid.to_string(), lock_tx(&stale_terms));
+    }
+    let seq_url = fake_seq(locks, Arc::new(true.into()));
     let dir = tmpdir("flood");
     let (_serve, port) = serve(&dir, &seq_url, &btc_url);
     for n in 0..STALE {
-        let mut id = [0u8; 32];
-        id[..4].copy_from_slice(&n.to_le_bytes());
-        let lock = OutPoint::new(Txid::from_byte_array(id), 0);
-        let t = terms(T - 1, T + 3);
-        let (pay, cancel) = payment_for(&t, n, 1_000);
+        let (pay, cancel) = payment_for(&stale_terms, n, 1_000);
         let mut r = request_for(
-            &t,
-            lock,
+            &stale_terms,
+            lock_named(n),
             &pay.compute_txid().to_string(),
             Some(btc_hex(&cancel)),
         );
         r["payment_hex"] = json!(btc_hex(&pay));
-        let (code, r) = post(port, "/jobs", &r);
+        let client = format!("10.0.0.{}", n % 3);
+        let (code, r) = post_as(port, "/jobs", &r, Some(&client));
         assert_eq!(code, 200, "{r}");
     }
     let mut live = request_for(
@@ -519,8 +582,9 @@ fn a_flood_of_slow_stale_cancels_does_not_hold_back_a_live_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A Sequentia node that says it does not know the lock (one still syncing, say) holds
-/// back no cancel: the cancel concerns Bitcoin alone. Through the binary.
+/// A Sequentia node that says it does not know the lock any more (one restarted and
+/// still syncing, say) holds back no cancel: the cancel concerns Bitcoin alone. Through
+/// the binary.
 #[test]
 fn a_due_cancel_goes_out_whatever_the_node_says_of_the_lock() {
     const T: u32 = 1_000;
@@ -542,19 +606,14 @@ fn a_due_cancel_goes_out_whatever_the_node_says_of_the_lock() {
         "getmempoolentry" | "getrawtransaction" => Err((-5, "not in mempool".into())),
         _ => Err((-32601, "no such method".into())),
     }));
-    // The node knows no transaction at all: not the lock, not anything.
-    let seq_url = fake_node(Box::new(move |m, p| match m {
-        "getposfinality" => Ok(json!({"finalized_height": 0})),
-        "getrawtransaction" => Err((-5, "No such mempool or blockchain transaction".into())),
-        "getblockhash" => genesis_answer(p).ok_or((-8, "out of range".into())),
-        "getblockcount" => Ok(json!(10)),
-        "gettxout" => Ok(Value::Null),
-        "getfeeassetinfo" => Ok(json!({})),
-        _ => Err((-32601, "no such method".into())),
-    }));
+    let locks: Locks = Default::default();
+    let ltx = lock_tx(&t);
+    let lock = OutPoint::new(ltx.txid(), 0);
+    locks.lock().unwrap().insert(lock.txid.to_string(), ltx);
+    let knows = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let seq_url = fake_seq(locks, knows.clone());
     let dir = tmpdir("unknownlock");
     let (_serve, port) = serve(&dir, &seq_url, &btc_url);
-    let lock = OutPoint::new(Txid::from_byte_array([9; 32]), 0);
     let mut r = request_for(
         &t,
         lock,
@@ -564,6 +623,8 @@ fn a_due_cancel_goes_out_whatever_the_node_says_of_the_lock() {
     r["payment_hex"] = json!(btc_hex(&pay));
     let (code, r) = post(port, "/jobs", &r);
     assert_eq!(code, 200, "{r}");
+    // From now on the node knows no transaction at all: not the lock, not anything.
+    knows.store(false, Ordering::SeqCst);
     std::thread::sleep(Duration::from_secs(2));
     tip.store(T + 3, Ordering::SeqCst);
     let w = Instant::now();
@@ -579,6 +640,405 @@ fn a_due_cancel_goes_out_whatever_the_node_says_of_the_lock() {
         w.elapsed()
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A fake Bitcoin daemon for the intake cases: its tip, what it was sent, and its answer
+/// to `testmempoolaccept` from `judge(hex)`.
+fn judged_daemon(
+    tip: Arc<AtomicU32>,
+    sent: Arc<Mutex<Vec<String>>>,
+    judge: Box<dyn Fn(&str) -> Value + Send + Sync>,
+    send_ok: Arc<std::sync::atomic::AtomicBool>,
+) -> String {
+    fake_node(Box::new(move |m, p| match m {
+        "getblockcount" => Ok(json!(tip.load(Ordering::SeqCst))),
+        "getblockhash" => Ok(json!(format!("{:064x}", p[0].as_u64().unwrap()))),
+        "getblock" => Ok(json!(raw_block(&[]))),
+        "testmempoolaccept" => Ok(json!([judge(p[0][0].as_str().unwrap_or_default())])),
+        "sendrawtransaction" => {
+            sent.lock()
+                .unwrap()
+                .push(p[0].as_str().unwrap().to_string());
+            if send_ok.load(Ordering::SeqCst) {
+                Ok(json!("00".repeat(32)))
+            } else {
+                Err((-25, "bad-txns-inputs-missingorspent".into()))
+            }
+        }
+        "getmempoolentry" => Ok(json!({"fees": {"base": 0.0002}})),
+        "getrawtransaction" => Err((-5, "No such mempool transaction".into())),
+        _ => Err((-32601, "no such method".into())),
+    }))
+}
+
+/// Kimi's: the payment's parent is signed but not broadcast, so the service's Bitcoin
+/// daemon knows neither it nor the payment, and answers `missing-inputs` for the cancel.
+/// The cancel is kept unchecked (never read as a spend in a block), sent at D - 2, and
+/// checked again once the parent and the payment are broadcast.
+#[test]
+fn a_cancel_whose_coins_are_not_known_yet_is_kept_and_sent() {
+    const T: u32 = 1_000;
+    let tip = Arc::new(AtomicU32::new(T));
+    let sent = Arc::new(Mutex::new(Vec::<String>::new()));
+    let parent_known = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pk = parent_known.clone();
+    let btc_url = judged_daemon(
+        tip.clone(),
+        sent.clone(),
+        Box::new(move |_| {
+            if pk.load(Ordering::SeqCst) {
+                json!({"allowed": true, "fees": {"base": 0.0001}})
+            } else {
+                json!({"allowed": false, "reject-reason": "missing-inputs"})
+            }
+        }),
+        parent_known.clone(),
+    );
+    let t = terms(T - 1, T + 5);
+    let locks: Locks = Default::default();
+    let ltx = lock_tx(&t);
+    let lock = OutPoint::new(ltx.txid(), 0);
+    locks.lock().unwrap().insert(lock.txid.to_string(), ltx);
+    let seq_url = fake_seq(locks, Arc::new(true.into()));
+    let dir = tmpdir("unknownparent");
+    let (_serve, port) = serve(&dir, &seq_url, &btc_url);
+    let (pay, cancel) = payment_for(&t, 31, 1_000);
+    let cancel = btc_hex(&cancel);
+    let mut r = request_for(
+        &t,
+        lock,
+        &pay.compute_txid().to_string(),
+        Some(cancel.clone()),
+    );
+    r["payment_hex"] = json!(btc_hex(&pay));
+    let (code, r) = post(port, "/jobs", &r);
+    assert_eq!(code, 200, "{r}");
+    let id = r["id"].as_str().unwrap().to_string();
+    let notes = r["notes"].to_string();
+    assert!(notes.contains("kept unchecked"), "{r}");
+    assert!(!notes.contains("spent in a block"), "{r}");
+    let (_, j) = get(port, &format!("/jobs/{id}"));
+    assert_eq!(
+        (j["cancels"].as_u64(), j["pending_cancels"].as_u64()),
+        (Some(0), Some(1)),
+        "{j}"
+    );
+    // D - 2 with the parent still unbroadcast: the cancel is tried all the same.
+    tip.store(T + 3, Ordering::SeqCst);
+    let w = Instant::now();
+    while !sent.lock().unwrap().contains(&cancel) && w.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        sent.lock().unwrap().contains(&cancel),
+        "the unchecked cancel was not tried at D - 2"
+    );
+    // The buyer broadcasts the parent and the payment: the cancel is checked, kept, and
+    // accepted by the daemon.
+    parent_known.store(true, Ordering::SeqCst);
+    let w = Instant::now();
+    loop {
+        let (_, j) = get(port, &format!("/jobs/{id}"));
+        if j["cancels"].as_u64() == Some(1) && j["cancel_sent"].as_bool() == Some(true) {
+            assert_eq!(j["pending_cancels"].as_u64(), Some(0), "{j}");
+            eprintln!(
+                "checked and sent {:?} after its coins became known: {}",
+                w.elapsed(),
+                j["note"]
+            );
+            break;
+        }
+        assert!(
+            w.elapsed() < Duration::from_secs(20),
+            "the cancel was never checked and sent: {j}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Opus K: a cancel the buyer already broadcast (or that is already mined) is valid:
+/// kept, with a note; never a refusal that would lose the post's claims.
+#[test]
+fn a_cancel_already_broadcast_is_kept_with_the_claims() {
+    const T: u32 = 1_000;
+    let tip = Arc::new(AtomicU32::new(T));
+    let t = terms(T - 1, T + 5);
+    let (pay, cancel) = payment_for(&t, 41, 1_000);
+    let (pay2, cancel2) = payment_for(&t, 42, 1_000);
+    let (c1, c2) = (btc_hex(&cancel), btc_hex(&cancel2));
+    let (k1, k2) = (c1.clone(), c2.clone());
+    let btc_url = judged_daemon(
+        tip,
+        Default::default(),
+        Box::new(move |hex| {
+            if hex == k1 {
+                json!({"allowed": false, "reject-reason": "txn-already-in-mempool"})
+            } else if hex == k2 {
+                json!({"allowed": false, "reject-reason": "txn-already-known"})
+            } else {
+                // The payment the broadcast cancel replaced.
+                json!({"allowed": false, "reject-reason": "insufficient fee, rejecting replacement"})
+            }
+        }),
+        Arc::new(true.into()),
+    );
+    let locks: Locks = Default::default();
+    let ltx = lock_tx(&t);
+    let lock = OutPoint::new(ltx.txid(), 0);
+    locks.lock().unwrap().insert(lock.txid.to_string(), ltx);
+    let seq_url = fake_seq(locks, Arc::new(true.into()));
+    let dir = tmpdir("broadcastcancel");
+    let (_serve, port) = serve(&dir, &seq_url, &btc_url);
+    for (pay, c, says) in [
+        (&pay, &c1, "already broadcast"),
+        (&pay2, &c2, "already mined"),
+    ] {
+        let mut r = request_tiers(
+            &t,
+            lock,
+            &pay.compute_txid().to_string(),
+            Some(c.clone()),
+            &[1_000, 9_000],
+        );
+        r["payment_hex"] = json!(btc_hex(pay));
+        let (code, r) = post(port, "/jobs", &r);
+        assert_eq!(code, 200, "{r}");
+        assert!(r["notes"].to_string().contains(says), "{r}");
+        let (_, j) = get(port, &format!("/jobs/{}", r["id"].as_str().unwrap()));
+        assert_eq!(
+            (j["tiers"].as_u64(), j["cancels"].as_u64()),
+            (Some(2), Some(1)),
+            "{j}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Opus J: a thousand jobs on made-up locks are refused, and do not lock a real buyer
+/// out; and one client starts at most its quota of live jobs, while another client, and a
+/// post that merges into a job held, are taken.
+#[test]
+fn made_up_locks_and_one_client_cannot_fill_the_service() {
+    const T: u32 = 1_000;
+    let btc_url = judged_daemon(
+        Arc::new(AtomicU32::new(T)),
+        Default::default(),
+        Box::new(|_| json!({"allowed": true, "fees": {"base": 0.0001}})),
+        Arc::new(true.into()),
+    );
+    let t = terms(T - 1, T + 5);
+    let locks: Locks = Default::default();
+    let ltx = lock_tx(&t);
+    let lock = OutPoint::new(ltx.txid(), 0);
+    locks.lock().unwrap().insert(lock.txid.to_string(), ltx);
+    // Locks 5000.. are real (the node holds them); 0..1000 are made up.
+    for n in 5_000..5_060 {
+        locks
+            .lock()
+            .unwrap()
+            .insert(lock_named(n).txid.to_string(), lock_tx(&t));
+    }
+    let seq_url = fake_seq(locks, Arc::new(true.into()));
+    let dir = tmpdir("fakelocks");
+    let (_serve, port) = serve(&dir, &seq_url, &btc_url);
+    let started = Instant::now();
+    for n in 0..1_000 {
+        let r = request_for(&t, lock_named(n), &format!("{n:064x}"), None);
+        let (code, r) = post(port, "/jobs", &r);
+        assert_eq!(code, 400, "{r}");
+        if n == 0 {
+            assert!(
+                r["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not an unspent output"),
+                "{r}"
+            );
+        }
+    }
+    eprintln!(
+        "1,000 jobs on made-up locks refused in {:?}",
+        started.elapsed()
+    );
+    let (code, r) = post(
+        port,
+        "/jobs",
+        &request_for(&t, lock, &"ab".repeat(32), None),
+    );
+    assert_eq!(code, 200, "the buyer was locked out: {r}");
+    // One client's quota (50 by default) of jobs on real locks; then 429.
+    for n in 5_000..5_050 {
+        let (code, r) = post_as(
+            port,
+            "/jobs",
+            &request_for(&t, lock_named(n), &"cd".repeat(32), None),
+            Some("10.9.9.9"),
+        );
+        assert_eq!(code, 200, "{r}");
+    }
+    let (code, r) = post_as(
+        port,
+        "/jobs",
+        &request_for(&t, lock_named(5_050), &"cd".repeat(32), None),
+        Some("10.9.9.9"),
+    );
+    assert_eq!(code, 429, "{r}");
+    // Another client is taken; and the full client's post into a job held merges.
+    let (code, r) = post_as(
+        port,
+        "/jobs",
+        &request_for(&t, lock_named(5_051), &"cd".repeat(32), None),
+        Some("10.9.9.8"),
+    );
+    assert_eq!(code, 200, "{r}");
+    let more = request_tiers(&t, lock, &"ab".repeat(32), None, &[1_000, 9_000]);
+    let (code, r) = post_as(port, "/jobs", &more, Some("10.9.9.9"));
+    assert_eq!(code, 200, "{r}");
+    assert_eq!(r["merged"], json!(["claims"]), "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Opus L: a client that sends its body slowly holds only its own connection, and only
+/// until the request's deadline; reads and other posts are answered meanwhile.
+#[test]
+fn a_slow_body_stalls_nothing() {
+    let btc_url = judged_daemon(
+        Arc::new(AtomicU32::new(1_000)),
+        Default::default(),
+        Box::new(|_| json!({"allowed": true, "fees": {"base": 0.0001}})),
+        Arc::new(true.into()),
+    );
+    let seq_url = fake_seq(Default::default(), Arc::new(true.into()));
+    let dir = tmpdir("slowbody");
+    let (_serve, port) = serve(&dir, &seq_url, &btc_url);
+    let mut slow = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        slow,
+        "POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n{{\"terms\":"
+    )
+    .unwrap();
+    let opened = Instant::now();
+    std::thread::sleep(Duration::from_millis(300));
+    for i in 0..3 {
+        let t = Instant::now();
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        write!(
+            s,
+            "GET /jobs HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        assert!(
+            out.starts_with("HTTP/1.1 200"),
+            "a read waited on a slow body: {out:?}"
+        );
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        write!(
+            s,
+            "POST /jobs HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        )
+        .unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        assert!(
+            out.starts_with("HTTP/1.1 400"),
+            "a post waited on a slow body: {out:?}"
+        );
+        eprintln!(
+            "read and post {i} answered in {:?} beside a slow body",
+            t.elapsed()
+        );
+    }
+    // A client that asks to continue (curl, for a body over 1 KiB) is told to.
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    write!(s, "POST /jobs HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 2\r\nConnection: close\r\n\r\n").unwrap();
+    let mut first = [0u8; 25];
+    s.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"HTTP/1.1 100 Continue\r\n\r\n");
+    write!(s, "{{}}").unwrap();
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    assert!(out.starts_with("HTTP/1.1 400"), "{out:?}");
+    slow.set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let mut out = String::new();
+    let _ = slow.read_to_string(&mut out);
+    eprintln!(
+        "the slow body was answered {:?} after it began: {:?}",
+        opened.elapsed(),
+        out.lines().next()
+    );
+    assert!(out.starts_with("HTTP/1.1 408"), "{out:?}");
+    assert!(opened.elapsed() < Duration::from_secs(15));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every answer `testmempoolaccept` gives intake is judged: for a cancel and for a
+/// signed payment.
+#[test]
+fn every_answer_of_the_daemon_is_judged() {
+    use lwk_paylock::Accept;
+    use service::{judge_cancel, judge_payment, CancelCheck, PaymentCheck};
+    let refused = |r: &str| Accept::Refused(r.to_string());
+    let cases: Vec<(Accept, &str, &str)> = vec![
+        (Accept::Allowed { fee: 1_761 }, "valid", "vouched"),
+        (refused("txn-already-in-mempool"), "valid", "vouched"),
+        (refused("txn-already-known"), "valid", "vouched"),
+        (refused("txn-same-nonwitness-data-in-mempool"), "copy", "copy"),
+        (refused("mandatory-script-verify-flag-failed (Witness program hash mismatch)"), "invalid", "invalid"),
+        (refused("mandatory-script-verify-flag-failed (Witness program was passed an empty witness)"), "invalid", "invalid"),
+        (refused("non-mandatory-script-verify-flag (Invalid Schnorr signature)"), "invalid", "invalid"),
+        (refused("bad-witness-nonstandard"), "invalid", "invalid"),
+        (refused("missing-inputs"), "unknown", "kept"),
+        (refused("bad-txns-inputs-missingorspent"), "unknown", "kept"),
+        (refused("insufficient fee, rejecting replacement 1a2b, less fees than conflicting txs; 0.00001 < 0.00002"), "invalid", "kept"),
+        (refused("txn-mempool-conflict"), "invalid", "kept"),
+        (refused("replacement-adds-unconfirmed"), "invalid", "kept"),
+        (refused("min relay fee not met, 100 < 141"), "invalid", "kept"),
+        (refused("mempool min fee not met"), "invalid", "kept"),
+        (refused("dust"), "invalid", "kept"),
+        (refused("non-final"), "invalid", "kept"),
+    ];
+    for (a, c, p) in cases {
+        let got_c = match judge_cancel(&a) {
+            CancelCheck::Valid { .. } => "valid",
+            CancelCheck::PooledCopy => "copy",
+            CancelCheck::Unknown(_) => "unknown",
+            CancelCheck::Invalid(_) => "invalid",
+        };
+        let got_p = match judge_payment(&a) {
+            PaymentCheck::Vouched => "vouched",
+            PaymentCheck::PooledCopy => "copy",
+            PaymentCheck::Kept => "kept",
+            PaymentCheck::Invalid(_) => "invalid",
+        };
+        assert_eq!((got_c, got_p), (c, p), "{a:?}");
+    }
+    // A cancel accepted now carries its fee; one already pooled or mined, a note.
+    assert_eq!(
+        judge_cancel(&Accept::Allowed { fee: 1_761 }),
+        CancelCheck::Valid {
+            fee: Some(1_761),
+            note: None
+        }
+    );
+    assert!(matches!(
+        judge_cancel(&refused("txn-already-in-mempool")),
+        CancelCheck::Valid {
+            fee: None,
+            note: Some(_)
+        }
+    ));
+    // A missing coin is never read as spent in a block.
+    match judge_cancel(&refused("missing-inputs")) {
+        CancelCheck::Unknown(r) => assert_eq!(r, "missing-inputs"),
+        x => panic!("{x:?}"),
+    }
 }
 
 #[test]
@@ -645,7 +1105,8 @@ fn intake_is_bounded_and_needs_a_token_beyond_loopback() {
             &limits,
         )
         .unwrap_err();
-    assert!(e.0.contains("its limit"), "{e}");
+    assert!(e.message().contains("its limit"), "{e:?}");
+    assert_eq!(e.status(), 429);
     // A job whose outcome is decided, still watched, no longer counts toward the cap.
     let first = st.jobs.keys().next().unwrap().clone();
     st.jobs.get_mut(&first).unwrap().state = State::Cancelled;
@@ -662,7 +1123,7 @@ fn intake_is_bounded_and_needs_a_token_beyond_loopback() {
             &wide,
         )
         .unwrap_err();
-    assert!(e.0.contains("spans"), "{e}");
+    assert!(e.message().contains("spans"), "{e:?}");
     // A job id is a hash, never a path.
     assert!(st.archived("../../etc/passwd").is_none());
     assert!(service::loopback_only("127.0.0.1:1234"));
@@ -725,12 +1186,8 @@ fn judging_daemon(pooled: Vec<bitcoin::Transaction>) -> String {
     }))
 }
 
-fn intake_with(btc_url: &str) -> Intake {
-    let seq_url = fake_node(Box::new(|m, p| match m {
-        "getblockhash" => genesis_answer(p).ok_or((-8, "out of range".into())),
-        "getrawtransaction" => Err((-5, "No such mempool or blockchain transaction".into())),
-        _ => Err((-32601, "no such method".into())),
-    }));
+fn intake_with(btc_url: &str, locks: Locks) -> Intake {
+    let seq_url = fake_seq(locks, Arc::new(true.into()));
     Intake::new(
         SeqChain {
             rpc: rpc(&seq_url, 3),
@@ -744,11 +1201,10 @@ fn intake_with(btc_url: &str) -> Intake {
 /// What a client posts, checked and added, as the service does.
 fn post_job(st: &mut Store, intake: &Intake, v: &Value) -> Result<(String, Added), String> {
     let mut j = Job::from_request(v).map_err(|e| e.0)?;
-    match service::check_intake(intake, &mut j) {
-        Ok(_) => {}
-        Err(Refused::Bad(e)) | Err(Refused::Unavailable(e)) => return Err(e.0),
-    }
-    st.add(j, &Limits::default()).map_err(|e| e.0)
+    let held = st.jobs.contains_key(&j.id);
+    service::check_intake(intake, &mut j, held).map_err(|e| e.message().to_string())?;
+    st.add(j, &Limits::default())
+        .map_err(|e| e.message().to_string())
 }
 
 /// The reviews' blocks of a buyer's job, by a client posting first: with no payment and a
@@ -760,11 +1216,23 @@ fn no_client_can_block_a_buyers_job() {
     let dir = tmpdir("noblock");
     let mut st = Store::open(&dir).unwrap();
     let t = terms(1_000, 1_006);
-    let lock = OutPoint::new(Txid::from_byte_array([7; 32]), 0);
+    let ltx = lock_tx(&t);
+    let lock = OutPoint::new(ltx.txid(), 0);
+    let locks: Locks = Default::default();
+    locks.lock().unwrap().insert(lock.txid.to_string(), ltx);
     let (pay, cancel) = payment_for(&t, 42, 1_000);
     let pay_id = pay.compute_txid().to_string();
     let cancel = btc_hex(&cancel);
-    let intake = intake_with(&judging_daemon(vec![pay.clone()]));
+    let intake = intake_with(&judging_daemon(vec![pay.clone()]), locks);
+    // A lock the node does not hold: refused before anything else.
+    let other = request_for(
+        &t,
+        OutPoint::new(Txid::from_byte_array([7; 32]), 0),
+        &pay_id,
+        None,
+    );
+    let e = post_job(&mut st, &intake, &other).unwrap_err();
+    assert!(e.contains("not an unspent output"), "{e}");
 
     // Kimi's: no payment_hex, a dummy cancel spending a coin the payment does not.
     let dummy = request_for(&t, lock, &pay_id, Some(btc_hex(&btc_spend(43, 90_000))));

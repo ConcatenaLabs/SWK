@@ -33,8 +33,10 @@ Cases (PAYLOCK_CASES):
            every node's list before the payment, and the other tier completes;
   raise    a block leaves the pooled claim out: the service raises it to the top tier;
   resend   the payment reaches only the service, which sends it to Bitcoin;
-  crowd    stale jobs reaching back to Bitcoin height 1 beside a live one: the live
-           one's cancel still goes out at D - 2, and the stale ones end and are archived;
+  crowd    150 stale jobs from three clients, on a real lock whose terms reach back to
+           Bitcoin height 1, beside a live one: the live one's cancel still goes out at
+           D - 2, a client's fifty-first job is refused, and the stale ones end and are
+           archived;
   overflow terms with D = 2^31 are refused; a lock whose D is more than a week above
            Bitcoin's tip is never payable;
   noraise  the counterparty pools the going tier itself and a block leaves it out: the
@@ -59,7 +61,14 @@ Cases (PAYLOCK_CASES):
   nopayment    another client posts the buyer's claims and payment id with a cancel of a
            coin the payment does not spend (refused, before and after the payment is
            broadcast), and only the top tier and no cancel (taken): the buyer's post merges
-           into that job, and its cancel goes out at D - 2.
+           into that job, and its cancel goes out at D - 2;
+  unknownparent  the payment's parent is signed and not broadcast when the job is posted:
+           the cancel is kept unchecked, checked once the parent and the payment are
+           broadcast, and goes out at D - 2;
+  afterbroadcast the buyer's first post comes after its cancel is broadcast, or mined: the
+           cancel and the claims are kept, and the job ends cancelled;
+  fakelock a job on a lock that does not exist, or on a real lock under terms it does not
+           pay, is refused; the buyer's job on the real lock is taken.
 
 Each negative is forced into a block: a block node 1 produced is rewritten to
 carry the transaction, certified again (`recertifyposblock`) and submitted, and
@@ -95,7 +104,8 @@ from test_framework.util import assert_equal, get_auth_cookie, p2p_port, rpc_por
 
 CASES = os.environ.get("PAYLOCK_CASES", "path,unpaid,late,gone,remined,anchor,wrongamount,wrongaddress,"
                        "unaccepted,feecoin,feepot,twoasset,raise,resend,crowd,overflow,noraise,preempt,"
-                       "cancelstate,afterfinal,unconf,bumplate,bumpin,block,nopayment").split(",")
+                       "cancelstate,afterfinal,unconf,bumplate,bumpin,block,nopayment,unknownparent,afterbroadcast,"
+                       "fakelock").split(",")
 RESULTS = os.environ.get("PAYLOCK_RESULTS", "")
 BUYER = 1  # the buyer's node, which the completion service also reads
 COIN = Decimal(100_000_000)
@@ -154,10 +164,11 @@ class PayLockRegtest(LostSwapTest):
             self.svc.terminate()
             self.svc.wait(timeout=30)
 
-    def http(self, method, path, body=None):
+    def http(self, method, path, body=None, client=None):
         try:
             req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.svc_port, path), method=method,
-                                         data=json.dumps(body).encode() if body is not None else None)
+                                         data=json.dumps(body).encode() if body is not None else None,
+                                         headers={"X-Forwarded-For": client} if client else {})
             with urllib.request.urlopen(req, timeout=10) as r:
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
@@ -255,7 +266,7 @@ class PayLockRegtest(LostSwapTest):
         return lo
 
     # ------------------------------------------------------------ the swap
-    def new_swap(self, case, price=50_000_000, atoms=1_000_000_000, margin=None, asset=None, pot=None):
+    def new_swap(self, case, price=50_000_000, atoms=1_000_000_000, margin=None, asset=None, pot=None, extra=()):
         """Terms and the seller's signed lock (not yet sent). `asset` is the asset sold (the policy
         asset by default); `pot` adds a fee pot of that many atoms of the policy asset."""
         bsk, ssk = generate_privkey(), generate_privkey()
@@ -269,6 +280,7 @@ class PayLockRegtest(LostSwapTest):
             args += ["--margin", margin]
         if pot:
             args += ["--fee-pot-asset", self.asset, "--fee-pot-atoms", pot]
+        args += list(extra)
         t = self.pl(*args)
         assert t["payment_lock"], t
         tfile = os.path.join(self.options.tmpdir, "terms-%s-%d.json" % (case, time.time_ns()))
@@ -900,12 +912,14 @@ class PayLockRegtest(LostSwapTest):
         self.log.info("(crowd) stale and stalled jobs beside a live one: its cancel still goes out at D - 2")
         b = self.btc()
         tip = b.getblockcount()
-        # Stale jobs: locks that do not exist, payments that never come, each reaching from
-        # Bitcoin height 1 (the old search walked from the tip down to F on every round), and
-        # every deadline before the live job's, so that the work round reaches them first.
-        tmpl = self.new_swap("crowd")
+        # Stale jobs: payments that never come, on one real lock whose terms reach from
+        # Bitcoin height 1 (the old search walked from the tip down to F on every round) and
+        # whose deadline is before the live job's, so that the work round reaches them first.
+        # Three clients (behind a proxy) start fifty each, the most one client may.
         n_stale = int(os.environ.get("PAYLOCK_CROWD", "150"))
-        terms = dict(tmpl["terms"], floor=max(1, tip + 4 - 1000))
+        tmpl = self.new_swap("crowd", extra=["--floor", max(1, tip + 4 - 1000), "--deadline", tip + 4])
+        self.lock_and_confirm(tmpl)
+        self.buyer_sign(tmpl)
         # Every stale job's payment and cancel spend one coin of the buyer's: each is valid
         # alone (intake takes nothing else), and once one of them is pooled the rest are
         # refused, as a flood of real cancels would be.
@@ -921,23 +935,20 @@ class PayLockRegtest(LostSwapTest):
         stale = []
         t0 = time.time()
         for i in range(n_stale):
-            t = dict(terms, deadline=tip + 4, refund_at=tip + 4)
-            tf = os.path.join(self.options.tmpdir, "crowd-terms.json")
-            with open(tf, "w") as f:
-                json.dump(t, f)
-            lock = "%064x:0" % (0xc0de0000 + i)
-            c = self.pl("sign-claim", "--terms", tf, "--lock", lock, "--key-file", tmpl["bkey"], "--to", "51",
-                        "--fee", 5000, "--top-fee", "none")
             pay = w.signrawtransactionwithwallet(w.createrawtransaction(x_in, [{back: Decimal(999_000 - i) / COIN}]))["hex"]
             can = w.signrawtransactionwithwallet(w.createrawtransaction(x_in, [{back: Decimal(995_000 - i) / COIN}]))["hex"]
-            r = self.http("POST", "/jobs", {"terms": t, "lock": lock, "claims": c["claims"],
+            r = self.http("POST", "/jobs", {"terms": tmpl["terms"], "lock": tmpl["lock"], "claims": tmpl["claims"],
                                             "payment": w.decoderawtransaction(pay)["txid"], "payment_hex": pay,
-                                            "cancel": can})
+                                            "cancel": can}, client="10.0.0.%d" % (i % 3))
             assert "id" in r, r
             stale.append(r["id"])
         assert all(self.http("GET", "/jobs/" + i)["cancels"] == 1 for i in stale)
-        self.record("crowd", "stale jobs", "%d handed over in %.1f s, each from F = %d to D = %d" %
-                    (n_stale, time.time() - t0, terms["floor"], tip + 4))
+        r = self.http("POST", "/jobs", {"terms": tmpl["terms"], "lock": tmpl["lock"], "claims": tmpl["claims"],
+                                        "payment": "%064x" % 0xc0de}, client="10.0.0.1")
+        assert "fifty" in r.get("error", "") or "live jobs" in r.get("error", ""), r
+        self.record("crowd", "stale jobs", "%d handed over in %.1f s by three clients, each from F = %d to D = %d; "
+                    "a fifty-first from one of them: %s" % (n_stale, time.time() - t0, tmpl["terms"]["floor"],
+                                                            tmpl["terms"]["deadline"], r["error"]))
         # The live job: paid, never mined, with its cancel.
         s = self.new_swap("crowd")
         self.lock_and_confirm(s)
@@ -947,7 +958,7 @@ class PayLockRegtest(LostSwapTest):
         self.hand_over(s)
         self.send_pay(s)
         D = s["terms"]["deadline"]
-        assert D > tip + 4
+        assert D > tmpl["terms"]["deadline"]
         self.empty_btc_blocks(D - 3 - b.getblockcount())
         time.sleep(3)
         assert self.job(s)["state"] == "waiting", self.job(s)
@@ -1332,6 +1343,102 @@ class PayLockRegtest(LostSwapTest):
         self.record(c, "at tip D - 2", self.job(s)["note"])
         self.btc_mine(1)
         self.cancelled_and_archived(s, c)
+
+    # ------------------------------------------------------------ the fourth review
+    def case_unknownparent(self):
+        self.log.info("(unknownparent) the payment's parent is not broadcast when the job is posted")
+        c = "unknownparent"
+        b, w = self.btc(), self.bbuyer
+        s = self.ready(c)
+        # A parent the buyer's wallet signs and does not broadcast yet; the payment and the
+        # cancel spend its output, signed with it named.
+        a = w.getnewaddress("", "bech32")
+        f = w.fundrawtransaction(w.createrawtransaction([], [{a: Decimal("0.7")}]), {"replaceable": True, "lockUnspents": True})
+        parent_hex = w.signrawtransactionwithwallet(f["hex"])["hex"]
+        pd = w.decoderawtransaction(parent_hex)
+        vout = [o["n"] for o in pd["vout"] if o["scriptPubKey"].get("address") == a][0]
+        prev = [{"txid": pd["txid"], "vout": vout, "scriptPubKey": pd["vout"][vout]["scriptPubKey"]["hex"],
+                 "amount": Decimal("0.7")}]
+        change = w.getnewaddress("", "bech32")
+        raw = w.createrawtransaction([{"txid": pd["txid"], "vout": vout, "sequence": 0xfffffffd}],
+                                     [{s["recv"]: Decimal(s["price"]) / COIN},
+                                      {change: Decimal("0.7") - Decimal(s["price"]) / COIN - Decimal("0.00002")}])
+        r = w.signrawtransactionwithwallet(raw, prev)
+        assert r["complete"], r
+        s["pay_hex"] = r["hex"]
+        s["pay"] = w.decoderawtransaction(s["pay_hex"])["txid"]
+        to = w.getaddressinfo(w.getnewaddress())["scriptPubKey"]
+        cx = self.pl("cancel", "--payment-hex", s["pay_hex"], "--values", 70_000_000, "--to", to)
+        r = w.signrawtransactionwithwallet(cx["hex"], prev)
+        assert r["complete"], r
+        s["cancel_hex"], s["cancel_id"] = r["hex"], cx["txid"]
+        assert pd["txid"] not in b.getrawmempool()
+        code, r = self.post(s, s["cancel_hex"], s["pay_hex"])
+        assert_equal(code, 200)
+        s["job"] = r["id"]
+        j = self.job(s)
+        self.record(c, "posted with the parent unbroadcast", "%d, %d cancel kept unchecked: %s" % (
+            code, j["pending_cancels"], "; ".join(r["notes"])))
+        assert_equal((j["cancels"], j["pending_cancels"]), (0, 1))
+        assert not any("spent in a block" in n for n in r["notes"]), r
+        # The buyer broadcasts the parent and its payment: the cancel is checked and kept.
+        b.sendrawtransaction(parent_hex)
+        self.send_pay(s)
+        self.wait_until(lambda: self.job(s)["cancels"] == 1, timeout=30)
+        self.record(c, "parent and payment broadcast", "the cancel is checked and kept: %d checked, %d unchecked" % (
+            self.job(s)["cancels"], self.job(s)["pending_cancels"]))
+        D = s["terms"]["deadline"]
+        self.empty_btc_blocks(D - 2 - b.getblockcount())
+        self.wait_until(lambda: s["cancel_id"] in b.getrawmempool(), timeout=30)
+        assert s["pay"] not in b.getrawmempool()
+        self.record(c, "at tip D - 2", "the buyer's cancel replaced the payment: %s" % self.job(s)["note"])
+        self.btc_mine(1)
+        self.cancelled_and_archived(s, c)
+
+    def case_afterbroadcast(self):
+        self.log.info("(afterbroadcast) the buyer's first post comes after its cancel is broadcast, or mined")
+        c = "afterbroadcast"
+        b = self.btc()
+        for mined in (False, True):
+            s = self.ready(c)
+            self.make_payment(s)
+            self.send_pay(s)
+            b.sendrawtransaction(s["cancel_hex"])
+            if mined:
+                self.btc_mine(1)
+            code, r = self.post(s, s["cancel_hex"], s["pay_hex"])
+            assert_equal(code, 200)
+            s["job"] = r["id"]
+            j = self.job(s)
+            says = "already mined" if mined else "already broadcast"
+            assert any(says in n for n in r["notes"]), r
+            assert_equal((j["tiers"], j["cancels"]), (len(s["claims"]), 1))
+            self.record(c, "first post after the cancel is %s" % ("mined" if mined else "broadcast"),
+                        "%d, %d claims and %d cancel kept: %s" % (code, j["tiers"], j["cancels"], "; ".join(r["notes"])))
+            if not mined:
+                self.btc_mine(1)
+            self.cancelled_and_archived(s, c)
+
+    def case_fakelock(self):
+        self.log.info("(fakelock) jobs on a lock that does not exist, or that does not pay the terms")
+        c = "fakelock"
+        s = self.ready(c)
+        self.make_payment(s)
+        base = {"terms": s["terms"], "lock": s["lock"], "claims": s["claims"], "payment": s["pay"]}
+        fake = "%064x:0" % 0xfa4e
+        fc = self.pl("sign-claim", "--terms", s["tfile"], "--lock", fake, "--key-file", s["bkey"], "--to", "51",
+                     "--fee", 5000, "--top-fee", "none")
+        code, r = self.http_code("POST", "/jobs", dict(base, lock=fake, claims=fc["claims"]))
+        assert_equal(code, 400)
+        assert "not an unspent output" in r["error"], r
+        self.record(c, "a made-up lock", "%d: %s" % (code, r["error"]))
+        code, r = self.http_code("POST", "/jobs", dict(base, terms=dict(s["terms"], atoms=s["atoms"] - 1)))
+        assert_equal(code, 400)
+        assert "does not pay the terms'" in r["error"], r
+        self.record(c, "the real lock under terms one atom short", "%d: %s" % (code, r["error"]))
+        code, r = self.http_code("POST", "/jobs", base)
+        assert_equal(code, 200)
+        self.record(c, "the buyer's job on the real lock", "%d" % code)
 
     def run_test(self):
         try:

@@ -538,9 +538,12 @@ whatever the node says of the lock and ordered by its answer, jobs worked
 nearest deadline first within time and block budgets, a payment search that
 keeps its place, finished jobs watched until buried and then archived; one job
 per terms, lock and payment into which every post merges, its claims checked
-against the buyer's key and its cancels against the Bitcoin daemon, so no
-client can block a buyer's job; reads without signed transactions, capped
-intake of live jobs, a token beyond loopback),
+against the buyer's key and its cancels against the Bitcoin daemon, a cancel
+whose coins the daemon does not know yet kept and checked again, so no client
+can block a buyer's job; a new job only on a real lock, a quota of live jobs per
+client and the clients taking turns at the cancel sends; each request on its own
+thread under deadlines, so a slow client stalls nobody; reads without signed
+transactions, a token beyond loopback),
 and the `paylock` command for every step. Its `README.md` says how to run it
 and its regtest proof.
 
