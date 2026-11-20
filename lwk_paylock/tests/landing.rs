@@ -310,6 +310,9 @@ struct Seq {
     tick_delay: Duration,
     /// How many claims it had refused when it first pooled one.
     refused_before_pooled: Option<usize>,
+    /// `sendrawtransaction`'s fee ceiling, in what a fee is worth (0: none): a claim the
+    /// node would take, worth more, is refused unless sent with `maxfeerate` 0.
+    max_fee: usize,
 }
 
 fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
@@ -407,6 +410,12 @@ fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
                 } else {
                     (fee < need).then(|| format!("min relay fee not met, {fee} < {need}"))
                 };
+                let capped = s.max_fee > 0 && p.get(1).and_then(Value::as_f64) != Some(0.0);
+                if refusal.is_none() && capped && fee > s.max_fee {
+                    let m = "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)";
+                    s.refused.push(m.into());
+                    return Err((-25, m.into()));
+                }
                 if let Some(m) = refusal {
                     s.refused.push(m.clone());
                     if let Some((n, r)) = s.rate_after {
@@ -542,6 +551,7 @@ fn world(
         other_rate: 0,
         tick_delay: Duration::ZERO,
         refused_before_pooled: None,
+        max_fee: 0,
     }));
     let (su, bu) = (fake_seq(seq.clone(), btc.clone()), fake_btc(btc.clone()));
     World {
@@ -1774,6 +1784,7 @@ fn seq_like(s: &Seq) -> Seq {
         other_rate: 0,
         tick_delay: Duration::ZERO,
         refused_before_pooled: None,
+        max_fee: 0,
     }
 }
 
@@ -2410,4 +2421,64 @@ fn each_tier_keeps_the_floors_read_around_its_own_send() {
         "{}",
         v["note"]
     );
+}
+
+/// A swap worth more than the RPC's default fee ceiling allows its top tier. The going tier
+/// is refused for its fee rate; the top tier pays far more than `sendrawtransaction`'s
+/// default `maxfeerate` lets through, a fee the buyer signed and nothing can lower. The
+/// service sends with no ceiling, so the top tier lands; sent with the default, the node
+/// would refuse it for ever and the buyer would have no tier that lands.
+#[test]
+fn a_top_tier_above_the_default_fee_ceiling_lands() {
+    let (w, mut j, buyer) = buyer_world();
+    {
+        let mut s = w.seq.lock().unwrap();
+        // The going tier (1,000 atoms) is under the floor, the top tier (50,000) over it.
+        s.floor = 10_000;
+        s.max_fee = 10_000;
+    }
+    until_pooled(&w, &mut j, 3);
+    let refused = w.seq.lock().unwrap().refused.clone();
+    let v = j.public_json();
+    eprintln!("refused {refused:?}; then: {}", v["note"]);
+    assert!(
+        !refused.iter().any(|m| m.contains("Fee exceeds maximum")),
+        "{refused:?}"
+    );
+    assert_eq!(proven(&w.seq), Some(id(&buyer)), "{}", v["note"]);
+    assert!(
+        v["note"].as_str().unwrap().contains("top tier"),
+        "{}",
+        v["note"]
+    );
+}
+
+/// The Bitcoin daemon is asked about and sent payments and cancels with no fee ceiling
+/// either: a fee the signer chose never makes the service refuse or hold back one the
+/// daemon would take.
+#[test]
+fn bitcoin_sends_and_checks_carry_no_fee_ceiling() {
+    let u = fake_node(Box::new(|m, p| {
+        let uncapped = p.get(1).and_then(Value::as_f64) == Some(0.0);
+        match (m, uncapped) {
+            ("testmempoolaccept", true) => {
+                Ok(json!([{"txid": "00", "allowed": true, "fees": {"base": 0.5}}]))
+            }
+            ("testmempoolaccept", false) => {
+                Ok(json!([{"txid": "00", "allowed": false, "reject-reason": "max-fee-exceeded"}]))
+            }
+            ("sendrawtransaction", true) => Ok(json!("00")),
+            ("sendrawtransaction", false) => Err((
+                -25,
+                "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)".into(),
+            )),
+            _ => Err((-32601, "Method not found".into())),
+        }
+    }));
+    let btc = BtcChain { rpc: rpc(&u) };
+    assert_eq!(
+        btc.test_accept("00").unwrap(),
+        lwk_paylock::Accept::Allowed { fee: 50_000_000 }
+    );
+    assert_eq!(btc.send_raw("00").unwrap(), "00");
 }

@@ -32,6 +32,10 @@ Cases (PAYLOCK_CASES):
   twoasset tiers in the locked asset and in another; the locked asset is dropped from
            every node's list before the payment, and the other tier completes;
   raise    a block leaves the pooled claim out: the service raises it to the top tier;
+  bigvalue the same for a swap of 200 units at 1:1 rates, whose top tier pays more than
+           `sendrawtransaction`'s default fee ceiling (`maxfeerate` 0.1 per 1,000 vbytes)
+           lets through: the node refuses it at that ceiling and takes it with none, and the
+           service, sending with none, raises to it and the claim is final;
   resend   the payment reaches only the service, which sends it to Bitcoin;
   crowd    150 stale jobs from three clients, on 150 real locks whose terms reach back to
            Bitcoin height 1, each holding a payment and a cancel the daemon cannot check
@@ -140,7 +144,7 @@ from test_framework.script import CScript  # noqa: E402
 from test_framework.util import assert_equal, get_auth_cookie, p2p_port, rpc_port  # noqa: E402
 
 CASES = os.environ.get("PAYLOCK_CASES", "path,unpaid,late,gone,remined,anchor,wrongamount,wrongaddress,"
-                       "unaccepted,feecoin,feepot,twoasset,raise,resend,crowd,overflow,noraise,preempt,"
+                       "unaccepted,feecoin,feepot,twoasset,raise,bigvalue,resend,crowd,overflow,noraise,preempt,"
                        "cancelstate,afterfinal,unconf,bumplate,bumpin,block,nopayment,unknownparent,afterbroadcast,"
                        "fakelock,samewit,wirepending,onelock,idleconns,bigpay,bigcancel,heavy,edge,links,"
                        "ownpay").split(",")
@@ -890,6 +894,43 @@ class PayLockRegtest(LostSwapTest):
         assert_equal(txid, s["claim_ids"][1])
         assert j["raised"], j
         self.record("raise", "service", "raised to the top tier and mined: %s" % txid[:16])
+        self.sync_tips(range(N))
+
+    def case_bigvalue(self):
+        self.log.info("(bigvalue) a top tier above the RPC's default fee ceiling is raised to")
+        n1 = self.nodes[1]
+        s = self.new_swap("bigvalue", atoms=200 * 100_000_000)
+        self.lock_and_confirm(s)
+        self.check_payable(s)
+        self.buyer_sign(s)
+        assert len(s["claim_ids"]) == 2
+        going, top = s["claim_ids"]
+        self.make_payment(s)
+        self.hand_over(s)
+        self.send_pay(s)
+        self.btc_mine(1)
+        self.anchored_block(self.btc().getblockcount())
+        self.wait_until(lambda: going in n1.getrawmempool(), timeout=60)
+        # The completed top tier, as the node judges it: refused at the default ceiling,
+        # taken with none. So this swap is above the ceiling.
+        r = self.pl("complete", "--terms", s["tfile"], "--lock", s["lock"], "--claim", s["claims"][1],
+                    "--payment", s["pay"])
+        capped = n1.testmempoolaccept([r["hex"]])[0]
+        free = n1.testmempoolaccept([r["hex"]], 0)[0]
+        assert_equal(capped.get("reject-reason"), "max-fee-exceeded")
+        assert free["allowed"], free
+        self.record("bigvalue", "top tier", "vsize %s: refused at the default maxfeerate (%s), allowed with none" % (
+            free.get("vsize"), capped.get("reject-reason")))
+        # The producer leaves the going tier out: the service raises to the top tier.
+        n1.prioritisetransaction(going, 0, -10_000_000)
+        b = self.produce(1, ALL_KEYS)
+        assert going not in b["block"]["tx"]
+        self.wait_until(lambda: top in n1.getrawmempool(), timeout=60)
+        j = self.wait_job(s, ["final"])
+        txid, _ = self.assert_buyer_paid(s, j)
+        assert_equal(txid, top)
+        assert j["raised"], j
+        self.record("bigvalue", "service", "raised to the top tier above the default ceiling and mined: %s" % txid[:16])
         self.sync_tips(range(N))
 
     def case_resend(self):

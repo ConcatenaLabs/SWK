@@ -261,6 +261,11 @@ On every round the service reads both chains as they are now:
   it again after every reorganization that disconnects it;
 - it raises the claim to the top tier as soon as a block made after the claim
   was first seen pooled, by whoever pooled it, leaves it out;
+- it sends every claim, payment and cancel with no fee ceiling (`maxfeerate`
+  0), and asks the Bitcoin daemon about payments and cancels the same way: each
+  carries a fee its signer fixed, which the service cannot lower, so the RPC's
+  default ceiling would only refuse what the node takes, such as the top tier of
+  any swap worth more than a few dozen reference units;
 - it submits the tiers of the first fee asset the node still accepts whose fee
   coin is unspent;
 - it completes the claim with a paying transaction in the lock's heights whose
@@ -419,9 +424,10 @@ PAYLOCK_NODE_FUNCTIONAL=<node>/test/functional PAYLOCK_BIN=target/debug/paylock 
 ```
 
 `PAYLOCK_CASES` picks cases (`path,unpaid,late,gone,remined,anchor,wrongamount,
-wrongaddress,unaccepted,feecoin,feepot,twoasset,raise,resend,crowd,overflow,
-noraise,preempt,cancelstate,afterfinal,unconf,bumplate,bumpin,block,nopayment,
-unknownparent,afterbroadcast,fakelock,samewit,wirepending,onelock,idleconns`;
+wrongaddress,unaccepted,feecoin,feepot,twoasset,raise,bigvalue,resend,crowd,
+overflow,noraise,preempt,cancelstate,afterfinal,unconf,bumplate,bumpin,block,
+nopayment,unknownparent,afterbroadcast,fakelock,samewit,wirepending,onelock,
+idleconns,bigpay,bigcancel,heavy,edge,links,ownpay`;
 the script's docstring says what each shows), and
 `PAYLOCK_RESULTS` names a file for the observed outcomes and refusal reasons.
 

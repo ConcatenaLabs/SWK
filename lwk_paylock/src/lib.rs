@@ -376,11 +376,14 @@ impl SeqChain {
     }
 
     /// Submits a transaction. A transaction the node already pools under the same id
-    /// counts as submitted.
+    /// counts as submitted. It is sent with no fee ceiling (`maxfeerate` 0): what the
+    /// service sends carries a fee its signer fixed, which nothing here can lower, so the
+    /// RPC's default ceiling (0.1 per 1,000 vbytes) could only refuse a claim the node
+    /// takes, the top tier of any swap worth more than a few dozen reference units.
     pub fn send(&self, tx: &Transaction) -> Result<Txid, Error> {
         match self
             .rpc
-            .call("sendrawtransaction", json!([hex_encode(&serialize(tx))]))
+            .call("sendrawtransaction", json!([hex_encode(&serialize(tx)), 0]))
         {
             Ok(v) => v
                 .as_str()
@@ -1707,10 +1710,11 @@ impl BtcChain {
         Ok(b)
     }
 
-    /// Submits a raw transaction.
+    /// Submits a raw transaction, with no fee ceiling (`maxfeerate` 0): the payments and
+    /// cancels the service sends carry the fee their signer chose, which it cannot change.
     pub fn send_raw(&self, hex: &str) -> Result<String, RpcError> {
         self.rpc
-            .call("sendrawtransaction", json!([hex]))
+            .call("sendrawtransaction", json!([hex, 0]))
             .map(|v| v.as_str().unwrap_or_default().to_string())
     }
 
@@ -1738,9 +1742,11 @@ impl BtcChain {
 
     /// What the daemon would do with a transaction now, without relaying it
     /// (`testmempoolaccept`): it checks every signature and, against a transaction it
-    /// pools that spends the same coins, the replacement rules.
+    /// pools that spends the same coins, the replacement rules. With no fee ceiling
+    /// (`maxfeerate` 0), as [`BtcChain::send_raw`] sends: a fee the signer chose is never a
+    /// reason to refuse what the daemon would take.
     pub fn test_accept(&self, hex: &str) -> Result<Accept, Error> {
-        let v = self.rpc.call("testmempoolaccept", json!([[hex]]))?;
+        let v = self.rpc.call("testmempoolaccept", json!([[hex], 0]))?;
         let r = v.get(0).ok_or_else(|| err("testmempoolaccept"))?;
         if r.get("allowed").and_then(Value::as_bool) == Some(true) {
             let fee = r
