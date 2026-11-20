@@ -485,9 +485,11 @@ pub struct Candidate {
 /// candidate whose lightest proof is at least `proof` bytes is passed over with it.
 ///
 /// It is tried again only once what refused it can have changed ([`Passed::retry_due`]):
-/// the node's floor for a fee asset fell below the rate it refused, or an asset no tier
-/// could pay in became accepted. A block arriving changes neither, so it never brings a
-/// candidate back; a reorganization of Bitcoin below the scan's place clears every one.
+/// the node's floors moved so that a tier's signed fee is worth what the node would ask
+/// for the claim (or moved at all, when the refusal did not say what it asked), or an asset
+/// no tier could pay in became accepted. A block arriving changes neither, so it never
+/// brings a candidate back; a reorganization of Bitcoin below the scan's place clears
+/// every one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Passed {
     /// The candidate.
@@ -506,9 +508,8 @@ pub struct Passed {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Retry {
     /// Refused for the claim's fee rate in the assets of `refused`, and not tried in the
-    /// assets of `untried` (the node did not accept them): tried again once the node's
-    /// floor in one of the first falls below the rate it refused, or one of the second is
-    /// accepted.
+    /// assets of `untried` (the node did not accept them): tried again once one of the
+    /// first may clear ([`Refusal::may_clear`]), or one of the second is accepted.
     Floor {
         /// The best refusal in each asset tried.
         refused: Vec<Refusal>,
@@ -522,35 +523,136 @@ pub enum Retry {
     Unknown,
 }
 
-/// The node's refusal of a claim for its fee rate, in one fee asset: the claim's fee was
-/// worth `paid` and the node asked `need` (`min relay fee not met, paid < need`, in the
-/// reference unit), when the node's floor in that asset was `floor` ([`Floors::floor`]).
-/// The fee's worth follows the asset's rate and the need follows the floor, so the claim
-/// is accepted once the floor in the asset is at most `floor × paid / need`.
+/// The node's refusal of a claim for its fee rate, in one fee asset, with what is needed
+/// to tell when the same claim lands: the claim's own signed fee (`atoms` of `asset`), what
+/// the node asked for it (`need`, in the reference unit), and the node's floors when it
+/// refused (`relay`, its fee rate floor in reference atoms per 1,000 vbytes, and `rate`,
+/// the asset's rate).
+///
+/// The node values the fee at `atoms × rate / 10^8` rounded down and asks
+/// `relay × vsize / 1000` rounded up, so `need` and `relay` fix the claim's size, and the
+/// claim lands at any floors where the signed fee is worth that size's ask. The node's own
+/// figure for the fee's worth (`paid`) is kept only to check the record: it is rounded
+/// down, and at a low rate it reads 0 whatever the fee, so it never decides anything.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Refusal {
     /// The fee asset.
     pub asset: AssetId,
-    /// What the fee was worth to the node (0 when the refusal gave no figures).
+    /// The claim's signed fee, in atoms of `asset`.
+    pub atoms: u64,
+    /// What the node said the fee was worth (0 when the refusal gave no figures).
     pub paid: u64,
     /// What the node asked (0 when the refusal gave no figures).
     pub need: u64,
-    /// The node's floor in the asset when it refused; `None` when it could not be read.
-    pub floor: Option<f64>,
+    /// The node's fee rate floor when it refused, in reference atoms per 1,000 vbytes
+    /// ([`Floors::rate`]); 0 when it could not be read.
+    pub relay: u64,
+    /// The asset's rate when the node refused ([`Floors::rates`]); 0 when it could not be
+    /// read.
+    pub rate: u64,
+    /// Whether the figures fix the claim's size: the node gave them, the floors were read,
+    /// and the node's worth is the signed fee at the rate read. A record that fails any of
+    /// these says nothing about when the claim lands, so any change of floors brings it
+    /// back ([`Refusal::may_clear`]).
+    pub trusted: bool,
+}
+
+/// What `atoms` of an asset are worth to a node at `rate`: `atoms × rate / 10^8`, rounded
+/// down, as the node values a fee.
+pub fn fee_worth(atoms: u64, rate: u64) -> u64 {
+    ((atoms as u128 * rate as u128) / 100_000_000).min(u64::MAX as u128) as u64
 }
 
 impl Refusal {
-    /// Whether the claim this refusal was for may be accepted at `floors`.
-    pub fn may_clear(&self, floors: &Floors) -> bool {
-        let (Some(then), Some(now)) = (self.floor, floors.floor(&self.asset)) else {
-            // The floor unread then or now: what changed cannot be told, so it is tried.
-            return floors.known;
-        };
-        if self.need == 0 {
-            // A refusal without figures (`mempool full`): back once the floor falls.
-            return now < then;
+    /// The refusal of a claim paying `atoms` of `asset`, refused with `message`, the node's
+    /// floors read before the claim was sent (`before`) and after it was refused (`after`).
+    pub fn new(
+        asset: AssetId,
+        atoms: u64,
+        message: &str,
+        before: &Floors,
+        after: Option<&Floors>,
+    ) -> Refusal {
+        let (paid, need) = refusal_figures(message).unwrap_or((0, 0));
+        let reads: Vec<&Floors> = std::iter::once(before)
+            .chain(after)
+            .filter(|f| f.known)
+            .collect();
+        let relay = reads.iter().map(|f| f.rate).max().unwrap_or(0);
+        let rates: Vec<u64> = reads
+            .iter()
+            .filter_map(|f| f.rates.get(&asset).copied())
+            .collect();
+        let rate = rates.last().copied().unwrap_or(0);
+        // The node's worth must be the signed fee at a rate read around the refusal: else
+        // the rate moved under it, or the figures are not what they seem.
+        let trusted =
+            need > 0 && relay > 0 && rate > 0 && rates.iter().any(|r| fee_worth(atoms, *r) == paid);
+        Refusal {
+            asset,
+            atoms,
+            paid,
+            need,
+            relay,
+            rate,
+            trusted,
         }
-        now * self.need as f64 <= then * self.paid as f64
+    }
+
+    /// The smallest size, in vbytes, a claim the node asked `need` for at `relay` can
+    /// have: `relay × vsize / 1000` rounded up is `need`. `None` for a record that does
+    /// not fix it.
+    fn least_vsize(&self) -> Option<f64> {
+        (self.trusted && self.need > 0 && self.relay > 0)
+            .then(|| (self.need - 1) as f64 * 1000.0 / self.relay as f64)
+    }
+
+    /// What the node would ask for the claim at `relay`, at the least size the record
+    /// allows, and what its fee is worth at `rate`. `None` for a record that does not fix
+    /// the claim's size.
+    fn at(&self, relay: u64, rate: u64) -> Option<(u64, u64)> {
+        let v = self.least_vsize()?;
+        let ask = (relay as f64 * v / 1000.0).ceil() as u64;
+        let ask = if relay > 0 { ask.max(1) } else { ask };
+        Some((fee_worth(self.atoms, rate), ask))
+    }
+
+    /// Whether the claim this refusal was for may be accepted at `floors`. It is tried
+    /// again when its signed fee is worth what the node would ask for its size at these
+    /// floors; a record that does not fix the size ([`Refusal::trusted`]) is tried again at
+    /// any floors other than the ones that refused it. Never at those very floors, never
+    /// while the node does not accept the asset, never with the floors unread: so a claim
+    /// is sent at most once for each change of the floors, and a guess that proves wrong
+    /// costs one refusal, never a loop.
+    pub fn may_clear(&self, floors: &Floors) -> bool {
+        if !floors.known {
+            return false;
+        }
+        let Some(&rate) = floors.rates.get(&self.asset).filter(|r| **r > 0) else {
+            return false;
+        };
+        if (floors.rate, rate) == (self.relay, self.rate) {
+            return false;
+        }
+        match self.at(floors.rate, rate) {
+            Some((worth, ask)) => worth >= ask,
+            None => true,
+        }
+    }
+
+    /// How far the claim's fee clears the node's ask at `floors`: its worth over the ask
+    /// (above 1 when it lands). 0 when the record does not tell or the asset is not
+    /// accepted. Orders the claims that may land: those that clear by most go first, and
+    /// to go first a claim must pay for it, then land and leave.
+    pub fn margin(&self, floors: &Floors) -> f64 {
+        let Some(&rate) = floors.rates.get(&self.asset).filter(|r| **r > 0) else {
+            return 0.0;
+        };
+        match self.at(floors.rate, rate) {
+            Some((worth, ask)) if ask > 0 => worth as f64 / ask as f64,
+            Some((worth, _)) => worth as f64,
+            None => 0.0,
+        }
     }
 }
 
@@ -564,6 +666,19 @@ impl Passed {
                 refused.iter().any(|r| r.may_clear(floors))
                     || untried.iter().any(|a| floors.accepts(a))
             }
+        }
+    }
+
+    /// How far its best refusal that may now clear clears the node's ask at `floors`
+    /// ([`Refusal::margin`]); 0 when none tells.
+    pub fn margin(&self, floors: &Floors) -> f64 {
+        match &self.retry {
+            Retry::Floor { refused, .. } => refused
+                .iter()
+                .filter(|r| r.may_clear(floors))
+                .map(|r| r.margin(floors))
+                .fold(0.0, f64::max),
+            _ => 0.0,
         }
     }
 }
@@ -601,8 +716,11 @@ impl Floors {
     }
 }
 
-/// Non-held candidates a scan keeps, the lightest: more are heavier than all of these,
-/// and a claim proving one would be refused wherever all of these are.
+/// Non-held candidates a scan keeps, the lightest by the proof they make linking no
+/// header. A proof also carries the headers from its payment's block to the anchor, 80
+/// bytes each, which a candidate in a later block needs fewer of: so one dropped can make
+/// a lighter real proof than one kept by as many headers as the later block is higher,
+/// a block or two on a live chain. Held candidates are never dropped.
 pub const MAX_CANDIDATES: usize = 32;
 
 impl PaymentScan {
@@ -751,14 +869,80 @@ struct Summary {
 /// daemon once and kept as keys of the scripts it pays and the coins it spends, so the
 /// work of looking for a lock's payment is a lookup per block, whatever the number of
 /// locks looked for. A block is read whole again only when it holds a key a lock looks
-/// for, and the few last read whole are kept. [`BlockCache::sync`] drops what a
+/// for, and the few last read whole are kept, indexed ([`Indexed`]): each lock a block
+/// concerns reads only the transactions that touch it. [`BlockCache::sync`] drops what a
 /// reorganization replaced.
 #[derive(Debug, Default)]
 pub struct BlockCache {
     blocks: std::collections::BTreeMap<u32, Summary>,
-    whole: std::collections::VecDeque<(String, std::sync::Arc<bitcoin::Block>)>,
+    whole: std::collections::VecDeque<(String, std::sync::Arc<Indexed>)>,
     /// Blocks fetched from the daemon, in all.
     pub fetched: u64,
+}
+
+/// A block read whole, with its transactions' ids and, by key, the transactions that pay
+/// each script and spend each coin: a lock that a block concerns reads only the
+/// transactions that touch it, so many locks hit by one block cost a lookup each, not a
+/// pass over the block each.
+#[derive(Debug)]
+pub struct Indexed {
+    /// The block.
+    pub block: bitcoin::Block,
+    /// Each transaction's id, in display order, by its place in the block.
+    pub txids: Vec<String>,
+    by_script: std::collections::HashMap<u64, Vec<usize>>,
+    by_coin: std::collections::HashMap<u64, Vec<usize>>,
+}
+
+impl Indexed {
+    /// Indexes `block`.
+    pub fn new(block: bitcoin::Block) -> Indexed {
+        let mut by_script: std::collections::HashMap<u64, Vec<usize>> = Default::default();
+        let mut by_coin: std::collections::HashMap<u64, Vec<usize>> = Default::default();
+        for (i, tx) in block.txdata.iter().enumerate().skip(1) {
+            for o in &tx.output {
+                let v = by_script
+                    .entry(script_key(o.script_pubkey.as_bytes()))
+                    .or_default();
+                if v.last() != Some(&i) {
+                    v.push(i);
+                }
+            }
+            for inp in &tx.input {
+                let v = by_coin.entry(coin_key(&inp.previous_output)).or_default();
+                if v.last() != Some(&i) {
+                    v.push(i);
+                }
+            }
+        }
+        let txids = block
+            .txdata
+            .iter()
+            .map(|t| t.compute_txid().to_string())
+            .collect();
+        Indexed {
+            block,
+            txids,
+            by_script,
+            by_coin,
+        }
+    }
+
+    /// The places of the transactions (never the coinbase) that pay `script` or spend a
+    /// coin of `coins` (keys, [`script_key`] and [`coin_key`]), in block order.
+    pub fn touching(&self, script: u64, coins: &[u64]) -> Vec<usize> {
+        let mut v: Vec<usize> = self
+            .by_script
+            .get(&script)
+            .into_iter()
+            .flatten()
+            .chain(coins.iter().filter_map(|c| self.by_coin.get(c)).flatten())
+            .copied()
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
 }
 
 /// Bitcoin blocks below the tip a [`BlockCache`] keeps: two weeks, more than a lock's
@@ -824,7 +1008,7 @@ impl BlockCache {
                 }
             }
             let txs = block.txdata.len();
-            self.keep_whole(hash.clone(), std::sync::Arc::new(block));
+            self.keep_whole(hash.clone(), std::sync::Arc::new(Indexed::new(block)));
             self.blocks.insert(
                 h,
                 Summary {
@@ -838,7 +1022,7 @@ impl BlockCache {
         Ok(self.blocks.get(&h).expect("inserted"))
     }
 
-    fn keep_whole(&mut self, hash: String, b: std::sync::Arc<bitcoin::Block>) {
+    fn keep_whole(&mut self, hash: String, b: std::sync::Arc<Indexed>) {
         self.whole.retain(|(k, _)| *k != hash);
         self.whole.push_back((hash, b));
         while self.whole.len() > 8 {
@@ -877,15 +1061,11 @@ impl BlockCache {
         Ok((s.hash.clone(), hit))
     }
 
-    fn block(
-        &mut self,
-        btc: &BtcChain,
-        hash: &str,
-    ) -> Result<std::sync::Arc<bitcoin::Block>, Error> {
+    fn block(&mut self, btc: &BtcChain, hash: &str) -> Result<std::sync::Arc<Indexed>, Error> {
         if let Some((_, b)) = self.whole.iter().find(|(k, _)| k == hash) {
             return Ok(b.clone());
         }
-        let b = std::sync::Arc::new(btc.block(hash)?);
+        let b = std::sync::Arc::new(Indexed::new(btc.block(hash)?));
         self.fetched += 1;
         self.keep_whole(hash.to_string(), b.clone());
         Ok(b)
@@ -896,10 +1076,10 @@ impl BlockCache {
     /// spends a coin of `coins`. What [`BtcChain::scan_lock`] would do over those blocks is
     /// only to move on, so a lock nothing happens to costs a lookup per block. It stops
     /// where the scan has work to do.
-    pub fn advance(
+    pub fn advance<C: AsRef<[bitcoin::OutPoint]>>(
         &self,
         terms: &PayLockTerms,
-        coins: &[Vec<bitcoin::OutPoint>],
+        coins: &[C],
         open: bool,
         scan: &mut PaymentScan,
         tip: u32,
@@ -913,7 +1093,11 @@ impl BlockCache {
             }
         }
         let script = script_key(terms.receive_script_pubkey().as_bytes());
-        let keys: Vec<u64> = coins.iter().flatten().map(coin_key).collect();
+        let keys: Vec<u64> = coins
+            .iter()
+            .flat_map(|c| c.as_ref().iter())
+            .map(coin_key)
+            .collect();
         let last = scan_last(terms, open, tip);
         let mut h = scan
             .scanned
@@ -1091,7 +1275,7 @@ impl BtcChain {
         &self,
         blocks: &mut BlockCache,
         terms: &PayLockTerms,
-        coins: &[Vec<bitcoin::OutPoint>],
+        coins: &[impl AsRef<[bitcoin::OutPoint]>],
         settled: &mut [Option<Settled>],
         open: bool,
         scan: &mut PaymentScan,
@@ -1144,7 +1328,11 @@ impl BtcChain {
         let last = scan_last(terms, open, tip);
         let spk = terms.receive_script_pubkey();
         let script = script_key(spk.as_bytes());
-        let keys: Vec<u64> = coins.iter().flatten().map(coin_key).collect();
+        let keys: Vec<u64> = coins
+            .iter()
+            .flat_map(|c| c.as_ref().iter())
+            .map(coin_key)
+            .collect();
         let mut h = scan.scanned.as_ref().map(|(h, _)| h + 1).unwrap_or(first);
         let mut read = 0;
         while h <= last {
@@ -1162,16 +1350,20 @@ impl BtcChain {
             if read >= max_blocks {
                 return Ok(false);
             }
-            let block = blocks.block(self, &hash)?;
+            let indexed = blocks.block(self, &hash)?;
             read += 1;
             scan.scanned = Some((h, hash.clone()));
+            let block = &indexed.block;
             let depth = paylock::merkle_depth(block.txdata.len());
-            for tx in block.txdata.iter().skip(1) {
+            // Only the transactions that pay the script or spend a coin held: the block's
+            // index names them, so a block that hits many locks is not read whole by each.
+            for i in indexed.touching(script, &keys) {
+                let tx = &block.txdata[i];
                 let pays_price = tx
                     .output
                     .iter()
                     .any(|o| o.script_pubkey == spk && o.value.to_sat() >= terms.price_sat);
-                let txid = tx.compute_txid().to_string();
+                let txid = indexed.txids[i].clone();
                 let usable = pays_price && provable(tx);
                 let here = || Found {
                     height: h,
@@ -1180,7 +1372,11 @@ impl BtcChain {
                 };
                 let mut held = false;
                 for (c, s) in coins.iter().zip(settled.iter_mut()) {
-                    if tx.input.iter().any(|i| c.contains(&i.previous_output)) {
+                    if tx
+                        .input
+                        .iter()
+                        .any(|i| c.as_ref().contains(&i.previous_output))
+                    {
                         held = true;
                         if s.is_none() {
                             *s = Some(Settled {

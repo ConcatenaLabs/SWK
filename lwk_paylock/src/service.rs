@@ -35,16 +35,22 @@
 //! go first, then those it has not answered for, then those it says it does not know;
 //! within each, cancels never sent go first, nearest deadline first, then those sent
 //! before, the longest ago first, so a cancel skipped in one pass is reached in the
-//! next. The node's answer orders the sends and never withholds one. The work of
+//! next. The turns are per payment, by its coins: jobs holding the same coins share one
+//! turn and one send. The node's answer orders the sends and never withholds one. The work of
 //! completing claims follows what happens on the chains, never the number of jobs or
 //! clients ([`work_round`]): each Bitcoin block is read once for every job
 //! ([`BlockCache`]), a job's search passes blocks that hold nothing for it by a lookup,
 //! and a job is worked only when something it waits on can have changed, those that
 //! something new on the chains concerns first, taking turns by receiving script; a
-//! candidate passed over comes back only when the node's floor or accepted assets have
-//! moved, never because a block arrived; each job works within a time and block budget,
-//! the whole round within a budget of its own. A job that fails retries with a backoff.
-//! Each signed payment and cancel is held once however many jobs hold it, and a job's
+//! candidate passed over comes back only when the node's floors have moved so that a
+//! refused tier's own signed fee covers the node's ask (or at all, when the refusal gave
+//! no figures to judge by), or its accepted assets have, never because a block arrived
+//! and never at the floors that refused it; background work ends at once when a chain
+//! moves; each job works within a time and block budget, the whole round within a
+//! budget of its own. A job that fails retries with a backoff.
+//! Each signed payment and cancel is held once however many jobs hold it (a payment the
+//! daemon vouched for, once per transaction id whatever its witness; its coins with it,
+//! named in a job's file by a digest), and a job's
 //! own bytes are bounded ([`MAX_CLAIM_BYTES`], [`MAX_UNCHECKED_BYTES`],
 //! [`MAX_CANCEL_BYTES`]). Intake caps the request's size, the size of each transaction
 //! it keeps, the claims, payments and cancels per job, a lock's span of heights, the
@@ -80,7 +86,7 @@
 //! cancels or its payments.
 //!
 //! Jobs are kept as one JSON file each, their payments one file each under `payments/`
-//! however many jobs hold them, so a restart carries on where it stopped;
+//! however many jobs hold them (one per transaction id once vouched for), so a restart carries on where it stopped;
 //! ended jobs move to `archive/` once buried, and leave it after
 //! [`Limits::archive_days`].
 
@@ -202,8 +208,9 @@ impl Cancel {
 /// a cancel spends exactly the coins of a payment held.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Payment {
-    /// The coins it spends, sorted: what it is known by.
-    pub coins: Vec<bitcoin::OutPoint>,
+    /// The coins it spends, sorted: what it is known by. Held once however many jobs
+    /// hold the same coins ([`shared_coins`]).
+    pub coins: Arc<[bitcoin::OutPoint]>,
     /// The signed transaction held: the copy the daemon vouched for, when there is one.
     /// Held once for every job that holds it ([`shared`]), and stored once on disk.
     pub hex: Arc<str>,
@@ -241,7 +248,7 @@ impl Payment {
             ));
         }
         Ok(Payment {
-            coins: inputs_of(&t),
+            coins: shared_coins(inputs_of(&t)),
             hex: shared(hex),
             txid: t.compute_txid().to_string(),
             vouched: false,
@@ -256,6 +263,14 @@ impl Payment {
     /// a cancel of it (a valid spend of exactly these coins, signed by their owner).
     fn real(&self) -> bool {
         self.vouched || self.cancels.iter().any(|c| c.vouched)
+    }
+
+    /// Holds the one copy kept of it once it is vouched for ([`one_copy`]); `witnessed`
+    /// when the daemon vouched for this very copy, witness included.
+    fn one_copy(&mut self, witnessed: bool) {
+        if self.vouched && !self.hex.is_empty() {
+            self.hex = one_copy(&self.txid, &self.hex, witnessed);
+        }
     }
 
     /// Whether it holds a cancel, checked or not.
@@ -380,14 +395,19 @@ impl Payment {
 
     /// As stored; with `inline` false, the signed transaction is named by its key
     /// ([`payment_key`]) and kept in a file of its own, once for every job.
+    ///
+    /// Its coins follow from the transaction, so a job's file names them only when it
+    /// holds no copy of the transaction; otherwise it carries a digest of them
+    /// ([`coins_digest`]), and a payment of many coins costs each job's file no more than
+    /// one of few.
     fn to_json(&self, inline: bool) -> Value {
         let (k, hex) = if inline || self.hex.is_empty() {
             ("hex", self.hex.to_string())
         } else {
-            ("hex_ref", payment_key(&self.hex))
+            ("hex_ref", payment_key(self))
         };
-        json!({
-            "coins": self.coins.iter().map(|c| format!("{}:{}", c.txid, c.vout)).collect::<Vec<_>>(),
+        let mut v = json!({
+            "coins_key": coins_digest(&self.coins),
             "txid": self.txid,
             k: hex,
             "vouched": self.vouched,
@@ -395,20 +415,29 @@ impl Payment {
             "cancels": self.cancels.iter().map(|c| json!({"hex": &*c.hex, "fee": c.fee, "vouched": c.vouched})).collect::<Vec<_>>(),
             "pending": self.pending.iter().map(|c| json!({"hex": &*c.hex, "by": c.by})).collect::<Vec<_>>(),
             "settled": self.settled.as_ref().map(|s| json!({"height": s.at.height, "block": s.at.block, "txid": s.at.txid, "paid": s.paid})),
-        })
+        });
+        if k == "hex" {
+            v["coins"] = json!(self
+                .coins
+                .iter()
+                .map(|c| format!("{}:{}", c.txid, c.vout))
+                .collect::<Vec<_>>());
+        }
+        v
     }
 
     fn from_stored(v: &Value, terms: &PayLockTerms) -> Result<Payment, Error> {
         let by = v.get("by").and_then(Value::as_str).unwrap_or_default();
         let mut p = match v.get("hex").and_then(Value::as_str).unwrap_or_default() {
             "" => Payment {
-                coins: v
-                    .get("coins")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| c.as_str()?.parse().ok())
-                    .collect(),
+                coins: shared_coins(
+                    v.get("coins")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c.as_str()?.parse().ok())
+                        .collect(),
+                ),
                 hex: shared(""),
                 txid: v
                     .get("txid")
@@ -424,6 +453,7 @@ impl Payment {
             h => Payment::new(h, terms, by)?,
         };
         p.vouched = v.get("vouched").and_then(Value::as_bool).unwrap_or(false);
+        p.one_copy(false);
         for c in v
             .get("cancels")
             .and_then(Value::as_array)
@@ -448,6 +478,15 @@ impl Payment {
                 .unwrap_or_default()
                 .to_string();
             p.pending.push(k);
+        }
+        // A payment whose file is gone (removed by hand) and whose coins were not named:
+        // its cancels spend exactly its coins.
+        if p.coins.is_empty() {
+            if let Some(c) = p.cancels.iter().chain(&p.pending).next() {
+                if let Ok(t) = btc_tx(&c.hex, "cancel") {
+                    p.coins = shared_coins(inputs_of(&t));
+                }
+            }
         }
         p.settled = v.get("settled").and_then(|s| {
             Some(Settled {
@@ -659,8 +698,9 @@ fn retry_json(r: &Retry) -> Value {
         Retry::Unknown => json!({"kind": "unknown"}),
         Retry::Floor { refused, untried } => json!({
             "kind": "floor",
-            "refused": refused.iter().map(|r| json!({"asset": r.asset.to_string(), "paid": r.paid,
-                "need": r.need, "floor": r.floor})).collect::<Vec<_>>(),
+            "refused": refused.iter().map(|r| json!({"asset": r.asset.to_string(), "atoms": r.atoms,
+                "paid": r.paid, "need": r.need, "relay": r.relay, "rate": r.rate,
+                "trusted": r.trusted})).collect::<Vec<_>>(),
             "untried": untried.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
         }),
     }
@@ -680,11 +720,18 @@ fn retry_from(v: Option<&Value>) -> Retry {
                 .into_iter()
                 .flatten()
                 .filter_map(|r| {
+                    let n = |k: &str| r.get(k).and_then(Value::as_u64).unwrap_or(0);
+                    // A record without the claim's own fee (written before it was kept)
+                    // tells nothing: tried again at the first floors read.
                     Some(Refusal {
                         asset: r.get("asset")?.as_str()?.parse().ok()?,
-                        paid: r.get("paid")?.as_u64()?,
-                        need: r.get("need")?.as_u64()?,
-                        floor: r.get("floor").and_then(Value::as_f64),
+                        atoms: n("atoms"),
+                        paid: n("paid"),
+                        need: n("need"),
+                        relay: n("relay"),
+                        rate: n("rate"),
+                        trusted: r.get("atoms").is_some()
+                            && r.get("trusted").and_then(Value::as_bool).unwrap_or(false),
                     })
                 })
                 .collect(),
@@ -719,6 +766,64 @@ fn shared(hex: &str) -> Arc<str> {
     h
 }
 
+/// Payments vouched for, one copy per transaction id, whatever the witness of the copies
+/// handed over: a mined transaction is vouched for by its id alone (`txn-already-known`),
+/// so its copies may carry any witness, and each would otherwise cost memory and a file.
+/// The copy kept is the first one held, unless the daemon later vouches for another by
+/// its witness too (it pools or accepts that very copy), which then takes its place.
+static BY_TXID: std::sync::OnceLock<Mutex<ByTxid>> = std::sync::OnceLock::new();
+
+/// [`BY_TXID`]'s map: a transaction id, its copy held, and whether the daemon vouched for
+/// that copy by its witness too.
+type ByTxid = std::collections::HashMap<String, (Arc<str>, bool)>;
+
+/// The one copy held of the vouched payment `txid` ([`BY_TXID`]): `hex` if none is, or if
+/// `hex` is vouched for by its witness (`witnessed`) and the one held is not.
+fn one_copy(txid: &str, hex: &Arc<str>, witnessed: bool) -> Arc<str> {
+    let mut m = BY_TXID
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match m.get(txid) {
+        Some((h, w)) if *w || !witnessed => h.clone(),
+        _ => {
+            m.insert(txid.to_string(), (hex.clone(), witnessed));
+            hex.clone()
+        }
+    }
+}
+
+/// The coins of payments held, each list once however many jobs hold it.
+static COINS: std::sync::OnceLock<Mutex<std::collections::HashSet<Arc<[bitcoin::OutPoint]>>>> =
+    std::sync::OnceLock::new();
+
+/// The one copy held of the coin list `coins` ([`COINS`]).
+fn shared_coins(coins: Vec<bitcoin::OutPoint>) -> Arc<[bitcoin::OutPoint]> {
+    let mut set = COINS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = set.get(&coins[..]) {
+        return c.clone();
+    }
+    let c: Arc<[bitcoin::OutPoint]> = Arc::from(coins);
+    set.insert(c.clone());
+    c
+}
+
+/// A short name for a payment's coins, as a job's file records them while the payment's
+/// own file holds the transaction.
+fn coins_digest(coins: &[bitcoin::OutPoint]) -> String {
+    let mut e = sha256::Hash::engine();
+    for c in coins {
+        lwk_wollet::elements::hashes::HashEngine::input(
+            &mut e,
+            format!("{}:{};", c.txid, c.vout).as_bytes(),
+        );
+    }
+    sha256::Hash::from_engine(e).to_string()
+}
+
 /// Lets go of the copies no job holds any more.
 fn drop_unshared() {
     if let Some(m) = SHARED.get() {
@@ -726,11 +831,28 @@ fn drop_unshared() {
             .unwrap_or_else(|e| e.into_inner())
             .retain(|h| Arc::strong_count(h) > 1);
     }
+    if let Some(m) = BY_TXID.get() {
+        m.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (h, _)| Arc::strong_count(h) > 1);
+    }
+    if let Some(m) = COINS.get() {
+        m.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|c| Arc::strong_count(c) > 1);
+    }
 }
 
-/// The name of a signed payment's file: a hash of the transaction, witness included.
-fn payment_key(hex: &str) -> String {
-    sha256::Hash::hash(hex.as_bytes()).to_string()
+/// The name of a signed payment's file: its transaction id once the daemon vouched for it
+/// (one file per transaction, whatever the witness of the copies handed over); until then
+/// a hash of the copy, witness included, since an unchecked witness may be bad and must not
+/// stand in for another's.
+fn payment_key(p: &Payment) -> String {
+    if p.vouched {
+        format!("tx-{}", p.txid)
+    } else {
+        sha256::Hash::hash(p.hex.as_bytes()).to_string()
+    }
 }
 
 fn now_secs() -> u64 {
@@ -974,7 +1096,7 @@ impl Job {
                 if c.txid == p.txid {
                     return Err(Error("the cancel is the payment itself".into()));
                 }
-                if inputs_of(&t) != p.coins {
+                if inputs_of(&t)[..] != p.coins[..] {
                     return Err(Error(
                         "the cancel does not spend exactly the payment's coins".into(),
                     ));
@@ -1212,7 +1334,7 @@ impl Job {
 
     /// The payment held that spends exactly `coins`.
     fn payment_for(&mut self, coins: &[bitcoin::OutPoint]) -> Option<&mut Payment> {
-        self.payments.iter_mut().find(|p| p.coins == coins)
+        self.payments.iter_mut().find(|p| *p.coins == *coins)
     }
 
     /// Takes in a payment (with its cancels): into the payment held with the same coins,
@@ -1242,6 +1364,13 @@ impl Job {
         }
         self.payments.push(p);
         Ok(what)
+    }
+
+    /// Holds the one copy kept of each payment vouched for ([`one_copy`]).
+    fn one_copy_each(&mut self) {
+        for p in self.payments.iter_mut() {
+            p.one_copy(false);
+        }
     }
 
     /// The claims grouped by fee asset, in the order the buyer gave them, each group
@@ -1499,6 +1628,10 @@ fn vouch(btc: &BtcChain, p: &mut Payment, notes: &mut Vec<String>) -> Result<(),
         )),
         PaymentCheck::Invalid(m) => return Err(Refused::Bad(Error(m))),
     }
+    // Vouched for by its id alone when mined: any witness passes, so the copy held is the
+    // one already held for that id, if any.
+    let by_id_only = matches!(&a, Accept::Refused(r) if r.contains("txn-already-known"));
+    p.one_copy(!by_id_only);
     Ok(())
 }
 
@@ -1578,6 +1711,7 @@ pub fn check_intake(
                 match Payment::new(&hex, &job.terms, &client) {
                     Ok(mut p) if p.txid == h => {
                         p.vouched = true;
+                        p.one_copy(true);
                         job.payments.push(p);
                     }
                     Ok(_) => {}
@@ -1591,7 +1725,7 @@ pub fn check_intake(
     for mut c in std::mem::take(&mut job.loose) {
         let spent = inputs_of(&btc_tx(&c.hex, "cancel").map_err(Refused::Bad)?);
         if job.payment_for(&spent).is_none() {
-            match held.and_then(|h| h.payments.iter().find(|p| p.coins == spent)) {
+            match held.and_then(|h| h.payments.iter().find(|p| *p.coins == spent[..])) {
                 Some(p) => job.payments.push(Payment {
                     cancels: vec![],
                     pending: vec![],
@@ -1715,6 +1849,7 @@ fn recheck_payments(btc: &BtcChain, job: &mut Job) -> Result<(), Error> {
     for q in found {
         let _ = job.take_payment(q);
     }
+    job.one_copy_each();
     // A copy whose signatures failed is given up with its payment only if that holds no
     // cancel; otherwise the payment is kept (its coins name its cancels), without a copy.
     job.payments.retain(|p| !p.hex.is_empty() || p.has_cancel());
@@ -1929,9 +2064,10 @@ fn land(
         }
         let mut heavy: Option<(String, usize)> = None;
         let mut every_tier = true;
-        // The best refusal for the claim's fee rate in each asset, and whether a tier was
-        // refused for its size, which no floor changes.
-        let mut refused: Vec<Refusal> = vec![];
+        // The best refusal for the claim's fee rate in each asset (the claim's signed fee
+        // and the node's message), and whether a tier was refused for its size, which no
+        // floor changes.
+        let mut refused: Vec<(AssetId, u64, String)> = vec![];
         for &t in &tiers.usable {
             match prove_claim(seq, btc, &job.terms, &job.lock, &job.claims[t], &c.at)? {
                 Completion::Ready {
@@ -1964,27 +2100,23 @@ fn land(
                         return Ok(Landing::Done);
                     }
                     Err(e) if refused_for_weight(&e.0) => {
-                        if let (Some((asset, _)), false) = (fee_of(&tx), e.0.contains("tx-size")) {
-                            let (paid, need) = refusal_figures(&e.0).unwrap_or((0, 0));
-                            let r = Refusal {
-                                asset,
-                                paid,
-                                need,
-                                floor: floors.floor(&asset),
+                        if let (Some((asset, atoms)), false) =
+                            (fee_of(&tx), e.0.contains("tx-size"))
+                        {
+                            // Keep the one nearest to landing: the highest signed fee over
+                            // what the node asked (one that gave no figures, the least).
+                            let near = |atoms: u64, m: &str| {
+                                refusal_figures(m)
+                                    .filter(|(_, need)| *need > 0)
+                                    .map(|(_, need)| atoms as f64 / need as f64)
+                                    .unwrap_or(-1.0)
                             };
-                            // Keep the one nearest to landing: the highest worth over need.
-                            match refused.iter_mut().find(|x| x.asset == asset) {
-                                Some(x)
-                                    if (x.need == 0 && r.need > 0)
-                                        || (x.need > 0
-                                            && r.need > 0
-                                            && (r.paid as f64 / r.need as f64)
-                                                > (x.paid as f64 / x.need as f64)) =>
-                                {
-                                    *x = r
+                            match refused.iter_mut().find(|x| x.0 == asset) {
+                                Some(x) if near(atoms, &e.0) > near(x.1, &x.2) => {
+                                    *x = (asset, atoms, e.0.clone())
                                 }
                                 Some(_) => {}
-                                None => refused.push(r),
+                                None => refused.push((asset, atoms, e.0.clone())),
                             }
                         }
                         heavy = Some((e.0, proof_bytes));
@@ -2010,18 +2142,18 @@ fn land(
             }
         }
         if let Some((why, proof)) = heavy.filter(|_| every_tier) {
-            // The floor the node judged by, read again now: what is recorded is never below
-            // the floor that refused (a floor that rose meanwhile only brings it back early).
-            if !refused.is_empty() {
-                if let Ok(now) = seq.floors() {
-                    for r in refused.iter_mut() {
-                        r.floor = match (r.floor, now.floor(&r.asset)) {
-                            (Some(a), Some(b)) => Some(a.max(b)),
-                            (a, b) => a.or(b),
-                        };
-                    }
-                }
-            }
+            // The floors the node judged by, read again now: the record holds both reads,
+            // so a floor that moved meanwhile is seen (and the record is not trusted when
+            // the asset's rate moved under the refusal).
+            let after = if refused.is_empty() {
+                None
+            } else {
+                seq.floors().ok()
+            };
+            let refused: Vec<Refusal> = refused
+                .iter()
+                .map(|(asset, atoms, m)| Refusal::new(*asset, *atoms, m, floors, after.as_ref()))
+                .collect();
             let retry = if refused.is_empty() && tiers.unaccepted.is_empty() {
                 // Refused for its size at every tier: no floor brings it back.
                 Retry::Never
@@ -2201,7 +2333,8 @@ pub fn tick_with(
     // cancels checked once their coins are known. Ended jobs still watched too, so a
     // payment that becomes known after a decision reopens it.
     recheck_payments(btc, job)?;
-    let coins: Vec<Vec<bitcoin::OutPoint>> = job.payments.iter().map(|p| p.coins.clone()).collect();
+    let coins: Vec<Arc<[bitcoin::OutPoint]>> =
+        job.payments.iter().map(|p| p.coins.clone()).collect();
     let mut settled: Vec<Option<Settled>> =
         job.payments.iter().map(|p| p.settled.clone()).collect();
     let open = job
@@ -2394,14 +2527,17 @@ pub fn tick_with(
 /// due (a job not ended, with cancels, its payment not known to be mined in the lock's
 /// heights and no spend of its coins confirmed, the tip two blocks before `D` or later,
 /// and not more than [`CANCEL_KEEP_BLOCKS`] past `D`), within
-/// [`Limits::cancel_pass_time`] (and half as long again for looking up locks the node has
-/// not answered for). Every due cancel is sent, whatever the Sequentia node
+/// [`Limits::cancel_pass_time`]; then, for half as long again, it looks up the locks the
+/// node has not answered for, which orders the next pass (never before a send). Every due cancel is sent, whatever the Sequentia node
 /// says of the lock: the cancel concerns Bitcoin alone, and a node still syncing must not
 /// cost a buyer its bitcoin. The node's answer only orders the sends: jobs whose lock it
 /// knows first, then those it has not answered for, then those it says it does not know.
 /// Within each, cancels never tried go first, nearest deadline first; then those tried
 /// before, the longest ago first (each at most every ten seconds), so what one pass does
-/// not reach the next one does. A job's cancels go out highest fee first. Returns how many
+/// not reach the next one does. The turns are per payment, known by its coins: every job
+/// holding the same coins shares one turn and one send, so a payment shared by many jobs
+/// costs one send. A payment's cancels go out highest fee first until the daemon takes
+/// one. What the sends tell the jobs is written once every send is done. Returns how many
 /// cancels a daemon accepted.
 pub fn send_due_cancels(
     store: &Mutex<Store>,
@@ -2422,34 +2558,15 @@ pub fn send_due_cancels(
             && tip <= j.terms.deadline.saturating_add(CANCEL_KEEP_BLOCKS)
             && (!j.cancel_tried || now >= j.cancel_at + CANCEL_RESEND_SECS)
     };
-    // Locks never looked up, looked up within half the pass: an unanswered node only
-    // leaves them where they are in the order.
-    let unknown: Vec<Job> = lock(store)
-        .jobs
-        .values()
-        .filter(|j| due(j) && j.lock_known.is_none())
-        .cloned()
-        .collect();
-    let lookups_end = start + limits.cancel_pass_time / 2;
-    for job in unknown {
-        if Instant::now() >= lookups_end {
-            break;
-        }
-        let Ok(known) = lock_on_chain(seq, &job) else {
-            break;
-        };
-        let mut st = lock(store);
-        if let Some(j) = st.jobs.get_mut(&job.id) {
-            j.lock_known = Some(known);
-            j.lock_checked_at = now;
-            let j = j.clone();
-            let _ = st.save(&j);
-        }
-    }
-    // The sends have the pass's budget of their own, so a lookup never costs a send.
-    let end_at = Instant::now() + limits.cancel_pass_time;
+    let end_at = start + limits.cancel_pass_time;
     // One entry per payment with cancels to send, keyed by the client that handed it over:
-    // whoever started the job, each payment's sender takes its own turns.
+    // whoever started the job, each payment's sender takes its own turns. Payments are
+    // known by their coins: every job holding the same coins (one payment vouching for
+    // many jobs, or copies of it) is one entry, sent once, so jobs that share a payment
+    // cost one send between them, however many there are.
+    let mut groups: Vec<CancelGroup> = vec![];
+    let mut group_of: std::collections::HashMap<Arc<[bitcoin::OutPoint]>, usize> =
+        Default::default();
     let mut due_jobs: Vec<Turn> = vec![];
     for j in lock(store).jobs.values().filter(|j| due(j)) {
         let rank = match j.lock_known {
@@ -2464,68 +2581,162 @@ pub fn send_due_cancels(
         };
         for (i, p) in j.payments.iter().enumerate() {
             if p.settled.is_none() && p.has_cancel() {
-                due_jobs.push((rank, j.cancel_tried, key, (j.id.clone(), i), p.by.clone()));
+                // A payment known by no coins (its copy lost) is a turn of its own.
+                let g = if p.coins.is_empty() {
+                    groups.push((p.coins.clone(), vec![]));
+                    groups.len() - 1
+                } else {
+                    *group_of.entry(p.coins.clone()).or_insert_with(|| {
+                        groups.push((p.coins.clone(), vec![]));
+                        groups.len() - 1
+                    })
+                };
+                groups[g].1.push((j.id.clone(), i));
+                due_jobs.push((rank, j.cancel_tried, key, g, p.by.clone()));
             }
         }
     }
     due_jobs.sort();
+    // A group takes its place at its first entry: its best rank, its client's turn.
+    let mut seen = std::collections::HashSet::new();
+    due_jobs.retain(|t| seen.insert(t.3));
     let mut sent = 0;
-    for (id, i) in take_turns(due_jobs) {
-        let Some(p) = lock(store)
-            .jobs
-            .get(&id)
-            .and_then(|j| j.payments.get(i).cloned())
-        else {
-            continue;
-        };
+    // The sends first, then what they tell each job: so a group's many jobs are written
+    // once every cancel due has gone out, and never before another payment's send.
+    let mut results: Vec<(usize, bool, Option<String>)> = vec![];
+    for g in take_turns(due_jobs) {
+        let members = &groups[g].1;
+        // The cancels of every job holding these coins, each copy once: the checked ones,
+        // highest fee first; then those not checkable yet, which a daemon refuses if they
+        // are not valid. All spend the same coins, so the first one taken ends the turn.
+        let mut checked: Vec<Cancel> = vec![];
+        let mut pending: Vec<Cancel> = vec![];
+        {
+            let st = lock(store);
+            for (id, i) in members {
+                let Some(p) = st.jobs.get(id).and_then(|j| j.payments.get(*i)) else {
+                    continue;
+                };
+                for c in &p.cancels {
+                    if !checked.iter().any(|k| k.hex == c.hex) {
+                        checked.push(c.clone());
+                    }
+                }
+                for c in &p.pending {
+                    if !pending.iter().any(|k| k.hex == c.hex) {
+                        pending.push(c.clone());
+                    }
+                }
+            }
+        }
+        checked.sort_by(|a, b| b.fee.cmp(&a.fee));
+        // The unchecked ones take turns by the client that handed them over, so no
+        // client's copies come all before another's: none can be checked, and a bad
+        // copy must not keep the good one from being tried.
+        let pending = take_turns(
+            pending
+                .into_iter()
+                .map(|c| (0, false, 0, c.clone(), c.by.clone()))
+                .collect(),
+        );
         let mut accepted = false;
         let mut refused = None;
         let mut tried = false;
-        // The checked ones, highest fee first; then those not checkable yet, which a
-        // daemon refuses if they are not valid.
-        for c in p.cancels.iter().chain(&p.pending) {
-            if Instant::now() >= end_at {
+        let send = |c: &Cancel, accepted: &mut bool, refused: &mut Option<String>| match btc
+            .send_raw(&c.hex)
+        {
+            Ok(_) => {
+                *accepted = true;
+                1
+            }
+            Err(e) => {
+                let m = e.to_string();
+                if m.contains("already") {
+                    *accepted = true;
+                } else {
+                    refused.get_or_insert(m);
+                }
+                0
+            }
+        };
+        // The checked ones until the daemon takes one: each spends the same coins, so
+        // the rest could only conflict with it.
+        for c in &checked {
+            if Instant::now() >= end_at || accepted {
                 break;
             }
             tried = true;
-            match btc.send_raw(&c.hex) {
-                Ok(_) => {
-                    sent += 1;
-                    accepted = true;
+            sent += send(c, &mut accepted, &mut refused);
+        }
+        // Then, while none was taken, every unchecked copy: the daemon refuses those that
+        // are not valid.
+        if !accepted {
+            for c in &pending {
+                if Instant::now() >= end_at {
+                    break;
                 }
-                Err(e) => {
-                    let m = e.to_string();
-                    if m.contains("already") {
-                        accepted = true;
-                    } else {
-                        refused.get_or_insert(m);
-                    }
-                }
+                tried = true;
+                sent += send(c, &mut accepted, &mut refused);
             }
         }
         if !tried {
             break;
         }
-        let mut st = lock(store);
-        let Some(j) = st.jobs.get_mut(&id) else {
+        results.push((g, accepted, refused));
+    }
+    for (g, accepted, refused) in results {
+        let mut ids: Vec<&String> = groups[g].1.iter().map(|(id, _)| id).collect();
+        ids.dedup();
+        for id in ids {
+            let mut st = lock(store);
+            let Some(j) = st.jobs.get_mut(id) else {
+                continue;
+            };
+            j.cancel_tried = true;
+            j.cancel_at = now;
+            if accepted {
+                if !j.cancel_sent {
+                    j.note = format!(
+                        "the payment did not confirm by Bitcoin block {tip} (two before the deadline): the cancel is broadcast"
+                    );
+                }
+                j.cancel_sent = true;
+            } else if let Some(m) = &refused {
+                if !j.cancel_sent {
+                    j.note = format!("the cancel was refused: {m}");
+                }
+            }
+            let j = j.clone();
+            let _ = st.save(&j);
+        }
+    }
+    // Then the locks never looked up, for half the pass again: the answer orders the next
+    // pass's sends (an unanswered node leaves them where they are). Looked up after the
+    // sends, so no lookup ever delays one.
+    let ids: Vec<String> = lock(store)
+        .jobs
+        .values()
+        .filter(|j| due(j) && j.lock_known.is_none())
+        .map(|j| j.id.clone())
+        .collect();
+    let lookups_end = Instant::now() + limits.cancel_pass_time / 2;
+    for id in ids {
+        if Instant::now() >= lookups_end {
+            break;
+        }
+        let Some(job) = lock(store).jobs.get(&id).cloned() else {
             continue;
         };
-        j.cancel_tried = true;
-        j.cancel_at = now;
-        if accepted {
-            if !j.cancel_sent {
-                j.note = format!(
-                    "the payment did not confirm by Bitcoin block {tip} (two before the deadline): the cancel is broadcast"
-                );
-            }
-            j.cancel_sent = true;
-        } else if let Some(m) = refused {
-            if !j.cancel_sent {
-                j.note = format!("the cancel was refused: {m}");
-            }
+        let Ok(known) = lock_on_chain(seq, &job) else {
+            break;
+        };
+        let mut st = lock(store);
+        if let Some(j) = st.jobs.get_mut(&id) {
+            j.lock_known = Some(known);
+            j.lock_checked_at = now;
+            let j = j.clone();
+            let _ = st.save(&j);
         }
-        let j = j.clone();
-        let _ = st.save(&j);
     }
     Ok(sent)
 }
@@ -2534,30 +2745,41 @@ pub fn send_due_cancels(
 /// started the jobs take turns, each in its own order (never tried first, nearest
 /// deadline first). So a client with many jobs gets one send per turn, like any other,
 /// and cannot push another client's cancel back. `due` is sorted by rank first.
-/// A payment's cancels due: lock rank, tried before, its order key, (job, payment), and
-/// the client that handed the payment over.
-type Turn = (u8, bool, u64, (String, usize), String);
+/// The coins of a payment with cancels due, and every (job, payment) holding them.
+type CancelGroup = (Arc<[bitcoin::OutPoint]>, Vec<(String, usize)>);
+
+/// A payment's cancels due: lock rank, tried before, its order key, the group of jobs
+/// holding its coins, and the client that handed the payment over.
+type Turn = (u8, bool, u64, usize, String);
 
 fn take_turns<K: Clone>(due: Vec<(u8, bool, u64, K, String)>) -> Vec<K> {
     let mut out = vec![];
     let mut i = 0;
     while i < due.len() {
         let rank = due[i].0;
-        let mut queues: Vec<(String, std::collections::VecDeque<K>)> = vec![];
+        // The clients' queues in the order each first appears, found by a map: linear in
+        // the cancels, however many clients there are.
+        let mut queues: Vec<std::collections::VecDeque<K>> = vec![];
+        let mut of: std::collections::HashMap<&str, usize> = Default::default();
         while i < due.len() && due[i].0 == rank {
             let (_, _, _, id, client) = &due[i];
-            match queues.iter_mut().find(|(c, _)| c == client) {
-                Some((_, q)) => q.push_back(id.clone()),
-                None => queues.push((client.clone(), [id.clone()].into())),
-            }
+            let q = *of.entry(client.as_str()).or_insert_with(|| {
+                queues.push(Default::default());
+                queues.len() - 1
+            });
+            queues[q].push_back(id.clone());
             i += 1;
         }
-        while queues.iter().any(|(_, q)| !q.is_empty()) {
-            for (_, q) in queues.iter_mut() {
-                if let Some(id) = q.pop_front() {
+        // Turn by turn: one from each client still holding some, in that order.
+        let mut live: Vec<usize> = (0..queues.len()).collect();
+        while !live.is_empty() {
+            live.retain(|&q| match queues[q].pop_front() {
+                Some(id) => {
                     out.push(id);
+                    true
                 }
-            }
+                None => false,
+            });
         }
     }
     out
@@ -2605,7 +2827,8 @@ impl Store {
                 serde_json::from_slice(&std::fs::read(&p).map_err(|e| Error(e.to_string()))?)
                     .map_err(|e| Error(format!("{}: {e}", p.display())))?;
             // Each payment from its own file. One gone (removed by hand) leaves the payment
-            // known by its coins and id, without the transaction.
+            // known by its id, without the transaction, and by its coins as its cancels
+            // spend them.
             for q in v
                 .get_mut("payments")
                 .and_then(Value::as_array_mut)
@@ -2684,6 +2907,7 @@ impl Store {
             }
             // Something new to work on: the job's turn comes early.
             m.changed += 1;
+            m.one_copy_each();
             self.save(&m).map_err(io)?;
             self.jobs.insert(id.clone(), m);
             return Ok((id, Added::Merged(what)));
@@ -2727,6 +2951,7 @@ impl Store {
         if job.unchecked_bytes() > MAX_UNCHECKED_BYTES {
             return Err(unchecked_limit());
         }
+        job.one_copy_each();
         self.save(&job).map_err(io)?;
         self.jobs.insert(id.clone(), job);
         Ok((id, Added::New))
@@ -2745,7 +2970,7 @@ impl Store {
     pub fn save(&self, job: &Job) -> Result<(), Error> {
         let io = |e: std::io::Error| Error(e.to_string());
         for p in job.payments.iter().filter(|p| !p.hex.is_empty()) {
-            let key = payment_key(&p.hex);
+            let key = payment_key(p);
             let f = self.dir.join("payments").join(format!("{key}.hex"));
             if !f.exists() {
                 let tmp = self.dir.join("payments").join(format!("{key}.tmp"));
@@ -2772,7 +2997,7 @@ impl Store {
             .values()
             .flat_map(|j| j.payments.iter())
             .filter(|p| !p.hex.is_empty())
-            .map(|p| format!("{}.hex", payment_key(&p.hex)))
+            .map(|p| format!("{}.hex", payment_key(p)))
             .collect();
         let Ok(rd) = std::fs::read_dir(self.dir.join("payments")) else {
             return 0;
@@ -2892,14 +3117,10 @@ fn fold_in(job: &mut Job, cur: &Job, before: &Value) {
         .as_array()
         .into_iter()
         .flatten()
-        .map(|p| p["coins"].clone())
+        .map(|p| p["coins_key"].clone())
         .collect();
     for p in &cur.payments {
-        let key = json!(p
-            .coins
-            .iter()
-            .map(|c| format!("{}:{}", c.txid, c.vout))
-            .collect::<Vec<_>>());
+        let key = json!(coins_digest(&p.coins));
         let new = Payment {
             cancels: p
                 .cancels
@@ -2967,15 +3188,19 @@ static WORK_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 ///   its receiving script nor spend its payments' coins by a lookup, without a call to
 ///   either chain ([`BlockCache::advance`]);
 /// - a job is worked only when something it waits on can have changed, and in this order:
-///   1. something new on the chains concerns it: a block that pays its script or spends
-///      its coins; a candidate payment not passed over that a Sequentia block now anchors;
-///      its claim pooled by someone, left out of a block, mined, or gone from the mempool.
-///      Those whose claims are worth at least the node's floor go first, the rest after;
+///   1. something new on the chains concerns it. First those a claim must be made for: a
+///      block that pays its script or spends its coins; a candidate payment not passed
+///      over that a Sequentia block now anchors; its claim gone from the mempool. Those
+///      whose claims are worth at least the node's floor go first, the rest after. Then
+///      those whose claim is made: pooled by someone, left out of a block (to raise it),
+///      or mined;
 ///   2. intake changed it since it was last worked, or its search reached a block not read
 ///      yet;
-///   3. a candidate it passed over may now land: the node's floor in the fee asset fell
-///      below the rate it refused, or an asset no tier could pay in is accepted; then a
-///      job whose last round failed, once its backoff is over, fewest failures first;
+///   3. a candidate it passed over may now land: a refused tier's signed fee covers what
+///      the node would ask for it at the floors now ([`lwk_paylock::Refusal::may_clear`]),
+///      or an asset no tier could pay in is accepted, the claims clearing the ask by the
+///      most first; then a job whose last round failed, once its backoff is over, fewest
+///      failures first;
 ///   4. the rest, once per Bitcoin block (for the deadline and the state they show), and
 ///      those holding a payment or cancel Bitcoin cannot check yet, whenever a chain moves
 ///      and at least every ten seconds.
@@ -2984,10 +3209,16 @@ static WORK_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 ///   job whose claims cannot land (priced under the floor, in an asset the node does not
 ///   accept) costs a lookup a round once it has been tried, however many there are;
 /// - within each of those, the jobs take turns by receiving script, each script's least
-///   recently worked first. So a buyer whose payment is mined is worked in the first turns
-///   of the next round, behind only the jobs that something new on the chains concerns in
-///   that round, each of which cost whoever made it an output in a new Bitcoin block or a
-///   claim the node takes.
+///   recently worked first (in the third, the one clearing the node's ask by the most). So a
+///   buyer whose payment is mined is worked in the first turns of the next round, behind
+///   only the jobs that a claim must be made for in that round, each of which cost
+///   whoever made it an output in a new Bitcoin block or a claim the node takes (and pays
+///   for: a claim pooled pays its fee once mined, and its job leaves); the upkeep of
+///   claims already pooled or mined comes after it;
+/// - the second to fourth are background: while they run, the chains' tips are looked at every
+///   [`MOVE_CHECK`], and a move ends the round, the next starting at once. So background
+///   work keeps a buyer whose payment was just mined or anchored waiting one job's work
+///   at most, however long it is.
 ///
 /// A job backing off, and an ended one still watched whose turn has not come, waits.
 /// Each job works within its budget, the whole round within the round's; a job cut short
@@ -2996,16 +3227,25 @@ static WORK_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// ended job is archived once the Bitcoin block that decided it is buried. Returns how
 /// many jobs it worked on.
 pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: &Limits) -> usize {
+    round(store, seq, btc, limits).0
+}
+
+/// How often a round doing background work looks at the chains' tips ([`work_round`]).
+pub const MOVE_CHECK: Duration = Duration::from_millis(200);
+
+/// [`work_round`], and whether it ended its background work early because a chain moved
+/// (the next round is then started at once).
+fn round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: &Limits) -> (usize, bool) {
     let start = Instant::now();
     let round_end = start + limits.round_time;
     let now = now_secs();
     let cache = lock(store).blocks.clone();
     let mut blocks = cache.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(btc_tip) = blocks.sync(btc, start + limits.round_time / 2) else {
-        return 0;
+        return (0, false);
     };
     let Ok(seq_tip) = seq.height() else {
-        return 0;
+        return (0, false);
     };
     // The tips by their blocks' hashes, so a block replaced at the same height (a
     // Sequentia block rebuilt on Bitcoin's new branch) moves them; and the anchor of
@@ -3043,13 +3283,15 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
         .iter()
         .filter_map(|t| t.as_str().map(String::from))
         .collect();
-    // (class, receiving script, failures, last worked, deadline, id)
+    // (class, receiving script, rank, last worked, deadline, id). The rank is the job's
+    // failures, except in class 4, where it is how far its claim clears the node's ask
+    // now, the farthest first.
     let mut due: Vec<(u8, u64, u32, u64, u32, String)> = vec![];
     for j in lock(store).jobs.values_mut() {
         if j.retry_at > now || (j.state.ended() && j.watch_at > now) {
             continue;
         }
-        let coins: Vec<Vec<bitcoin::OutPoint>> =
+        let coins: Vec<Arc<[bitcoin::OutPoint]>> =
             j.payments.iter().map(|p| p.coins.clone()).collect();
         let open = j
             .payments
@@ -3085,45 +3327,59 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
                 blocks.lightest_proof(script, h)
             })
             .flatten();
-        let fresh = advance == Advance::Hit
-            || (claim_pooled && j.state != State::Pooled)
-            || (j.state == State::Pooled && !claim_pooled)
+        // Something new on the chains that a claim must be made for: a payment in a new
+        // block, a candidate now anchored, the job's pooled claim gone.
+        let to_claim = advance == Advance::Hit
+            || (provable && moved)
+            || (j.state == State::Pooled && !claim_pooled);
+        // Something new for a claim already made: pooled by someone, a block that left it
+        // out (to raise it), a block on top of it mined.
+        let upkeep = (claim_pooled && j.state != State::Pooled)
             || (j.state == State::Pooled && !j.raised && moved)
-            || (j.state == State::Mined && moved)
-            || (provable && moved);
-        let class = if fresh {
+            || (j.state == State::Mined && moved);
+        let mut rank = j.failures;
+        let class = if to_claim {
             if under_floor(j, &floors, hit_proof) {
                 1
             } else {
                 0
             }
-        } else if advance == Advance::Unread || j.worked == 0 || j.changed != j.seen {
+        } else if upkeep {
             2
-        } else if j.failures == 0 && j.scan.passed.iter().any(|p| p.retry_due(&floors)) {
+        } else if advance == Advance::Unread || j.worked == 0 || j.changed != j.seen {
             3
-        } else if j.failures > 0 {
+        } else if j.failures == 0 && j.scan.passed.iter().any(|p| p.retry_due(&floors)) {
+            let margin = j
+                .scan
+                .passed
+                .iter()
+                .map(|p| p.margin(&floors))
+                .fold(0.0, f64::max);
+            rank = u32::MAX - (margin.clamp(0.0, 4_000.0) * 1_000_000.0) as u32;
             4
+        } else if j.failures > 0 {
+            5
         } else if btc_moved
             || ((moved || now >= j.worked_at + UNCHECKED_RECHECK_SECS)
                 && j.payments
                     .iter()
                     .any(|p| !p.vouched || !p.pending.is_empty()))
         {
-            5
+            6
         } else {
             continue;
         };
         due.push((
             class,
             script,
-            j.failures,
+            rank,
             j.worked,
             j.terms.deadline,
             j.id.clone(),
         ));
     }
     let mut order: Vec<String> = vec![];
-    for class in 0..6u8 {
+    for class in 0..7u8 {
         let mut groups: BTreeMap<u64, Vec<(u32, u64, u32, String)>> = BTreeMap::new();
         for (_, script, f, w, d, id) in due.iter().filter(|x| x.0 == class) {
             groups
@@ -3138,7 +3394,8 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
                 v.into()
             })
             .collect();
-        // The script whose next job failed least, then waited longest, takes the first turn.
+        // The script whose next job ranks first (failed least; in class 4, clears farthest),
+        // then waited longest, takes the first turn.
         queues.sort_by_key(|q| q.front().map(|x| (x.0, x.1, x.2)));
         while queues.iter().any(|q| !q.is_empty()) {
             for q in queues.iter_mut() {
@@ -3148,11 +3405,37 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
             }
         }
     }
+    // Classes 0 to 2 are the work something new on the chains asks for; the rest is
+    // background. While it runs, the chains' tips are looked at every
+    // [`MOVE_CHECK`]: once either moves, the round ends, and the next one starts at
+    // once, with whatever the move brings first. So background work (retries at new
+    // floors, first tries, the per-block tick) never keeps a buyer whose payment was
+    // just mined or anchored waiting longer than one job's work and one check.
+    let urgent = due.iter().filter(|x| x.0 <= 2).count();
+    let mut checked = Instant::now();
+    let mut moved = false;
     let mut worked = 0;
-    for id in order {
+    for (n, id) in order.into_iter().enumerate() {
         let t = Instant::now();
         if t >= round_end {
             break;
+        }
+        if n >= urgent && t >= checked + MOVE_CHECK {
+            checked = t;
+            let tip = |r: &crate::Rpc| {
+                r.call("getbestblockhash", json!([]))
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+            };
+            // A tip this round could not read by its hash is not compared: it would read
+            // as moved at every look.
+            let read = |h: &str| !h.starts_with("height ");
+            if (read(&seq_hash) && tip(&seq.rpc).is_some_and(|h| h != seq_hash))
+                || (read(&btc_hash) && tip(&btc.rpc).is_some_and(|h| h != btc_hash))
+            {
+                moved = true;
+                break;
+            }
         }
         let Some(mut job) = lock(store).jobs.get(&id).cloned() else {
             continue;
@@ -3212,6 +3495,7 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
             // What intake merged in while it was worked is still to be seen.
             job.changed = cur.changed;
         }
+        job.one_copy_each();
         if job.stored_json() != before {
             let _ = st.save(&job);
         }
@@ -3221,7 +3505,7 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
             let _ = st.archive(&id);
         }
     }
-    worked
+    (worked, moved)
 }
 
 /// How the service listens.
@@ -3413,13 +3697,55 @@ pub fn serve(
     let mut pruned = Instant::now();
     lock(&store).prune_archive(limits.archive_days);
     loop {
-        work_round(&store, &seq, &btc, &limits);
+        let (_, moved) = round(&store, &seq, &btc, &limits);
         if pruned.elapsed() > Duration::from_secs(600) {
             let st = lock(&store);
             st.prune_archive(limits.archive_days);
             st.prune_payments();
             pruned = Instant::now();
         }
-        std::thread::sleep(interval);
+        if !moved {
+            std::thread::sleep(interval);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_turns;
+    use std::time::{Duration, Instant};
+
+    /// F12: the cancel pass's turns are linear in the cancels, however many clients
+    /// hand them over. 160,000 cancels from as many clients took 21.8 s with a queue found
+    /// by a linear search; the order is unchanged: one from each client in the order it
+    /// first appears, then the next round.
+    #[test]
+    fn turns_are_linear_in_the_clients() {
+        let order = take_turns(vec![
+            (0, false, 1, "a1", "a".to_string()),
+            (0, false, 2, "a2", "a".to_string()),
+            (0, false, 3, "b1", "b".to_string()),
+            (0, false, 4, "c1", "c".to_string()),
+            (0, false, 5, "a3", "a".to_string()),
+            (1, false, 1, "d1", "d".to_string()),
+            (1, false, 2, "a4", "a".to_string()),
+        ]);
+        assert_eq!(order, vec!["a1", "b1", "c1", "a2", "a3", "d1", "a4"]);
+        let mut times = vec![];
+        for n in [10_000u32, 40_000, 160_000] {
+            let due: Vec<_> = (0..n)
+                .map(|i| (0u8, false, u64::from(i), i, format!("client-{i}")))
+                .collect();
+            let t = Instant::now();
+            let out = take_turns(due);
+            let took = t.elapsed();
+            assert_eq!(out.len(), n as usize);
+            times.push((n, took));
+        }
+        eprintln!("take_turns, one cancel per client: {times:?}");
+        assert!(
+            times.iter().all(|(_, t)| *t < Duration::from_secs(2)),
+            "{times:?}"
+        );
     }
 }

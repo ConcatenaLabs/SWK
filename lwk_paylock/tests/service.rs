@@ -2176,12 +2176,13 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
         why: "min relay fee not met, 5000 < 8356".into(),
         tip,
         retry: lwk_paylock::Retry::Floor {
-            refused: vec![lwk_paylock::Refusal {
+            refused: vec![lwk_paylock::Refusal::new(
                 asset,
-                paid,
-                need,
-                floor: at.floor(&asset),
-            }],
+                5_000,
+                "min relay fee not met, 5000 < 8356",
+                &at,
+                None,
+            )],
             untried: vec![other_asset],
         },
     });
@@ -2206,6 +2207,52 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     assert!(q.retry_due(&at));
     q.retry = lwk_paylock::Retry::Never;
     assert!(!q.retry_due(&floors(0, &[(asset, u64::MAX)])));
+
+    // The claim's own signed fee decides, never the node's figure for its worth, which is
+    // rounded down: at a rate of 1 a fee of 5,000 atoms reads `0 < 304`. Whatever the rate
+    // the refusal came at, the claim is tried again once its fee covers the ask, and not
+    // before.
+    let normal = floors(1_000, &[(asset, 100_000_000)]);
+    for low in [1u64, 100_000, 100_000_000] {
+        let (relay, worth) = if low == 100_000_000 {
+            (100_000, 5_000)
+        } else {
+            (1_000, lwk_paylock::fee_worth(5_000, low))
+        };
+        let need = 304 * relay / 1_000;
+        let then = floors(relay, &[(asset, low)]);
+        let r = lwk_paylock::Refusal::new(
+            asset,
+            5_000,
+            &format!("min relay fee not met, {worth} < {need} (code -26)"),
+            &then,
+            Some(&then),
+        );
+        assert!(r.trusted, "{r:?}");
+        assert!(!r.may_clear(&then), "{r:?}");
+        assert!(r.may_clear(&normal), "rate {low}: {r:?}");
+        assert!(r.margin(&normal) > 10.0, "{r:?}");
+        // Halfway back is not enough for a floor 100 times too high.
+        let half = floors(
+            relay / 2,
+            &[(asset, low.saturating_mul(2).min(100_000_000))],
+        );
+        assert!(!r.may_clear(&half), "{r:?}");
+    }
+    // A refusal without figures (`mempool full`) or whose figures are not the signed fee's
+    // worth at the rate read (the rate moved under it) says nothing of when the claim
+    // lands: tried again at any floors other than those it was refused at, a higher floor
+    // included, once.
+    for m in ["mempool full", "min relay fee not met, 77 < 8356"] {
+        let r = lwk_paylock::Refusal::new(asset, 5_000, m, &at, None);
+        assert!(!r.trusted, "{m}");
+        assert!(!r.may_clear(&at), "{m}");
+        assert!(r.may_clear(&floors(1_001, &[(asset, 100_000_000)])), "{m}");
+        assert!(r.may_clear(&floors(1_000, &[(asset, 99_000_000)])), "{m}");
+        // Not while the node does not take the asset, nor with the floors unread.
+        assert!(!r.may_clear(&floors(10, &[(other_asset, 1)])), "{m}");
+        assert!(!r.may_clear(&lwk_paylock::Floors::default()), "{m}");
+    }
 
     // A reorganization below the scan's place drops every candidate and everything passed
     // over: the scan reads again from the floor, on the new branch.
@@ -2506,4 +2553,245 @@ fn intake_keeps_nothing_larger_than_the_buyers_own() {
     ))
     .unwrap_err();
     assert!(e.0.contains("at most"), "{e}");
+}
+
+/// Cancel contention: 2,000 jobs whose cancels fall due at the same tip as a
+/// buyer's, from as many addresses, all holding one payment (the same coins) and its one
+/// cancel. They are one payment to the cancel thread: one send between them, so the
+/// buyer's cancel goes out in the first two sends, and every one of the jobs is marked
+/// sent by that one send.
+#[test]
+fn jobs_sharing_a_payment_cost_one_cancel_send() {
+    const D: u32 = 1_006;
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let c2 = calls.clone();
+    let btc_url = fake_node(Box::new(move |m, p| match m {
+        "getblockcount" => Ok(json!(D - 2)),
+        "sendrawtransaction" => {
+            std::thread::sleep(Duration::from_millis(1));
+            let hex = p[0].as_str().unwrap_or_default().to_string();
+            let mut c = c2.lock().unwrap();
+            let again = c.contains(&hex);
+            c.push(hex);
+            if again {
+                Err((-27, "txn-already-in-mempool".into()))
+            } else {
+                Ok(json!("00".repeat(32)))
+            }
+        }
+        _ => Err((-32601, "no such method".into())),
+    }));
+    let seq_url = fake_seq(Default::default(), Arc::new(true.into()));
+    let dir = tmpdir("sharedcancel");
+    let store = Mutex::new(Store::open(&dir).unwrap());
+    let limits = Limits {
+        jobs_per_client: 0,
+        max_jobs: 100_000,
+        ..Limits::default()
+    };
+    let shared_cancel = btc_hex(&btc_spend(7, 90_000));
+    let buyer_cancel = btc_hex(&btc_spend(999, 90_000));
+    {
+        let mut st = store.lock().unwrap();
+        for n in 0..2_000u32 {
+            let mut j = holding(&request(n, 1_000, D, Some(shared_cancel.clone())));
+            j.lock_known = Some(true);
+            j.client = format!("100.64.{}.{}", n / 250, n % 250);
+            st.add(j, &limits).unwrap();
+        }
+        let mut j = holding(&request(5_000, 1_000, D, Some(buyer_cancel.clone())));
+        j.lock_known = Some(true);
+        j.client = "203.0.113.92".into();
+        st.add(j, &limits).unwrap();
+    }
+    let t = Instant::now();
+    let n = service::send_due_cancels(
+        &store,
+        &BtcChain {
+            rpc: rpc(&btc_url, 3),
+        },
+        &SeqChain {
+            rpc: rpc(&seq_url, 3),
+        },
+        &limits,
+    )
+    .unwrap();
+    let took = t.elapsed();
+    let c = calls.lock().unwrap().clone();
+    let at = c.iter().position(|h| *h == buyer_cancel);
+    let st = store.lock().unwrap();
+    let marked = st.jobs.values().filter(|j| j.cancel_sent).count();
+    eprintln!(
+        "2,000 jobs on one payment and a buyer's: {} sends, the buyer's at {at:?}, {n} accepted, {marked} jobs marked sent, in {took:?}",
+        c.len()
+    );
+    assert!(
+        at.is_some_and(|i| i < 2),
+        "the buyer's cancel was send {at:?}"
+    );
+    assert_eq!(
+        c.len(),
+        2,
+        "one send for the shared payment, one for the buyer's"
+    );
+    assert_eq!(marked, 2_001);
+    drop(st);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One transaction id, many witnesses: one payment mined (the daemon says `txn-already-known` of any copy
+/// of it, whatever the witness) is handed over with 50 jobs, each copy with a witness of
+/// its own. The service holds one copy of it in memory and one file on disk.
+#[test]
+fn a_mined_payment_is_held_once_whatever_its_witness() {
+    let t = terms(1_000, 1_006);
+    // A coin of its own: the copies held are the process's, shared by every test in it.
+    let (pay, _) = payment_for(&t, 4_242, 1_000);
+    let txid = pay.compute_txid();
+    let btc_url = fake_node(Box::new(move |m, p| match m {
+        "testmempoolaccept" => {
+            let hex = p[0][0].as_str().unwrap_or_default();
+            let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(
+                &lwk_wollet::btc::paylock::hex_decode(hex).unwrap(),
+            )
+            .unwrap();
+            if tx.compute_txid() == txid {
+                Ok(json!([{"allowed": false, "reject-reason": "txn-already-known"}]))
+            } else {
+                Ok(json!([{"allowed": false, "reject-reason": "missing-inputs"}]))
+            }
+        }
+        _ => Err((-32601, "no such method".into())),
+    }));
+    let locks: Locks = Default::default();
+    let intake = intake_with(&btc_url, locks.clone());
+    let dir = tmpdir("onecopy");
+    let mut st = Store::open(&dir).unwrap();
+    for n in 0..50u32 {
+        let lock = lock_named(n);
+        locks
+            .lock()
+            .unwrap()
+            .insert(lock.txid.to_string(), lock_tx(&t));
+        let mut copy = pay.clone();
+        copy.input[0].witness = bitcoin::Witness::from_slice(&[vec![n as u8; 72], vec![2; 33]]);
+        assert_eq!(copy.compute_txid(), txid);
+        let mut v = request_for(&t, lock, &txid.to_string(), None);
+        v["payment_hex"] = json!(btc_hex(&copy));
+        post_job(&mut st, &intake, &v).unwrap();
+    }
+    let copies: Vec<Arc<str>> = st
+        .jobs
+        .values()
+        .flat_map(|j| j.payments.iter().map(|p| p.hex.clone()))
+        .collect();
+    let files = std::fs::read_dir(dir.join("payments")).unwrap().count();
+    let distinct = copies
+        .iter()
+        .filter(|h| !Arc::ptr_eq(h, &copies[0]))
+        .count();
+    eprintln!(
+        "50 witness copies of one mined payment: {} jobs hold it, {} copies other than the first in memory, {files} files",
+        copies.len(),
+        distinct
+    );
+    assert_eq!(copies.len(), 50);
+    assert!(st
+        .jobs
+        .values()
+        .all(|j| j.payments.iter().all(|p| p.vouched)));
+    assert_eq!(distinct, 0, "each copy is held");
+    assert_eq!(files, 1, "each copy is stored");
+    // Reopened, every job holds the one copy again.
+    drop(st);
+    let st = Store::open(&dir).unwrap();
+    assert!(st
+        .jobs
+        .values()
+        .all(|j| j.payments.len() == 1 && !j.payments[0].hex.is_empty()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F13: one real payment of 300 inputs vouches for 200 jobs. Its coins are held
+/// once, like its transaction, and no job's file names them: a job's file is the same
+/// size whatever the payment weighs.
+#[test]
+fn a_payment_of_many_coins_costs_each_job_no_more() {
+    let t = terms(1_000, 1_006);
+    let mut pay = payment_for(&t, 4_343, 1_000).0;
+    let first = pay.input[0].clone();
+    pay.input = (0..300u32)
+        .map(|i| {
+            let mut x = first.clone();
+            x.previous_output.vout = i;
+            x
+        })
+        .collect();
+    let txid = pay.compute_txid();
+    let btc_url = fake_node(Box::new(move |m, p| match m {
+        "testmempoolaccept" => {
+            let hex = p[0][0].as_str().unwrap_or_default();
+            let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(
+                &lwk_wollet::btc::paylock::hex_decode(hex).unwrap(),
+            )
+            .unwrap();
+            if tx.compute_txid() == txid {
+                Ok(json!([{"allowed": false, "reject-reason": "txn-already-known"}]))
+            } else {
+                Ok(json!([{"allowed": false, "reject-reason": "missing-inputs"}]))
+            }
+        }
+        _ => Err((-32601, "no such method".into())),
+    }));
+    let locks: Locks = Default::default();
+    let intake = intake_with(&btc_url, locks.clone());
+    let dir = tmpdir("manycoins");
+    let mut st = Store::open(&dir).unwrap();
+    for n in 0..200u32 {
+        let lock = lock_named(10_000 + n);
+        locks
+            .lock()
+            .unwrap()
+            .insert(lock.txid.to_string(), lock_tx(&t));
+        let mut v = request_for(&t, lock, &txid.to_string(), None);
+        v["payment_hex"] = json!(btc_hex(&pay));
+        post_job(&mut st, &intake, &v).unwrap();
+    }
+    let coins: Vec<_> = st
+        .jobs
+        .values()
+        .flat_map(|j| j.payments.iter().map(|p| p.coins.clone()))
+        .collect();
+    assert_eq!(coins.len(), 200);
+    assert_eq!(coins[0].len(), 300);
+    let apart = coins
+        .iter()
+        .filter(|c| c.as_ptr() != coins[0].as_ptr())
+        .count();
+    let sizes: Vec<u64> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
+        .map(|e| e.metadata().unwrap().len())
+        .collect();
+    let biggest = sizes.iter().max().copied().unwrap_or(0);
+    let payment_file = std::fs::metadata(dir.join("payments").join(format!("tx-{txid}.hex")))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    eprintln!(
+        "200 jobs on one payment of 300 coins: {apart} coin lists held apart from the first; job files up to {biggest} bytes; the payment's file {payment_file} bytes"
+    );
+    assert_eq!(apart, 0, "the coins are held once");
+    assert!(
+        biggest < 8_000,
+        "a job's file names the coins: {biggest} bytes"
+    );
+    // Reopened, each job knows the payment's coins from its one file.
+    drop(st);
+    let st = Store::open(&dir).unwrap();
+    assert!(st
+        .jobs
+        .values()
+        .all(|j| j.payments.len() == 1 && j.payments[0].coins.len() == 300));
+    let _ = std::fs::remove_dir_all(&dir);
 }

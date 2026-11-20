@@ -204,6 +204,7 @@ fn fake_btc(state: Arc<Mutex<Btc>>) -> String {
         let by = |h: &Value| all.get(h.as_str().unwrap_or_default()).cloned();
         match m {
             "getblockcount" => Ok(json!(BASE - 1 + best.len() as u32)),
+            "getbestblockhash" => Ok(json!(best.last().unwrap().block_hash().to_string())),
             "getblockhash" => {
                 let h = p[0].as_u64().unwrap() as u32;
                 best.get((h - BASE) as usize)
@@ -260,8 +261,9 @@ fn fake_btc(state: Arc<Mutex<Btc>>) -> String {
 
 /// The Sequentia node: blocks 0 to 5 anchored at these Bitcoin heights (of the branch it
 /// follows), the locks mined in block 1; claims it pools; and its relay floor: a claim is
-/// refused unless its fee covers `floor` atoms per 1,000 bytes of its proof's record, which
-/// `getmempoolinfo` reports as its relay floor (the fee asset at 1:1). `generation` names
+/// refused unless its fee, valued at the fee asset's `rate` as a node values it (`atoms ×
+/// rate / 10^8`, rounded down), covers `floor` reference atoms per 1,000 bytes of its
+/// proof's record, which `getmempoolinfo` reports as its relay floor. `generation` names
 /// the blocks: raised, the same heights are other blocks (rebuilt on another branch).
 struct Seq {
     anchors: Vec<u32>,
@@ -269,6 +271,14 @@ struct Seq {
     locks: HashMap<String, Transaction>,
     pooled: HashMap<String, Transaction>,
     floor: usize,
+    /// The fee asset's rate (10^8: one atom is worth one reference atom).
+    rate: u64,
+    /// Refuses every claim as `mempool full`, a refusal without figures.
+    full: bool,
+    /// How long it takes to answer a claim sent.
+    send_delay: Duration,
+    /// The claims pooled, in the order they were.
+    order: Vec<String>,
     fee_asset: AssetId,
     generation: u64,
     refused: Vec<String>,
@@ -284,6 +294,7 @@ fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
         let lock_id = s.lock.txid().to_string();
         match m {
             "getblockcount" => Ok(json!(s.anchors.len() - 1)),
+            "getbestblockhash" => Ok(json!(hash(s.anchors.len() as u64 - 1, s.generation))),
             "getblockhash" => Ok(json!(hash(p[0].as_u64().unwrap(), s.generation))),
             "getblockheader" => {
                 let h = ((u64::from_str_radix(p[0].as_str().unwrap(), 16).unwrap() - 0x5e9_0000)
@@ -319,19 +330,30 @@ fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
                     .as_str()
                     .map(String::from)
                     .unwrap_or_else(|| s.fee_asset.to_string());
-                m.insert(asset, json!({"accepted": true, "rate": 100_000_000}));
+                m.insert(asset, json!({"accepted": true, "rate": s.rate}));
                 Ok(Value::Object(m))
             }
             "sendrawtransaction" => {
+                if !s.send_delay.is_zero() {
+                    let d = s.send_delay;
+                    drop(s);
+                    std::thread::sleep(d);
+                    s = state.lock().unwrap();
+                }
                 let tx: Transaction =
                     deserialize(&hex_decode(p[0].as_str().unwrap()).unwrap()).unwrap();
+                if s.full {
+                    s.refused.push("mempool full".into());
+                    return Err((-26, "mempool full".into()));
+                }
                 let record = tx.input[0]
                     .witness
                     .pegin_witness
                     .first()
                     .map(Vec::len)
                     .unwrap_or(0);
-                let fee = paylock::fee_of(&tx).map(|f| f.1).unwrap_or(0) as usize;
+                let atoms = paylock::fee_of(&tx).map(|f| f.1).unwrap_or(0);
+                let fee = (atoms as u128 * s.rate as u128 / 100_000_000) as usize;
                 let need = record * s.floor / 1_000;
                 if fee < need {
                     let m = format!("min relay fee not met, {fee} < {need}");
@@ -339,6 +361,7 @@ fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
                     return Err((-26, m));
                 }
                 s.pooled.insert(tx.txid().to_string(), tx.clone());
+                s.order.push(tx.txid().to_string());
                 s.first_pooled.get_or_insert_with(Instant::now);
                 let n = s.refused.len();
                 s.refused_before_pooled.get_or_insert(n);
@@ -409,6 +432,8 @@ struct World {
     btc: Arc<Mutex<Btc>>,
     seq_chain: SeqChain,
     btc_chain: BtcChain,
+    seq_url: String,
+    btc_url: String,
 }
 
 /// The fake chains: Bitcoin's branches, Sequentia's anchors, and its floor of one atom per
@@ -439,6 +464,10 @@ fn world(
         locks: HashMap::new(),
         pooled: HashMap::new(),
         floor: 1_000 / per_atom,
+        rate: 100_000_000,
+        full: false,
+        send_delay: Duration::ZERO,
+        order: vec![],
         fee_asset: paylock::fee_of(&probe).unwrap().0,
         generation: 0,
         refused: vec![],
@@ -451,6 +480,8 @@ fn world(
         btc,
         seq_chain: SeqChain { rpc: rpc(&su) },
         btc_chain: BtcChain { rpc: rpc(&bu) },
+        seq_url: su,
+        btc_url: bu,
     }
 }
 
@@ -1132,4 +1163,542 @@ fn jobs_never_tried_go_after_the_buyer_when_their_claims_are_under_the_floor() {
     );
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A refusal valued at zero. The fee asset's rate falls (or, at the normal rate, the
+/// node's floor rises a thousandfold), so the node refuses every tier of the buyer's
+/// claim; at a rate of 1 its message values the 1,000- and 50,000-atom fees at `0`. Once
+/// the rate and the floor are back, the claim lands, whatever figure the refusal gave:
+/// the service judges by the claim's own signed fee, never by the node's rounded worth.
+#[test]
+fn a_claim_refused_at_any_rate_lands_once_the_floor_allows_it() {
+    for low in [1u64, 100_000, 100_000_000] {
+        let t = terms();
+        let buyer = payment(&t, 42, 0);
+        let blocks = chain(
+            bitcoin::BlockHash::all_zeros(),
+            10,
+            &[vec![], vec![buyer.clone()], vec![], vec![]],
+        );
+        let w = world(&t, vec![blocks], vec![1000, 1000, 1001, 1002, 1003], 1);
+        {
+            let mut s = w.seq.lock().unwrap();
+            if low < 100_000_000 {
+                s.rate = low;
+            } else {
+                s.floor *= 1_000;
+            }
+        }
+        let mut j = job(&t, &w.seq.lock().unwrap().lock.clone(), None);
+        let r = tick(&w, &mut j);
+        let v = j.public_json();
+        let refused = w.seq.lock().unwrap().refused.clone();
+        eprintln!("rate {low}: {r:?}; {}; refused {refused:?}", v["note"]);
+        assert!(proven(&w.seq).is_none());
+        assert!(
+            v["note"].as_str().unwrap().contains("refuses every claim"),
+            "{}",
+            v["note"]
+        );
+        {
+            let mut s = w.seq.lock().unwrap();
+            s.rate = 100_000_000;
+            s.floor = 1_000;
+        }
+        let mut outcome = vec![];
+        for _ in 0..3 {
+            outcome.push(tick(&w, &mut j));
+            if proven(&w.seq).is_some() {
+                break;
+            }
+        }
+        let v = j.public_json();
+        eprintln!("rate {low}, then back: {outcome:?}; {}", v["note"]);
+        assert_eq!(
+            proven(&w.seq),
+            Some(id(&buyer)),
+            "refused at rate {low}, the claim never came back: {}",
+            v["note"]
+        );
+        assert_eq!(v["state"], "pooled");
+    }
+}
+
+/// A refusal that gives no figures (`mempool full`) says nothing of the floor the claim
+/// needs. Once the floors change at all (here the relay floor rises a little as the
+/// mempool clears), the claim is tried again, and lands.
+#[test]
+fn a_refusal_without_figures_is_tried_again_when_the_floors_change() {
+    let t = terms();
+    let buyer = payment(&t, 42, 0);
+    let blocks = chain(
+        bitcoin::BlockHash::all_zeros(),
+        11,
+        &[vec![], vec![buyer.clone()], vec![], vec![]],
+    );
+    let w = world(&t, vec![blocks], vec![1000, 1000, 1001, 1002, 1003], 1);
+    w.seq.lock().unwrap().full = true;
+    let mut j = job(&t, &w.seq.lock().unwrap().lock.clone(), None);
+    let r = tick(&w, &mut j);
+    eprintln!("mempool full: {r:?}; {}", j.public_json()["note"]);
+    assert!(proven(&w.seq).is_none());
+    // The same floors: not tried again.
+    let n = w.seq.lock().unwrap().refused.len();
+    let _ = tick(&w, &mut j);
+    assert_eq!(
+        w.seq.lock().unwrap().refused.len(),
+        n,
+        "tried again at the same floors"
+    );
+    {
+        let mut s = w.seq.lock().unwrap();
+        s.full = false;
+        s.floor = 1_001;
+    }
+    let mut outcome = vec![];
+    for _ in 0..3 {
+        outcome.push(tick(&w, &mut j));
+        if proven(&w.seq).is_some() {
+            break;
+        }
+    }
+    let v = j.public_json();
+    eprintln!("then the floors moved: {outcome:?}; {}", v["note"]);
+    assert_eq!(proven(&w.seq), Some(id(&buyer)), "{}", v["note"]);
+}
+
+/// Jobs on `n` receiving scripts of their own, each paid by one output of one transaction
+/// mined at `BASE + 1`, each with claims of 1,000 and `top` atoms; and the buyer's job,
+/// whose payment is mined at `BASE + 2`. The store holds them all.
+fn retry_world(
+    n: u32,
+    top: u64,
+    name: &str,
+) -> (
+    World,
+    Mutex<Store>,
+    std::path::PathBuf,
+    Limits,
+    PayLockTerms,
+) {
+    let tip = BASE + 3;
+    let buyer_terms = terms_at(BASE, tip + 8, 3);
+    let att: Vec<PayLockTerms> = (0..n).map(|i| terms_n(BASE, tip + 7, i)).collect();
+    let mut pay = payment(&att[0], 200, 0);
+    pay.output = att
+        .iter()
+        .map(|t| bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(t.price_sat),
+            script_pubkey: t.receive_script_pubkey(),
+        })
+        .collect();
+    let blocks = chain(
+        bitcoin::BlockHash::all_zeros(),
+        1,
+        &[
+            vec![],
+            vec![pay],
+            vec![payment(&buyer_terms, 42, 0)],
+            vec![],
+        ],
+    );
+    let w = world(
+        &buyer_terms,
+        vec![blocks],
+        vec![BASE, BASE, BASE + 2, tip],
+        1,
+    );
+    let (store, dir, limits) = store(name);
+    {
+        let mut st = store.lock().unwrap();
+        let mut s = w.seq.lock().unwrap();
+        for (i, t) in att.iter().enumerate() {
+            let lock = lock_tx(t);
+            s.locks.insert(lock.txid().to_string(), lock.clone());
+            let mut j = job_with(t, &lock, None, top);
+            j.client = format!("100.64.{}.{}", i / 250, i % 250);
+            st.add(j, &limits).unwrap();
+        }
+    }
+    (w, store, dir, limits, buyer_terms)
+}
+
+/// An oscillating floor, the order. The fee asset's rate falls a thousandfold, and
+/// every claim is refused: the attacker's many, then the buyer's, worked last. When the
+/// rate is back, every one of them may land, and the claims that clear the node's ask by
+/// the most go first: the buyer's, whose fee covers its small proof a hundred times, before
+/// the attacker's, whose fees barely cover the big proof their shared payment makes. To go
+/// first, an attacker must pay more, and then its claims land and leave.
+#[test]
+fn claims_that_may_land_again_go_by_how_far_they_clear() {
+    const N: u32 = 100;
+    let (w, store, dir, limits, buyer_terms) = retry_world(N, 20_000, "clears-first");
+    w.seq.lock().unwrap().rate = 100_000;
+    for _ in 0..5 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    }
+    let refused = w.seq.lock().unwrap().refused.len();
+    assert!(refused >= 2 * N as usize, "{refused}");
+    // The buyer's job comes now, and is refused alone: it was worked last.
+    {
+        let mut st = store.lock().unwrap();
+        let s = w.seq.lock().unwrap();
+        let mut j = job(&buyer_terms, &s.lock.clone(), None);
+        j.client = "203.0.113.91".into();
+        st.add(j, &limits).unwrap();
+    }
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    assert!(w.seq.lock().unwrap().pooled.is_empty());
+    w.seq.lock().unwrap().rate = 100_000_000;
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    let s = w.seq.lock().unwrap();
+    let buyer_ids: Vec<String> = store
+        .lock()
+        .unwrap()
+        .jobs
+        .values()
+        .filter(|j| j.terms.receive_script_pubkey() == buyer_terms.receive_script_pubkey())
+        .flat_map(|j| {
+            j.claims
+                .iter()
+                .map(|c| c.txid().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let at = s.order.iter().position(|t| buyer_ids.contains(t));
+    eprintln!(
+        "the rate back: {} claims pooled; the buyer's at place {at:?}",
+        s.order.len()
+    );
+    assert_eq!(
+        at,
+        Some(0),
+        "the buyer's claim waited behind {:?} others",
+        at
+    );
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An oscillating floor, the delay. A round is busy retrying the attacker's claims
+/// (each answer takes the node 30 ms) when the buyer's payment is mined and anchored. The
+/// round ends its background work at the next look at the chains, and the next round
+/// pools the buyer's claim: well under the three seconds the retries take.
+#[test]
+fn a_buyer_mined_during_background_retries_is_not_kept_behind_them() {
+    const N: u32 = 100;
+    let tip = BASE + 3;
+    let buyer_terms = terms_at(BASE, tip + 8, 3);
+    let att: Vec<PayLockTerms> = (0..N).map(|i| terms_n(BASE, tip + 7, i)).collect();
+    let mut pay = payment(&att[0], 200, 0);
+    pay.output = att
+        .iter()
+        .map(|t| bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(t.price_sat),
+            script_pubkey: t.receive_script_pubkey(),
+        })
+        .collect();
+    let blocks = chain(
+        bitcoin::BlockHash::all_zeros(),
+        1,
+        &[vec![], vec![pay], vec![], vec![]],
+    );
+    let w = world(
+        &buyer_terms,
+        vec![blocks],
+        vec![BASE, BASE, BASE + 2, tip],
+        1,
+    );
+    let (store, dir, mut limits) = store("background-moves");
+    {
+        let mut st = store.lock().unwrap();
+        let mut s = w.seq.lock().unwrap();
+        for (i, t) in att.iter().enumerate() {
+            let lock = lock_tx(t);
+            s.locks.insert(lock.txid().to_string(), lock.clone());
+            let mut j = job_with(t, &lock, None, 20_000);
+            j.client = format!("100.64.{}.{}", i / 250, i % 250);
+            st.add(j, &limits).unwrap();
+        }
+        let mut j = job(&buyer_terms, &s.lock.clone(), None);
+        j.client = "203.0.113.91".into();
+        st.add(j, &limits).unwrap();
+        s.rate = 100_000;
+    }
+    for _ in 0..5 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    }
+    assert!(w.seq.lock().unwrap().pooled.is_empty());
+    {
+        let mut s = w.seq.lock().unwrap();
+        s.rate = 100_000_000;
+        s.send_delay = Duration::from_millis(30);
+    }
+    limits.round_time = Duration::from_secs(20);
+    limits.job_time = Duration::from_secs(5);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let (store, stop) = (Arc::new(store), stop.clone());
+        let (seq, btc) = (
+            SeqChain {
+                rpc: rpc(&w.seq_url),
+            },
+            BtcChain {
+                rpc: rpc(&w.btc_url),
+            },
+        );
+        let limits = limits.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                service::work_round(&store, &seq, &btc, &limits);
+            }
+        })
+    };
+    // Retries under way; then the buyer's payment is mined and anchored.
+    std::thread::sleep(Duration::from_millis(400));
+    let busy = w.seq.lock().unwrap().order.len();
+    mine(&w, 120, &[payment(&buyer_terms, 42, 0)]);
+    let t0 = Instant::now();
+    let buyer_script = buyer_terms.receive_script_pubkey();
+    let mut took = None;
+    while t0.elapsed() < Duration::from_secs(15) {
+        let s = w.seq.lock().unwrap();
+        if proven_by(&s, &buyer_script) {
+            took = Some(t0.elapsed());
+            break;
+        }
+        drop(s);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    worker.join().unwrap();
+    let retried = w.seq.lock().unwrap().order.len();
+    eprintln!(
+        "{busy} attacker claims retried before the buyer's block; the buyer pooled {took:?} after it was anchored; {retried} claims pooled in all"
+    );
+    assert!(
+        busy < N as usize,
+        "the retries were over before the buyer's block"
+    );
+    let took = took.expect("the buyer's claim was pooled");
+    assert!(
+        took < Duration::from_millis(1_500),
+        "the buyer waited {took:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Whether a claim pooled proves a payment to `script`.
+fn proven_by(s: &Seq, script: &bitcoin::ScriptBuf) -> bool {
+    s.pooled.values().any(|tx| {
+        let Some(r) = tx.input[0].witness.pegin_witness.first() else {
+            return false;
+        };
+        let depth = r[121] as usize;
+        let at = 126 + 64 * depth;
+        let links = u16::from_le_bytes([r[at], r[at + 1]]) as usize;
+        bitcoin::consensus::encode::deserialize::<bitcoin::Transaction>(&r[at + 2 + 80 * links..])
+            .map(|p| p.output.iter().any(|o| &o.script_pubkey == script))
+            .unwrap_or(false)
+    })
+}
+
+/// F11. 1,500 attacker jobs, each on a receiving script of its own and passed over
+/// once (claims at one atom against a shared payment's heavy proof). Then one block holds
+/// 1,500 small transactions, each paying one attacker script dust, and the buyer's
+/// payment: every attacker job is hit by it. Each hit job reads only the transactions
+/// that touch it, from the block's index, so working them all is linear in the block,
+/// not a pass over the whole block for each job.
+#[test]
+fn jobs_hit_by_one_block_read_only_their_own_transactions() {
+    const N: u32 = 1_500;
+    let tip = BASE + 3;
+    let buyer_terms = terms_at(BASE, tip + 8, 3);
+    let att: Vec<PayLockTerms> = (0..N).map(|i| terms_n(BASE, tip + 7, i)).collect();
+    let mut pay = payment(&att[0], 200, 0);
+    pay.output = att
+        .iter()
+        .map(|t| bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(t.price_sat),
+            script_pubkey: t.receive_script_pubkey(),
+        })
+        .collect();
+    let blocks = chain(
+        bitcoin::BlockHash::all_zeros(),
+        1,
+        &[vec![], vec![pay], vec![], vec![]],
+    );
+    let w = world(
+        &buyer_terms,
+        vec![blocks],
+        vec![BASE, BASE, BASE + 2, tip],
+        1,
+    );
+    let (store, dir, mut limits) = store("hit-block");
+    {
+        let mut st = store.lock().unwrap();
+        let mut s = w.seq.lock().unwrap();
+        for (i, t) in att.iter().enumerate() {
+            let lock = lock_tx(t);
+            s.locks.insert(lock.txid().to_string(), lock.clone());
+            let op = OutPoint::new(lock.txid(), 0);
+            let c = paylock::sign_claim(
+                t,
+                op,
+                Script::from(vec![0x51]),
+                1,
+                BlockHash::all_zeros(),
+                &key(1),
+            )
+            .unwrap();
+            let mut j = Job::from_request(&json!({"terms": t.to_json(),
+                "lock": format!("{}:0", op.txid), "claims": [hex_encode(&serialize(&c))]}))
+            .unwrap();
+            j.client = format!("100.64.{}.{}", i / 250, i % 250);
+            st.add(j, &limits).unwrap();
+        }
+        let mut j = job(&buyer_terms, &s.lock.clone(), None);
+        j.client = "203.0.113.91".into();
+        st.add(j, &limits).unwrap();
+    }
+    limits.round_time = Duration::from_secs(120);
+    for _ in 0..20 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+        if w.seq.lock().unwrap().refused.len() >= N as usize {
+            break;
+        }
+    }
+    assert!(w.seq.lock().unwrap().refused.len() >= N as usize);
+    // One block: dust to every attacker script, each from a coin of its own, then the
+    // buyer's payment.
+    let mut txs: Vec<bitcoin::Transaction> = att
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mut d = payment(t, 0, 0);
+            d.input[0].previous_output.txid = bitcoin::Txid::from_byte_array({
+                let mut b = [0x77u8; 32];
+                b[..4].copy_from_slice(&(i as u32).to_le_bytes());
+                b
+            });
+            d.output[0].value = bitcoin::Amount::from_sat(330);
+            d
+        })
+        .collect();
+    txs.push(payment(&buyer_terms, 42, 0));
+    mine(&w, 130, &txs);
+    let t0 = Instant::now();
+    let mut worked = 0;
+    let buyer_script = buyer_terms.receive_script_pubkey();
+    let mut buyer = None;
+    while t0.elapsed() < Duration::from_secs(300) && worked < N as usize + 1 {
+        worked += service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+        if buyer.is_none() && proven_by(&w.seq.lock().unwrap(), &buyer_script) {
+            buyer = Some(t0.elapsed());
+        }
+    }
+    let took = t0.elapsed();
+    eprintln!(
+        "{N} attacker jobs hit by one block of {} transactions: {worked} jobs worked in {took:?}; the buyer pooled after {buyer:?}",
+        N + 2
+    );
+    assert!(buyer.is_some(), "the buyer's claim was pooled");
+    assert!(
+        took < Duration::from_secs(20),
+        "working the hit jobs took {took:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An oscillating floor, as a regtest run traced it: the attacker's claims landed in a
+/// dip of the floor and are pooled, so every new block asks the service to look at each
+/// of them again (to raise a claim a block left out). The buyer's payment is mined and
+/// anchored in such a block: a claim must be made for it, and that goes before the upkeep
+/// of claims already pooled, however many there are.
+#[test]
+fn a_buyer_goes_before_the_upkeep_of_claims_already_pooled() {
+    const N: u32 = 100;
+    let (w, store, dir, limits, buyer_terms) = retry_world(N, 20_000, "upkeep-after");
+    // The buyer's payment is not mined yet: the world's block at BASE + 2 is replaced by
+    // an empty one, and its payment comes later.
+    {
+        let mut b = w.btc.lock().unwrap();
+        let p = b.branches[0][1].block_hash();
+        b.branches[0][2] = block(p, 77, &[]);
+        let p = b.branches[0][2].block_hash();
+        b.branches[0][3] = block(p, 78, &[]);
+    }
+    // A floor low enough for the going tier (1,000 atoms) to carry the attacker's proofs:
+    // its claims are pooled at the going tier, and a block that leaves them out raises them.
+    w.seq.lock().unwrap().floor = 200;
+    for _ in 0..5 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    }
+    let landed = w.seq.lock().unwrap().order.len();
+    assert!(
+        landed >= N as usize,
+        "the attacker's claims are pooled: {landed}"
+    );
+    {
+        let mut st = store.lock().unwrap();
+        let s = w.seq.lock().unwrap();
+        let mut j = job(&buyer_terms, &s.lock.clone(), None);
+        j.client = "203.0.113.91".into();
+        st.add(j, &limits).unwrap();
+    }
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    mine(&w, 140, &[payment(&buyer_terms, 42, 0)]);
+    let before = w.seq.lock().unwrap().order.len();
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    let s = w.seq.lock().unwrap();
+    let buyer_script = buyer_terms.receive_script_pubkey();
+    let after: Vec<&String> = s.order[before..].iter().collect();
+    let at = after.iter().position(|t| {
+        s.pooled
+            .get(*t)
+            .map(|tx| {
+                let one = Seq {
+                    pooled: [((*t).clone(), tx.clone())].into(),
+                    ..seq_like(&s)
+                };
+                proven_by(&one, &buyer_script)
+            })
+            .unwrap_or(false)
+    });
+    eprintln!(
+        "{landed} attacker claims pooled; in the buyer's round {} claims were sent, the buyer's at {at:?}",
+        after.len()
+    );
+    assert!(
+        after.len() > N as usize / 2,
+        "the attacker's claims were raised in that round"
+    );
+    assert_eq!(
+        at,
+        Some(0),
+        "the buyer waited behind the upkeep of {:?} claims",
+        at
+    );
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An empty node state shaped like `s`, to ask [`proven_by`] about one claim.
+fn seq_like(s: &Seq) -> Seq {
+    Seq {
+        anchors: vec![],
+        lock: s.lock.clone(),
+        locks: HashMap::new(),
+        pooled: HashMap::new(),
+        floor: s.floor,
+        rate: s.rate,
+        full: false,
+        send_delay: Duration::ZERO,
+        order: vec![],
+        fee_asset: s.fee_asset,
+        generation: 0,
+        refused: vec![],
+        first_pooled: None,
+        refused_before_pooled: None,
+    }
 }

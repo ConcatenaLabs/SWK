@@ -154,10 +154,18 @@ the only refusals that depend on which payment the claim proves) moves to the
 next tier; refused at every tier, the candidate is passed over, with every one
 whose proof would be as heavy, and the next is tried in the same round. A
 candidate is passed over only for that, and comes back only once what refused
-it can have changed: the node's floor in the fee asset (its relay floor over the
-asset's rate, both read once a round) falls to where the fee refused would meet
-it, or an asset the node did not accept, in which a tier is signed, is accepted.
-A claim refused for its size at every tier never comes back. A block arriving
+it can have changed. The node's floors (its relay floor and each fee asset's
+rate, read once a round) have moved so that a refused tier's own signed fee is
+worth what the node would now ask for that claim: the refusal states the ask,
+which fixes the claim's size, and the service values the fee itself, never by
+the worth the refusal states, which the node rounds down (at a low rate a fee of
+thousands of atoms reads `0`). A refusal that gives no figures (`mempool full`),
+or whose figures are not the signed fee at the rate read, brings the candidate
+back once the floors change at all. Either way it is never tried again at the
+very floors that refused it, so it costs at most one try for each change of the
+floors. It also comes back once an asset the node did not accept, in which a
+tier is signed, is accepted. A claim refused for its size at every tier never
+comes back. A block arriving
 changes none of this, so it brings nothing back. When no tier is in an asset
 the node accepts, every candidate is passed over until one is. A reorganization
 below the scan's place drops everything passed over. Anything else that keeps a
@@ -268,13 +276,21 @@ On every round the service reads both chains as they are now:
 
 Its work is bounded. Cancels have a thread of their own, with clients of their
 own that give up on a call after 3 seconds. Each pass sends for at most 2
-seconds, after at most 1 second of looking up locks the node has not answered
-for. The node's answer orders the sends and never withholds one: jobs whose lock
+seconds, then spends at most 1 second looking up locks the node has not answered
+for, which orders the next pass: no lookup comes before a send. The node's answer
+orders the sends and never withholds one: jobs whose lock
 it knows go first, then those it has not answered for, then those it says it does
-not know. Within each, the clients that handed the payments over take turns, so
-one client's many payments get one send per turn like any other's; and each
-client's cancels never tried go first, nearest deadline first, then those tried
-before, the longest ago first, so what one pass does not reach the next one does. A cancel is sent until 144 blocks past `D`.
+not know. The turns are per payment, known by its coins: every job holding the
+same coins shares one turn and one send, so one payment handed over with many
+jobs costs one send, and once the daemon takes a cancel of it the rest of its
+checked cancels are not sent. Within each, the clients that handed the payments
+over take turns, so one client's many payments get one send per turn like any
+other's; and each client's cancels never tried go first, nearest deadline first,
+then those tried before, the longest ago first, so what one pass does not reach
+the next one does. The turns are found by a map, so a pass is linear in its
+cancels however many clients hand them over. What the sends tell the jobs is written after the pass's
+sends, so writing many jobs never delays another payment's send. A cancel is
+sent until 144 blocks past `D`.
 
 The rest of the work follows what happens on the chains, never the number of
 jobs or of the clients that posted them. Each Bitcoin block is read from the
@@ -283,35 +299,48 @@ and the coins it spends: a job's search for its payment, from `F` to six blocks
 past `D` (on to Bitcoin's tip, up to 144 blocks past `D`, while a payment held
 with cancels is not settled), passes a block that neither pays its receiving
 script nor spends its payments' coins by a lookup, and reads a block whole only
-when it does. The node's fee floors are read once a round for every job.
+when it does. A block read whole is kept indexed by the scripts it pays and the
+coins it spends, so a job it concerns reads only the transactions that touch it:
+one block that concerns many jobs costs a lookup for each, not a pass over the
+block for each. The node's fee floors are read once a round for every job.
 
 A job is worked only when something it waits on can have changed, in this
 order:
 
-1. something new on the chains concerns it: a Bitcoin block pays its receiving
-   script or spends its payments' coins; a Sequentia block anchors a candidate
-   not passed over; its claim is pooled by someone, left out of a block, mined,
-   or gone from the mempool. The tips are told apart by their blocks' hashes, so
-   a block rebuilt at the same height counts. Jobs whose claims are worth less
-   than the node's floor asks for the lightest proof their payment can make
-   (read from the blocks already held, so before they are first tried) take
-   their turns after the others here;
+1. something new on the chains concerns it. First the jobs a claim must be made
+   for: a Bitcoin block pays its receiving script or spends its payments' coins;
+   a Sequentia block anchors a candidate not passed over; its claim is gone from
+   the mempool. Jobs whose claims are worth less than the node's floor asks for
+   the lightest proof their payment can make (read from the blocks already held,
+   so before they are first tried) take their turns after the others here. Then
+   the jobs whose claim is made: pooled by someone, left out of a block (to raise
+   it), or mined. The tips are told apart by their blocks' hashes, so a block
+   rebuilt at the same height counts;
 2. intake changed it since it was last worked;
-3. a candidate it passed over may now land (the floor fell, an asset became
-   accepted); then a job whose last round failed, once its backoff is over,
-   fewest failures first;
+3. a candidate it passed over may now land (a refused tier's signed fee covers
+   the node's ask at the floors now, or an asset became accepted), the claims
+   that clear the ask by the most first; then a job whose last round failed,
+   once its backoff is over, fewest failures first;
 4. the rest, once per Bitcoin block, for the deadline and the state a read
    shows, and a job holding a payment or cancel the daemon cannot check yet,
    whenever a chain moves and at least every ten seconds.
 
 Within each, the jobs take turns by receiving script, least recently worked
-first. A candidate passed over is never tried again merely because a block
-arrived, so a job whose claims cannot land (priced under the floor, in assets the
+first (in the third, the claims that clear by the most first: to go ahead of
+another, a claim must pay more, and then it lands and its job leaves). The first
+is the work something new on the chains asks for; the rest is background,
+and while it runs the service looks at both chains' tips every 200 ms: once
+either moves, the round ends and the next one starts at once, so retries after
+a change of floors, first tries and the per-block tick keep a buyer whose payment
+was just mined or anchored waiting for one job's work at most. A candidate
+passed over is never tried again merely because a block arrived, so a job whose claims cannot land (priced under the floor, in assets the
 node does not accept) is tried once and then costs a lookup a round, however many
 there are and on however many scripts. A buyer whose payment is mined is worked
 in the first turns of the round after a Sequentia block anchors it, behind only
-the jobs that something new on the chains concerns in that round, each of which
-cost whoever made it an output in a new Bitcoin block or a claim the node takes.
+the jobs that a claim must be made for in that round, each of which cost whoever
+made it an output in a new Bitcoin block or a claim the node takes (a claim
+pooled pays its fee once mined, and its job leaves); the upkeep of claims already
+pooled or mined comes after it.
 Measured on regtest with a release build, against 750 to 40,000 attacker jobs,
 each on a receiving script of its own, paid by shared transactions and with
 claims priced under the floor: once each had been tried, a buyer's claim was
@@ -320,12 +349,20 @@ cancel went out within a second of `D - 2`, and the service's memory grew by
 about 8 KB a job (326 MB at 40,000).
 Each job works within a time and block budget, the round within its own; a job
 cut short is worked again next round. A job keeps every payment handed over and
-the 32 lightest others as candidates. A failing job backs off, up to a minute.
+the 32 lightest others as candidates, by the proof each makes linking no header (a
+later candidate links fewer headers, 80 bytes each, so one dropped can prove lighter
+than one kept by that much, a block or two on a live chain). A failing job backs off, up to a minute.
 
 Memory and disk follow the jobs by a bound per job, never by what a payment
 weighs: each signed payment is held once, in memory and in one file under
 `--data/payments/`, however many jobs it vouches for, and so is each cancel in
-memory. A job keeps at most eight claims of 16 KiB each, 64 KiB of payments and
+memory. So are a payment's coins: they are held once with it, and a job's file
+names them only by a digest while the payment's own file holds the transaction,
+so a payment of many coins costs each job no more than one of few. Once the daemon vouches for a payment it is held by its transaction id,
+whatever the witness of the copies handed over: a mined payment is vouched for
+by its id alone, so copies of it with other witnesses cost nothing more. Until
+then each copy is its own, since an unchecked witness may be bad and must never
+stand in for another's. A job keeps at most eight claims of 16 KiB each, 64 KiB of payments and
 cancels the daemon cannot check yet, and, per payment held, 32 KiB of checked
 cancels (only that payment's signer can make one).
 
