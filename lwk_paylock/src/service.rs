@@ -3267,8 +3267,9 @@ pub const PASSED_CHECKS: usize = 1_000;
 
 /// Checks what was passed over against Sequentia's best chain, once after the store is
 /// opened: a reorganization while the service was stopped is seen by no round. A candidate
-/// passed over at a Sequentia block no longer on the node's best chain, or at a block not
-/// known (none recorded, or the node not finding it), is tried again, as a reorganization
+/// passed over at a Sequentia block no longer on the node's best chain (the node counts no
+/// confirmations for it, or holds another block at its height), or at a block not known
+/// (none recorded, or the node not finding it), is tried again, as a reorganization
 /// seen online brings it back. With more blocks to look up than [`PASSED_CHECKS`], every
 /// one is tried again: in doubt, once at startup. The store's lock is not held while the
 /// node is asked.
@@ -3283,11 +3284,20 @@ fn recheck_passed(store: &Mutex<Store>, seq: &SeqChain) {
             blocks
                 .into_iter()
                 .filter(|h| {
-                    seq.rpc
-                        .call("getblockheader", json!([h, true]))
-                        .ok()
-                        .and_then(|v| v.get("confirmations").and_then(Value::as_i64))
-                        .is_some_and(|c| c >= 0)
+                    // On the best chain: the node counts confirmations for it (-1 off
+                    // it), and its height on the best chain is this very block.
+                    let Some(v) = seq.rpc.call("getblockheader", json!([h, true])).ok() else {
+                        return false;
+                    };
+                    let confirmed = v
+                        .get("confirmations")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|c| c >= 0);
+                    confirmed
+                        && v.get("height")
+                            .and_then(Value::as_u64)
+                            .and_then(|n| seq.rpc.call("getblockhash", json!([n])).ok())
+                            .is_some_and(|at| at.as_str() == Some(h.as_str()))
                 })
                 .collect()
         });
