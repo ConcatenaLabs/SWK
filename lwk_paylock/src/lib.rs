@@ -945,6 +945,23 @@ impl Indexed {
     }
 }
 
+/// A block proofs are built from: the block, its transactions' ids in internal byte order,
+/// and where each id is.
+#[derive(Debug)]
+struct ProofBlock {
+    block: bitcoin::Block,
+    txids: Vec<[u8; 32]>,
+    at: std::collections::HashMap<[u8; 32], usize>,
+}
+
+/// Blocks [`BtcChain`] keeps for building proofs, by hash, the last read first out.
+pub const PROOF_BLOCKS: usize = 8;
+
+type ProofBlocks =
+    std::sync::Mutex<std::collections::VecDeque<(String, std::sync::Arc<ProofBlock>)>>;
+
+static PROOF_CACHE: std::sync::OnceLock<ProofBlocks> = std::sync::OnceLock::new();
+
 /// Bitcoin blocks below the tip a [`BlockCache`] keeps: two weeks, more than a lock's
 /// heights and the watch after them span.
 pub const CACHE_BLOCKS: u32 = 2 * paylock::MAX_DEADLINE_AHEAD + CANCEL_KEEP_BLOCKS;
@@ -1527,24 +1544,21 @@ impl BtcChain {
                 paylock::MAX_LINKS
             )));
         }
-        let b = self.rpc.call("getblock", json!([found.block, 1]))?;
-        let ids = b
-            .get("tx")
-            .and_then(Value::as_array)
-            .ok_or_else(|| err("getblock"))?;
-        let txids = ids
-            .iter()
-            .map(|t| rev32(t.as_str().unwrap_or_default()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let cb = ids
-            .first()
-            .and_then(Value::as_str)
-            .ok_or_else(|| err("an empty block"))?;
+        // The payment's block, read once for every claim proving a payment in it.
+        let b = self.proof_block(&found.block)?;
+        let at = *b.at.get(&rev32(txid)?).ok_or_else(|| {
+            err(format!(
+                "the transaction {txid} is not in block {}",
+                found.block
+            ))
+        })?;
         let hdr = |hash: &str| -> Result<[u8; 80], Error> {
             let v = self.rpc.call("getblockheader", json!([hash, false]))?;
             header80(v.as_str().ok_or_else(|| err("getblockheader"))?)
         };
-        let header = hdr(&found.block)?;
+        let header: [u8; 80] = bitcoin::consensus::encode::serialize(&b.block.header)
+            .try_into()
+            .map_err(|_| err("a block header that is not 80 bytes"))?;
         let mut links = vec![];
         for x in found.height + 1..=to.anchor_height {
             links.push(hdr(&self.block_hash(x)?)?);
@@ -1558,14 +1572,53 @@ impl BtcChain {
                 "the Bitcoin daemon's best chain does not lead to the anchor Sequentia recorded; waiting for the two to agree",
             ));
         }
+        let tx = |i: usize| bitcoin::consensus::encode::serialize(&b.block.txdata[i]);
         Ok(ProofSource {
             height: found.height,
             header,
-            txids,
-            coinbase: self.raw_tx(cb, &found.block)?,
-            payment: self.raw_tx(txid, &found.block)?,
+            txids: b.txids.clone(),
+            coinbase: tx(0),
+            payment: tx(at),
             links,
         })
+    }
+
+    /// The block `hash` as proofs are built from it, read from the daemon once and kept
+    /// (the last [`PROOF_BLOCKS`]): so K claims proving payments in one block cost one
+    /// read of it, not K. A block's hash fixes what proofs read of it, so what is kept
+    /// never goes stale; a reorganization only leaves it unused.
+    fn proof_block(&self, hash: &str) -> Result<std::sync::Arc<ProofBlock>, Error> {
+        use bitcoin::hashes::Hash as _;
+        let kept = PROOF_CACHE.get_or_init(Default::default);
+        if let Some((_, b)) = kept
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(k, _)| k == hash)
+        {
+            return Ok(b.clone());
+        }
+        let block = self.block(hash)?;
+        if block.block_hash().to_string() != hash {
+            return Err(err(format!("the daemon answered another block for {hash}")));
+        }
+        let txids: Vec<[u8; 32]> = block
+            .txdata
+            .iter()
+            .map(|t| t.compute_txid().to_byte_array())
+            .collect();
+        if txids.is_empty() {
+            return Err(err("an empty block"));
+        }
+        let at = txids.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let b = std::sync::Arc::new(ProofBlock { block, txids, at });
+        let mut k = kept.lock().unwrap_or_else(|e| e.into_inner());
+        k.retain(|(h, _)| h != hash);
+        k.push_back((hash.to_string(), b.clone()));
+        while k.len() > PROOF_BLOCKS {
+            k.pop_front();
+        }
+        Ok(b)
     }
 
     /// Submits a raw transaction.

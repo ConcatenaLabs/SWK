@@ -174,7 +174,8 @@ fn chain(
 
 /// Bitcoin as the fake daemon serves it: branches of blocks from `BASE`, the one its best
 /// chain follows, the one the Sequentia node anchors to, and a switch of the daemon's best
-/// chain the first time a proof reads the block named (`getblock <hash> 1`).
+/// chain the first time a proof reads the block named (its ids, or its second whole read:
+/// the scan reads it whole first).
 #[derive(Default)]
 struct Btc {
     branches: Vec<Vec<bitcoin::Block>>,
@@ -182,6 +183,11 @@ struct Btc {
     node: usize,
     switch_on_proof: Option<(String, usize)>,
     fetched: u64,
+    /// Calls that read a block whole (`getblock`, at any verbosity, and
+    /// `getrawtransaction`, which reads the block it is given).
+    block_reads: u64,
+    /// Reads of the block `switch_on_proof` names, so far.
+    switch_reads: u32,
     /// Transactions sent to it.
     sent: Vec<String>,
 }
@@ -212,18 +218,25 @@ fn fake_btc(state: Arc<Mutex<Btc>>) -> String {
                     .ok_or((-8, "Block height out of range".into()))
             }
             "getblock" => {
+                s.block_reads += 1;
                 let b = by(&p[0]).ok_or((-5, "Block not found".to_string()))?;
-                if p[1].as_u64() == Some(0) {
+                let raw = p[1].as_u64() == Some(0);
+                // The proof's read of the block: the scan reads it whole first, so the
+                // proof's is its second whole read, or a read of its ids.
+                if let Some((h, to)) = s.switch_on_proof.clone() {
+                    if p[0].as_str() == Some(h.as_str()) {
+                        s.switch_reads += 1;
+                        if !raw || s.switch_reads >= 2 {
+                            s.best = to;
+                            s.switch_on_proof = None;
+                        }
+                    }
+                }
+                if raw {
                     s.fetched += 1;
                     return Ok(json!(hex_encode(&bitcoin::consensus::encode::serialize(
                         &b
                     ))));
-                }
-                if let Some((h, to)) = s.switch_on_proof.clone() {
-                    if p[0].as_str() == Some(h.as_str()) {
-                        s.best = to;
-                        s.switch_on_proof = None;
-                    }
                 }
                 Ok(
                     json!({"tx": b.txdata.iter().map(|t| t.compute_txid().to_string()).collect::<Vec<_>>()}),
@@ -236,6 +249,7 @@ fn fake_btc(state: Arc<Mutex<Btc>>) -> String {
                 ))))
             }
             "getrawtransaction" => {
+                s.block_reads += 1;
                 let b = by(&p[2]).ok_or((-5, "No such transaction".to_string()))?;
                 b.txdata
                     .iter()
@@ -1701,4 +1715,79 @@ fn seq_like(s: &Seq) -> Seq {
         first_pooled: None,
         refused_before_pooled: None,
     }
+}
+
+/// K jobs on receiving scripts of their own, each paid in one block by a transaction of its
+/// own, with claims at one atom: each is tried once, and each try builds a proof of a
+/// payment in that block. The block is read once for all of them, never once a proof: the
+/// reads stay flat as K grows.
+#[test]
+fn proofs_of_payments_in_one_block_read_it_once() {
+    let mut reads = vec![];
+    for k in [40u32, 160] {
+        let tip = BASE + 3;
+        let att: Vec<PayLockTerms> = (0..k).map(|i| terms_n(BASE, tip + 7, 10_000 + i)).collect();
+        let pays: Vec<bitcoin::Transaction> = att
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let mut p = payment(t, 0, 0);
+                p.input[0].previous_output.txid = bitcoin::Txid::from_byte_array({
+                    let mut b = [0x55u8; 32];
+                    b[..4].copy_from_slice(&(i as u32).to_le_bytes());
+                    b
+                });
+                p
+            })
+            .collect();
+        let blocks = chain(
+            bitcoin::BlockHash::all_zeros(),
+            1,
+            &[vec![], vec![], vec![], vec![]],
+        );
+        let w = world(&att[0], vec![blocks], vec![BASE, BASE, BASE + 2, tip], 1);
+        let (store, dir, mut limits) = store(&format!("proof-reads-{k}"));
+        limits.round_time = Duration::from_secs(120);
+        {
+            let mut st = store.lock().unwrap();
+            let mut s = w.seq.lock().unwrap();
+            for t in &att {
+                let lock = lock_tx(t);
+                s.locks.insert(lock.txid().to_string(), lock.clone());
+                let op = OutPoint::new(lock.txid(), 0);
+                let c = paylock::sign_claim(
+                    t,
+                    op,
+                    Script::from(vec![0x51]),
+                    1,
+                    BlockHash::all_zeros(),
+                    &key(1),
+                )
+                .unwrap();
+                let j = Job::from_request(&json!({"terms": t.to_json(),
+                    "lock": format!("{}:0", op.txid), "claims": [hex_encode(&serialize(&c))]}))
+                .unwrap();
+                st.add(j, &limits).unwrap();
+            }
+        }
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+        mine(&w, 150, &pays);
+        let before = w.btc.lock().unwrap().block_reads;
+        for _ in 0..10 {
+            service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+            if w.seq.lock().unwrap().refused.len() >= k as usize {
+                break;
+            }
+        }
+        let tried = w.seq.lock().unwrap().refused.len();
+        let n = w.btc.lock().unwrap().block_reads - before;
+        eprintln!("{k} claims proving payments in one block: {tried} tried, {n} block reads");
+        assert_eq!(tried, k as usize);
+        reads.push(n);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    assert!(
+        reads[1] <= reads[0] + 2 && reads[1] <= 6,
+        "block reads grow with the claims: {reads:?}"
+    );
 }

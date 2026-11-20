@@ -302,7 +302,9 @@ script nor spends its payments' coins by a lookup, and reads a block whole only
 when it does. A block read whole is kept indexed by the scripts it pays and the
 coins it spends, so a job it concerns reads only the transactions that touch it:
 one block that concerns many jobs costs a lookup for each, not a pass over the
-block for each. The node's fee floors are read once a round for every job.
+block for each. A proof is built from its payment's block read once for every
+claim proving a payment in it (the last eight such blocks are kept, by hash), so
+claims on many payments in one block cost one read of it, not one each. The node's fee floors are read once a round for every job.
 
 A job is worked only when something it waits on can have changed, in this
 order:
