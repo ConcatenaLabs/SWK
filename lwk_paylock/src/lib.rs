@@ -485,11 +485,10 @@ pub struct Candidate {
 /// candidate whose lightest proof is at least `proof` bytes is passed over with it.
 ///
 /// It is tried again only once what refused it can have changed ([`Passed::retry_due`]):
-/// the node's floors moved so that a tier's signed fee is worth what the node would ask
-/// for the claim (or moved at all, when the refusal did not say what it asked), or an asset
-/// no tier could pay in became accepted. A block arriving changes neither, so it never
-/// brings a candidate back; a reorganization of Bitcoin below the scan's place clears
-/// every one.
+/// the node's floors read differently in any way from the reading each tier was refused
+/// at ([`Refusal::due`]), or an asset no tier could pay in became accepted. No arithmetic
+/// on the refusal's figures decides it. A block arriving changes neither, so it never
+/// brings a candidate back; a reorganization of either chain clears every one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Passed {
     /// The candidate.
@@ -507,11 +506,12 @@ pub struct Passed {
 /// What brings a candidate passed over back ([`Passed`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Retry {
-    /// Refused for the claim's fee rate in the assets of `refused`, and not tried in the
-    /// assets of `untried` (the node did not accept them): tried again once one of the
-    /// first may clear ([`Refusal::may_clear`]), or one of the second is accepted.
+    /// Refused for the claim's fee rate at the tiers of `refused`, and not tried in the
+    /// assets of `untried` (the node did not accept them): tried again once the floors read
+    /// differently from the reading one of the first was refused at ([`Refusal::due`]), or
+    /// one of the second is accepted.
     Floor {
-        /// The best refusal in each asset tried.
+        /// The refusal of each tier refused for its fee rate.
         refused: Vec<Refusal>,
         /// The claims' fee assets the node did not accept.
         untried: Vec<AssetId>,
@@ -523,17 +523,19 @@ pub enum Retry {
     Unknown,
 }
 
-/// The node's refusal of a claim for its fee rate, in one fee asset, with what is needed
-/// to tell when the same claim lands: the claim's own signed fee (`atoms` of `asset`), what
-/// the node asked for it (`need`, in the reference unit), and the node's floors when it
-/// refused (`relay`, its fee rate floor in reference atoms per 1,000 vbytes, and `rate`,
-/// the asset's rate).
+/// The node's refusal of one tier's claim for its fee rate, with the node's floors read
+/// around it: `before`, read just before the claim was sent, and `after`, read once it was
+/// refused ([`Floors::reading`]). When the two agree, that is the reading the node refused
+/// the claim at, and the claim is tried again at any reading that differs from it in any
+/// way: the relay floor, the mempool's minimum, the rate of any asset, an asset accepted
+/// or dropped. When they differ, or either could not be read, the reading that refused it
+/// is not known, and the claim is tried again at the next reading; that try's own refusal
+/// then records a reading of its own.
 ///
-/// The node values the fee at `atoms × rate / 10^8` rounded down and asks
-/// `relay × vsize / 1000` rounded up, so `need` and `relay` fix the claim's size, and the
-/// claim lands at any floors where the signed fee is worth that size's ask. The node's own
-/// figure for the fee's worth (`paid`) is kept only to check the record: it is rounded
-/// down, and at a low rate it reads 0 whatever the fee, so it never decides anything.
+/// The claim's signed fee (`atoms` of `asset`), the node's figures (`paid`, what it said
+/// the fee was worth, rounded down; `need`, what it asked) and the floors (`relay`,
+/// `rate`) only order the claims that are tried again ([`Refusal::margin`]): they never
+/// decide whether one is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Refusal {
     /// The fee asset.
@@ -544,17 +546,17 @@ pub struct Refusal {
     pub paid: u64,
     /// What the node asked (0 when the refusal gave no figures).
     pub need: u64,
-    /// The node's fee rate floor when it refused, in reference atoms per 1,000 vbytes
-    /// ([`Floors::rate`]); 0 when it could not be read.
+    /// The node's fee rate floor around the refusal, in reference atoms per 1,000 vbytes
+    /// ([`Floors::rate`]): the higher of the two reads; 0 when neither was read.
     pub relay: u64,
-    /// The asset's rate when the node refused ([`Floors::rates`]); 0 when it could not be
-    /// read.
+    /// The asset's rate around the refusal ([`Floors::rates`]): the later read's; 0 when
+    /// neither read it.
     pub rate: u64,
-    /// Whether the figures fix the claim's size: the node gave them, the floors were read,
-    /// and the node's worth is the signed fee at the rate read. A record that fails any of
-    /// these says nothing about when the claim lands, so any change of floors brings it
-    /// back ([`Refusal::may_clear`]).
-    pub trusted: bool,
+    /// The floors read just before the claim was sent ([`Floors::reading`]); empty when
+    /// they could not be read.
+    pub before: String,
+    /// The floors read once the node refused the claim; empty when they could not be read.
+    pub after: String,
 }
 
 /// What `atoms` of an asset are worth to a node at `rate`: `atoms × rate / 10^8`, rounded
@@ -579,15 +581,11 @@ impl Refusal {
             .filter(|f| f.known)
             .collect();
         let relay = reads.iter().map(|f| f.rate).max().unwrap_or(0);
-        let rates: Vec<u64> = reads
+        let rate = reads
             .iter()
             .filter_map(|f| f.rates.get(&asset).copied())
-            .collect();
-        let rate = rates.last().copied().unwrap_or(0);
-        // The node's worth must be the signed fee at a rate read around the refusal: else
-        // the rate moved under it, or the figures are not what they seem.
-        let trusted =
-            need > 0 && relay > 0 && rate > 0 && rates.iter().any(|r| fee_worth(atoms, *r) == paid);
+            .last()
+            .unwrap_or(0);
         Refusal {
             asset,
             atoms,
@@ -595,21 +593,41 @@ impl Refusal {
             need,
             relay,
             rate,
-            trusted,
+            before: before.reading().unwrap_or_default(),
+            after: after.and_then(Floors::reading).unwrap_or_default(),
         }
     }
 
+    /// The reading of the floors the node refused the claim at: the one both reads agree
+    /// on. `None` when they differ or either is missing.
+    pub fn refused_at(&self) -> Option<&str> {
+        (!self.before.is_empty() && self.before == self.after).then_some(self.before.as_str())
+    }
+
+    /// Whether the claim this refusal was for is tried again at `floors`: they were read,
+    /// the node accepts the asset, and they read differently in any way from the reading
+    /// the claim was refused at, or that reading is not known ([`Refusal::refused_at`]).
+    /// Never at the very reading that refused it, so a claim is sent at most once for each
+    /// change of the floors, and never in a loop.
+    pub fn due(&self, floors: &Floors) -> bool {
+        let Some(now) = floors.reading() else {
+            return false;
+        };
+        if !floors.accepts(&self.asset) {
+            return false;
+        }
+        self.refused_at() != Some(now.as_str())
+    }
+
     /// The smallest size, in vbytes, a claim the node asked `need` for at `relay` can
-    /// have: `relay × vsize / 1000` rounded up is `need`. `None` for a record that does
-    /// not fix it.
+    /// have: `relay × vsize / 1000` rounded up is `need`. `None` without figures.
     fn least_vsize(&self) -> Option<f64> {
-        (self.trusted && self.need > 0 && self.relay > 0)
+        (self.need > 0 && self.relay > 0)
             .then(|| (self.need - 1) as f64 * 1000.0 / self.relay as f64)
     }
 
-    /// What the node would ask for the claim at `relay`, at the least size the record
-    /// allows, and what its fee is worth at `rate`. `None` for a record that does not fix
-    /// the claim's size.
+    /// What the node would ask for the claim at `relay`, at the least size the figures
+    /// allow, and what its fee is worth at `rate`. `None` without figures.
     fn at(&self, relay: u64, rate: u64) -> Option<(u64, u64)> {
         let v = self.least_vsize()?;
         let ask = (relay as f64 * v / 1000.0).ceil() as u64;
@@ -617,33 +635,11 @@ impl Refusal {
         Some((fee_worth(self.atoms, rate), ask))
     }
 
-    /// Whether the claim this refusal was for may be accepted at `floors`. It is tried
-    /// again when its signed fee is worth what the node would ask for its size at these
-    /// floors; a record that does not fix the size ([`Refusal::trusted`]) is tried again at
-    /// any floors other than the ones that refused it. Never at those very floors, never
-    /// while the node does not accept the asset, never with the floors unread: so a claim
-    /// is sent at most once for each change of the floors, and a guess that proves wrong
-    /// costs one refusal, never a loop.
-    pub fn may_clear(&self, floors: &Floors) -> bool {
-        if !floors.known {
-            return false;
-        }
-        let Some(&rate) = floors.rates.get(&self.asset).filter(|r| **r > 0) else {
-            return false;
-        };
-        if (floors.rate, rate) == (self.relay, self.rate) {
-            return false;
-        }
-        match self.at(floors.rate, rate) {
-            Some((worth, ask)) => worth >= ask,
-            None => true,
-        }
-    }
-
-    /// How far the claim's fee clears the node's ask at `floors`: its worth over the ask
-    /// (above 1 when it lands). 0 when the record does not tell or the asset is not
-    /// accepted. Orders the claims that may land: those that clear by most go first, and
-    /// to go first a claim must pay for it, then land and leave.
+    /// How far the claim's fee clears the node's ask at `floors`, by the refusal's figures:
+    /// its worth over the ask (above 1 when it lands). 0 when the figures do not tell or the
+    /// asset is not accepted. It only orders the claims tried again, those that clear by
+    /// most first (to go first a claim must pay for it, then land and leave); it never
+    /// decides whether a claim is tried, so figures that mislead cost order, never a retry.
     pub fn margin(&self, floors: &Floors) -> f64 {
         let Some(&rate) = floors.rates.get(&self.asset).filter(|r| **r > 0) else {
             return 0.0;
@@ -663,19 +659,18 @@ impl Passed {
             Retry::Never => false,
             Retry::Unknown => true,
             Retry::Floor { refused, untried } => {
-                refused.iter().any(|r| r.may_clear(floors))
-                    || untried.iter().any(|a| floors.accepts(a))
+                refused.iter().any(|r| r.due(floors)) || untried.iter().any(|a| floors.accepts(a))
             }
         }
     }
 
-    /// How far its best refusal that may now clear clears the node's ask at `floors`
+    /// How far its best refusal tried again at `floors` clears the node's ask there
     /// ([`Refusal::margin`]); 0 when none tells.
     pub fn margin(&self, floors: &Floors) -> f64 {
         match &self.retry {
             Retry::Floor { refused, .. } => refused
                 .iter()
-                .filter(|r| r.may_clear(floors))
+                .filter(|r| r.due(floors))
                 .map(|r| r.margin(floors))
                 .fold(0.0, f64::max),
             _ => 0.0,
@@ -713,6 +708,25 @@ impl Floors {
     /// Whether the node accepts fees in `asset`.
     pub fn accepts(&self, asset: &AssetId) -> bool {
         self.rates.get(asset).map(|r| *r > 0).unwrap_or(false)
+    }
+
+    /// Everything this read says, as one digest: the fee rate floor and every accepted
+    /// asset with its rate. Two reads with the same digest read the same floors; any change
+    /// at all (one asset's rate, an asset accepted or dropped, the floor up or down) gives
+    /// another. `None` when the node was not read.
+    pub fn reading(&self) -> Option<String> {
+        use lwk_wollet::elements::hashes::{sha256, Hash, HashEngine};
+        if !self.known {
+            return None;
+        }
+        let mut rates: Vec<(&AssetId, &u64)> = self.rates.iter().collect();
+        rates.sort();
+        let mut e = sha256::Hash::engine();
+        e.input(format!("floor {};", self.rate).as_bytes());
+        for (a, r) in rates {
+            e.input(format!("{a} {r};").as_bytes());
+        }
+        Some(sha256::Hash::from_engine(e).to_string()[..32].to_string())
     }
 }
 

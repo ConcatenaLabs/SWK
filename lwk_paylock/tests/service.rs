@@ -2154,8 +2154,8 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
 
     // A candidate passed over (the node refused every claim on it for its weight) passes
     // over every candidate whose lightest proof is as heavy, until what refused it can have
-    // changed: the node's floor in the fee asset falls below the rate it refused, or an
-    // asset no tier could pay in is accepted. A block arriving changes neither.
+    // changed: the node's floors read differently in any way from the reading it was refused
+    // at, or an asset no tier could pay in is accepted. A block arriving changes neither.
     let tip = 1_003;
     let asset = lwk_wollet::elements::AssetId::from_slice(&[5; 32]).unwrap();
     let other_asset = lwk_wollet::elements::AssetId::from_slice(&[6; 32]).unwrap();
@@ -2181,7 +2181,7 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
                 5_000,
                 "min relay fee not met, 5000 < 8356",
                 &at,
-                None,
+                Some(&at),
             )],
             untried: vec![other_asset],
         },
@@ -2191,27 +2191,66 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
     scan.passed[0].proof = order[1].min_proof;
     assert!(scan.is_passed(&order[1]).is_some() && scan.is_passed(&order[2]).is_some());
     let p = &scan.passed[0];
-    // The same floor, however many blocks later: not tried again.
+    // The same reading, however many blocks later: not tried again.
     assert!(!p.retry_due(&at));
-    // The floor down, but not below the rate refused (5,000 / 8,356 of it): not yet.
-    assert!(!p.retry_due(&floors(700, &[(asset, 100_000_000)])));
-    // Below it: tried again. So too when the asset's rate rises as much.
-    assert!(p.retry_due(&floors(598, &[(asset, 100_000_000)])));
-    assert!(p.retry_due(&floors(1_000, &[(asset, 168_000_000)])));
-    // The asset no tier could pay in is accepted: tried again.
-    assert!(p.retry_due(&floors(1_000, &[(asset, 100_000_000), (other_asset, 1)])));
-    // Unread floors bring nothing back; a record that says nothing is tried again.
+    assert!(!p.retry_due(&floors(1_000, &[(asset, 100_000_000)])));
+    // Any change at all brings it back: the floor down a little, or up; the asset's rate
+    // up or down; another asset's rate; an asset accepted. No figure decides.
+    for now in [
+        floors(999, &[(asset, 100_000_000)]),
+        floors(700, &[(asset, 100_000_000)]),
+        floors(1_001, &[(asset, 100_000_000)]),
+        floors(1_000, &[(asset, 100_000_001)]),
+        floors(1_000, &[(asset, 99_999_999)]),
+        floors(1_000, &[(asset, 100_000_000), (other_asset, 1)]),
+    ] {
+        assert!(p.retry_due(&now), "{now:?}");
+    }
+    // Unread floors bring nothing back, nor floors at which the node does not take the
+    // asset; a record that says nothing is tried again.
     assert!(!p.retry_due(&lwk_paylock::Floors::default()));
     let mut q = p.clone();
+    q.retry = lwk_paylock::Retry::Floor {
+        refused: match &p.retry {
+            lwk_paylock::Retry::Floor { refused, .. } => refused.clone(),
+            _ => unreachable!(),
+        },
+        untried: vec![],
+    };
+    assert!(!q.retry_due(&floors(10, &[(other_asset, 1)])));
     q.retry = lwk_paylock::Retry::Unknown;
     assert!(q.retry_due(&at));
     q.retry = lwk_paylock::Retry::Never;
     assert!(!q.retry_due(&floors(0, &[(asset, u64::MAX)])));
 
-    // The claim's own signed fee decides, never the node's figure for its worth, which is
-    // rounded down: at a rate of 1 a fee of 5,000 atoms reads `0 < 304`. Whatever the rate
-    // the refusal came at, the claim is tried again once its fee covers the ask, and not
-    // before.
+    // The before/after race: the rate rose between the read before the claim was sent
+    // and the read after it was refused. The reading that refused it is not known, so it
+    // is tried again at the next reading, whichever it is, the later one included.
+    let early = floors(1_000, &[(asset, 100_000)]);
+    let late = floors(1_000, &[(asset, 100_000_000)]);
+    let r = lwk_paylock::Refusal::new(
+        asset,
+        5_000,
+        "min relay fee not met, 5 < 304",
+        &early,
+        Some(&late),
+    );
+    assert_eq!(r.refused_at(), None, "{r:?}");
+    assert!(r.due(&late) && r.due(&early), "{r:?}");
+    // Either read missing: not known either.
+    for (b, a) in [
+        (&lwk_paylock::Floors::default(), Some(&late)),
+        (&late, None),
+    ] {
+        let r = lwk_paylock::Refusal::new(asset, 5_000, "min relay fee not met, 5 < 304", b, a);
+        assert_eq!(r.refused_at(), None, "{r:?}");
+        assert!(r.due(&late), "{r:?}");
+    }
+
+    // Whatever the rate the refusal came at and whatever the node's figures (rounded down:
+    // at a rate of 1 a fee of 5,000 atoms reads `0 < 304`), the claim is tried again once
+    // the reading changes, never at the reading that refused it; the figures only order
+    // the retries.
     let normal = floors(1_000, &[(asset, 100_000_000)]);
     for low in [1u64, 100_000, 100_000_000] {
         let (relay, worth) = if low == 100_000_000 {
@@ -2221,6 +2260,25 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
         };
         let need = 304 * relay / 1_000;
         let then = floors(relay, &[(asset, low)]);
+        for m in [
+            format!("min relay fee not met, {worth} < {need} (code -26)"),
+            "min relay fee not met, 77 < 8356".to_string(),
+            "mempool full".to_string(),
+        ] {
+            let r = lwk_paylock::Refusal::new(asset, 5_000, &m, &then, Some(&then));
+            assert!(r.refused_at().is_some(), "{r:?}");
+            assert!(!r.due(&then), "{r:?}");
+            assert!(r.due(&normal), "rate {low}: {r:?}");
+            // Halfway back too: no arithmetic holds it.
+            let half = floors(
+                relay / 2,
+                &[(asset, low.saturating_mul(2).min(100_000_000))],
+            );
+            assert!(r.due(&half), "{r:?}");
+            // Not while the node does not take the asset, nor with the floors unread.
+            assert!(!r.due(&floors(10, &[(other_asset, 1)])), "{m}");
+            assert!(!r.due(&lwk_paylock::Floors::default()), "{m}");
+        }
         let r = lwk_paylock::Refusal::new(
             asset,
             5_000,
@@ -2228,30 +2286,7 @@ fn a_payment_no_proof_can_carry_opens_nothing() {
             &then,
             Some(&then),
         );
-        assert!(r.trusted, "{r:?}");
-        assert!(!r.may_clear(&then), "{r:?}");
-        assert!(r.may_clear(&normal), "rate {low}: {r:?}");
         assert!(r.margin(&normal) > 10.0, "{r:?}");
-        // Halfway back is not enough for a floor 100 times too high.
-        let half = floors(
-            relay / 2,
-            &[(asset, low.saturating_mul(2).min(100_000_000))],
-        );
-        assert!(!r.may_clear(&half), "{r:?}");
-    }
-    // A refusal without figures (`mempool full`) or whose figures are not the signed fee's
-    // worth at the rate read (the rate moved under it) says nothing of when the claim
-    // lands: tried again at any floors other than those it was refused at, a higher floor
-    // included, once.
-    for m in ["mempool full", "min relay fee not met, 77 < 8356"] {
-        let r = lwk_paylock::Refusal::new(asset, 5_000, m, &at, None);
-        assert!(!r.trusted, "{m}");
-        assert!(!r.may_clear(&at), "{m}");
-        assert!(r.may_clear(&floors(1_001, &[(asset, 100_000_000)])), "{m}");
-        assert!(r.may_clear(&floors(1_000, &[(asset, 99_000_000)])), "{m}");
-        // Not while the node does not take the asset, nor with the floors unread.
-        assert!(!r.may_clear(&floors(10, &[(other_asset, 1)])), "{m}");
-        assert!(!r.may_clear(&lwk_paylock::Floors::default()), "{m}");
     }
 
     // A reorganization below the scan's place drops every candidate and everything passed

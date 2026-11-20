@@ -154,21 +154,23 @@ the only refusals that depend on which payment the claim proves) moves to the
 next tier; refused at every tier, the candidate is passed over, with every one
 whose proof would be as heavy, and the next is tried in the same round. A
 candidate is passed over only for that, and comes back only once what refused
-it can have changed. The node's floors (its relay floor and each fee asset's
-rate, read once a round) have moved so that a refused tier's own signed fee is
-worth what the node would now ask for that claim: the refusal states the ask,
-which fixes the claim's size, and the service values the fee itself, never by
-the worth the refusal states, which the node rounds down (at a low rate a fee of
-thousands of atoms reads `0`). A refusal that gives no figures (`mempool full`),
-or whose figures are not the signed fee at the rate read, brings the candidate
-back once the floors change at all. Either way it is never tried again at the
-very floors that refused it, so it costs at most one try for each change of the
-floors. It also comes back once an asset the node did not accept, in which a
-tier is signed, is accepted. A claim refused for its size at every tier never
-comes back. A block arriving
+it can have changed. Each tier's refusal keeps the node's floors as read just
+before the claim was sent and again once it was refused: the relay floor (the
+higher of the mempool's minimum and the relay minimum) and every accepted fee
+asset with its rate. When the two reads agree, that is the reading the claim was
+refused at, and the candidate comes back as soon as a read differs from it in any
+way: a floor up or down, any asset's rate, an asset accepted or dropped. When they
+differ, or one could not be made, the reading that refused it is not known, and the
+candidate comes back at the next read; that try's refusal records a reading of its
+own. No arithmetic on the refusal's figures decides a retry (they only order the
+retries), and a claim is never tried again at the very reading that refused it,
+so it costs at most one try for each change of the floors. It also comes back
+once an asset the node did not accept, in which a tier is signed, is accepted. A
+claim refused for its size at every tier never comes back. A block arriving
 changes none of this, so it brings nothing back. When no tier is in an asset
 the node accepts, every candidate is passed over until one is. A reorganization
-below the scan's place drops everything passed over. Anything else that keeps a
+of either chain (of Bitcoin below the scan's place, or a Sequentia block replaced
+at a height already seen) drops everything passed over. Anything else that keeps a
 claim from being made waits on the chain and never passes a payment over: no
 Sequentia block anchored at the payment yet, the Bitcoin daemon and the node's
 anchors not agreeing (or the daemon switching branches between reading a block
@@ -319,10 +321,13 @@ order:
    it), or mined. The tips are told apart by their blocks' hashes, so a block
    rebuilt at the same height counts;
 2. intake changed it since it was last worked;
-3. a candidate it passed over may now land (a refused tier's signed fee covers
-   the node's ask at the floors now, or an asset became accepted), the claims
-   that clear the ask by the most first; then a job whose last round failed,
-   once its backoff is over, fewest failures first;
+3. a candidate it passed over is due again (the floors read differently from
+   the reading a tier was refused at, or an asset became accepted), the claims
+   that clear the ask by the most first. These and the jobs of 2 take turns, one
+   of these first, so however much intake there is (a flood of new cancels, say),
+   a refused claim is tried again in the first background turns of the round
+   after the floors change; then a job whose last round failed, once its backoff
+   is over, fewest failures first;
 4. the rest, once per Bitcoin block, for the deadline and the state a read
    shows, and a job holding a payment or cancel the daemon cannot check yet,
    whenever a chain moves and at least every ten seconds.
@@ -363,7 +368,8 @@ memory. So are a payment's coins: they are held once with it, and a job's file
 names them only by a digest while the payment's own file holds the transaction,
 so a payment of many coins costs each job no more than one of few. Once the daemon vouches for a payment it is held by its transaction id,
 whatever the witness of the copies handed over: a mined payment is vouched for
-by its id alone, so copies of it with other witnesses cost nothing more. Until
+by its id alone, so copies of it with other witnesses cost nothing more: a copy
+replaced by the one held, or handed over and then dropped, is let go at once. Until
 then each copy is its own, since an unchecked witness may be bad and must never
 stand in for another's. A job keeps at most eight claims of 16 KiB each, 64 KiB of payments and
 cancels the daemon cannot check yet, and, per payment held, 32 KiB of checked
