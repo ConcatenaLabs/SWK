@@ -292,8 +292,10 @@ order:
    script or spends its payments' coins; a Sequentia block anchors a candidate
    not passed over; its claim is pooled by someone, left out of a block, mined,
    or gone from the mempool. The tips are told apart by their blocks' hashes, so
-   a block rebuilt at the same height counts. Jobs whose claims are worth
-   clearly less than the node's floor take their turns after the others here;
+   a block rebuilt at the same height counts. Jobs whose claims are worth less
+   than the node's floor asks for the lightest proof their payment can make
+   (read from the blocks already held, so before they are first tried) take
+   their turns after the others here;
 2. intake changed it since it was last worked;
 3. a candidate it passed over may now land (the floor fell, an asset became
    accepted); then a job whose last round failed, once its backoff is over,

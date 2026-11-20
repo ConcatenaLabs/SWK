@@ -273,6 +273,8 @@ struct Seq {
     generation: u64,
     refused: Vec<String>,
     first_pooled: Option<Instant>,
+    /// How many claims it had refused when it first pooled one.
+    refused_before_pooled: Option<usize>,
 }
 
 fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
@@ -338,6 +340,8 @@ fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
                 }
                 s.pooled.insert(tx.txid().to_string(), tx.clone());
                 s.first_pooled.get_or_insert_with(Instant::now);
+                let n = s.refused.len();
+                s.refused_before_pooled.get_or_insert(n);
                 Ok(json!(tx.txid().to_string()))
             }
             _ => Err((-32601, "Method not found".into())),
@@ -439,6 +443,7 @@ fn world(
         generation: 0,
         refused: vec![],
         first_pooled: None,
+        refused_before_pooled: None,
     }));
     let (su, bu) = (fake_seq(seq.clone(), btc.clone()), fake_btc(btc.clone()));
     World {
@@ -1041,5 +1046,90 @@ fn a_claim_gone_and_refused_releases_the_cancel() {
     eprintln!("the claim gone and refused: {} {}", j["state"], j["note"]);
     service::send_due_cancels(&store, &w.btc_chain, &w.seq_chain, &limits).unwrap();
     assert!(cancel_sent(&w), "the cancel is sent: {j}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F10, first attempts. The attacker's jobs are posted and never tried yet when its payment
+/// and the buyer's are mined in the same block. The buyer's job, which the service has
+/// worked before, has something new on the chains and goes first; the attacker's jobs are
+/// worked after it, and those the block cache shows priced under the floor for the proof
+/// their payment makes after the rest. So the buyer's claim is sent before any attacker's.
+#[test]
+fn jobs_never_tried_go_after_the_buyer_when_their_claims_are_under_the_floor() {
+    const N: u32 = 300;
+    let tip = BASE + 4;
+    // The buyer's floor as low as the attacker's: the blocks between are read already, so
+    // every attacker job reaches its payment's block by the cache, as on a running service.
+    let buyer_terms = terms_at(BASE, tip + 8, 3);
+    let att: Vec<PayLockTerms> = (0..N).map(|n| terms_n(BASE, tip + 7, n)).collect();
+    let mut pay = payment(&att[0], 200, 0);
+    pay.output = att
+        .iter()
+        .map(|t| bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(t.price_sat),
+            script_pubkey: t.receive_script_pubkey(),
+        })
+        .collect();
+    let blocks = chain(bitcoin::BlockHash::all_zeros(), 1, &vec![vec![]; 5]);
+    let w = world(
+        &buyer_terms,
+        vec![blocks],
+        vec![BASE, BASE, BASE + 2, BASE + 3, tip],
+        1,
+    );
+    let (store, dir, limits) = store("first-attempts");
+    {
+        let mut st = store.lock().unwrap();
+        let s = w.seq.lock().unwrap();
+        let mut j = job(&buyer_terms, &s.lock.clone(), None);
+        j.client = "203.0.113.91".into();
+        st.add(j, &limits).unwrap();
+    }
+    // The service has been running: the buyer's job is worked and the blocks are read.
+    for _ in 0..2 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    }
+    // The attacker's jobs are posted, and not tried yet when both payments are mined.
+    {
+        let mut st = store.lock().unwrap();
+        let mut s = w.seq.lock().unwrap();
+        for (n, t) in att.iter().enumerate() {
+            let lock = lock_tx(t);
+            s.locks.insert(lock.txid().to_string(), lock.clone());
+            let op = OutPoint::new(lock.txid(), 0);
+            let c = paylock::sign_claim(
+                t,
+                op,
+                Script::from(vec![0x51]),
+                1,
+                BlockHash::all_zeros(),
+                &key(1),
+            )
+            .unwrap();
+            let mut j = Job::from_request(&json!({"terms": t.to_json(),
+                "lock": format!("{}:0", op.txid), "claims": [hex_encode(&serialize(&c))]}))
+            .unwrap();
+            j.client = format!("100.64.{}.{}", n / 250, n % 250);
+            st.add(j, &limits).unwrap();
+        }
+    }
+    mine(&w, 130, &[pay, payment(&buyer_terms, 42, 0)]);
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    let s = w.seq.lock().unwrap();
+    eprintln!(
+        "{N} attacker jobs never tried, paid in the buyer's block: the buyer pooled after {:?} attacker refusals; {} refused in the round",
+        s.refused_before_pooled,
+        s.refused.len()
+    );
+    assert!(
+        s.first_pooled.is_some(),
+        "the buyer's claim is pooled in the round"
+    );
+    assert_eq!(
+        s.refused_before_pooled,
+        Some(0),
+        "the buyer's claim is sent first"
+    );
+    drop(s);
     let _ = std::fs::remove_dir_all(&dir);
 }

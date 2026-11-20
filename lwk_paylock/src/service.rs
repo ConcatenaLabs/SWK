@@ -2921,11 +2921,13 @@ fn fold_in(job: &mut Job, cur: &Job, before: &Value) {
     }
 }
 
-/// Whether every claim of a job is worth clearly less than the node's floor asks for its
-/// lightest proof still in play: half or less, at the fee asset's rate. It only orders the
-/// work (such jobs take their turns after the rest of their class), never skips it, so a
-/// wrong guess costs time, never a claim.
-fn under_floor(j: &Job, floors: &Floors) -> bool {
+/// Whether every claim of a job is worth less than the node's floor asks for its lightest
+/// proof in play (a candidate not passed over, or `hit`, a payment in a block just reached),
+/// by a margin: its worth at the fee asset's rate, a quarter again, is still under. The
+/// proof counted is the lightest one possible, so a claim judged under is under. It only
+/// orders the work (such jobs take their turns after the rest of their class), never skips
+/// it, so a wrong guess costs time, never a claim.
+fn under_floor(j: &Job, floors: &Floors, hit: Option<usize>) -> bool {
     if !floors.known {
         return false;
     }
@@ -2935,6 +2937,7 @@ fn under_floor(j: &Job, floors: &Floors) -> bool {
         .iter()
         .filter(|c| j.scan.is_passed(c).is_none())
         .map(|c| c.min_proof)
+        .chain(hit)
         .min()
     else {
         return false;
@@ -2949,7 +2952,7 @@ fn under_floor(j: &Job, floors: &Floors) -> bool {
         let worth = atoms as f64 * rate as f64 / 1e8;
         let vsize = (c.weight() + proof + 3) / 4;
         let need = floors.rate as f64 * vsize as f64 / 1000.0;
-        worth * 2.0 > need
+        worth * 1.25 > need
     })
 }
 
@@ -3068,6 +3071,20 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
                     && tip_anchor.map(|a| c.at.height <= a).unwrap_or(true)
             });
         let advance = blocks.advance(&j.terms, &coins, open, &mut j.scan, btc_tip);
+        let script = script_key(j.terms.receive_script_pubkey().as_bytes());
+        // A block paying the job's script: the lightest proof a payment in it makes, read
+        // from the cache, so a job never tried yet is ordered by what its claim can carry.
+        let hit_proof = (advance == Advance::Hit)
+            .then(|| {
+                let h = j
+                    .scan
+                    .scanned
+                    .as_ref()
+                    .map(|(h, _)| h + 1)
+                    .unwrap_or(j.terms.floor.max(1));
+                blocks.lightest_proof(script, h)
+            })
+            .flatten();
         let fresh = advance == Advance::Hit
             || (claim_pooled && j.state != State::Pooled)
             || (j.state == State::Pooled && !claim_pooled)
@@ -3075,7 +3092,7 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
             || (j.state == State::Mined && moved)
             || (provable && moved);
         let class = if fresh {
-            if under_floor(j, &floors) {
+            if under_floor(j, &floors, hit_proof) {
                 1
             } else {
                 0
@@ -3096,7 +3113,6 @@ pub fn work_round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: 
         } else {
             continue;
         };
-        let script = script_key(j.terms.receive_script_pubkey().as_bytes());
         due.push((
             class,
             script,

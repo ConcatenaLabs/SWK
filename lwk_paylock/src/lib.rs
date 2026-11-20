@@ -736,12 +736,14 @@ pub fn coin_key(c: &bitcoin::OutPoint) -> u64 {
     h.finish()
 }
 
-/// What a [`BlockCache`] keeps of a block: its hash, and keys of every script its
-/// transactions pay and every coin they spend (the coinbase's left out).
+/// What a [`BlockCache`] keeps of a block: its hash, its number of transactions, and keys
+/// of every script its transactions pay (each with the size without witness of the
+/// smallest transaction paying it) and every coin they spend (the coinbase's left out).
 #[derive(Debug, Clone)]
 struct Summary {
     hash: String,
-    pays: std::collections::HashSet<u64>,
+    txs: usize,
+    pays: std::collections::HashMap<u64, usize>,
     spends: std::collections::HashSet<u64>,
 }
 
@@ -807,18 +809,31 @@ impl BlockCache {
             let hash = btc.block_hash(h)?;
             let block = btc.block(&hash)?;
             self.fetched += 1;
-            let mut pays = std::collections::HashSet::new();
+            let mut pays = std::collections::HashMap::new();
             let mut spends = std::collections::HashSet::new();
             for tx in block.txdata.iter().skip(1) {
+                let n = tx.base_size();
                 for o in &tx.output {
-                    pays.insert(script_key(o.script_pubkey.as_bytes()));
+                    let m = pays
+                        .entry(script_key(o.script_pubkey.as_bytes()))
+                        .or_insert(n);
+                    *m = (*m).min(n);
                 }
                 for i in &tx.input {
                     spends.insert(coin_key(&i.previous_output));
                 }
             }
+            let txs = block.txdata.len();
             self.keep_whole(hash.clone(), std::sync::Arc::new(block));
-            self.blocks.insert(h, Summary { hash, pays, spends });
+            self.blocks.insert(
+                h,
+                Summary {
+                    hash,
+                    txs,
+                    pays,
+                    spends,
+                },
+            );
         }
         Ok(self.blocks.get(&h).expect("inserted"))
     }
@@ -829,6 +844,16 @@ impl BlockCache {
         while self.whole.len() > 8 {
             self.whole.pop_front();
         }
+    }
+
+    /// The lightest proof a payment to `script` in the block at `h` would make, in bytes,
+    /// as far as the cache can tell without reading the block: its smallest transaction
+    /// paying the script (any amount), at the block's merkle depth, with no linking header.
+    /// `None` when the cache does not hold the block or nothing in it pays the script.
+    pub fn lightest_proof(&self, script: u64, h: u32) -> Option<usize> {
+        let s = self.blocks.get(&h)?;
+        let n = *s.pays.get(&script)?;
+        Some(paylock::proof_bytes(n, paylock::merkle_depth(s.txs), 0))
     }
 
     /// The hash of the best chain's block at `h`, as the cache holds it.
@@ -848,7 +873,7 @@ impl BlockCache {
         coins: &[u64],
     ) -> Result<(String, bool), Error> {
         let s = self.summary(btc, h)?;
-        let hit = s.pays.contains(&script) || coins.iter().any(|c| s.spends.contains(c));
+        let hit = s.pays.contains_key(&script) || coins.iter().any(|c| s.spends.contains(c));
         Ok((s.hash.clone(), hit))
     }
 
@@ -899,7 +924,7 @@ impl BlockCache {
             let Some(s) = self.blocks.get(&h) else {
                 return Advance::Unread;
             };
-            if s.pays.contains(&script) || keys.iter().any(|c| s.spends.contains(c)) {
+            if s.pays.contains_key(&script) || keys.iter().any(|c| s.spends.contains(c)) {
                 return Advance::Hit;
             }
             scan.scanned = Some((h, s.hash.clone()));
