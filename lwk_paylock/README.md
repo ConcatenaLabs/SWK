@@ -354,7 +354,7 @@ each on a receiving script of its own, paid by shared transactions and with
 claims priced under the floor: once each had been tried, a buyer's claim was
 pooled within 2 seconds of a Sequentia block anchoring its payment, the buyer's
 cancel went out within a second of `D - 2`, and the service's memory grew by
-about 8 KB a job (326 MB at 40,000).
+about 7 KB a job (288 MB at 40,000).
 Each job works within a time and block budget, the round within its own; a job
 cut short is worked again next round. A job keeps every payment handed over and
 the 32 lightest others as candidates, by the proof each makes linking no header (a
