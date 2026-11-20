@@ -473,6 +473,26 @@ Changes by file:
     fee estimates.
   - `htlc.rs`: the BTC-leg HTLC (P2SH from the shared redeemScript, funding,
     and the manual-scriptSig CLTV refund with BIP125 RBF).
+  - `paylock.rs`: the payment lock, the swap of an asset for an ordinary
+    on-chain bitcoin payment with no hash lock (the node's
+    `doc/sequentia/bitcoin-payment-proof.md`, section 8). No I/O: the terms
+    (`F`, `D`, `R = D`, a fresh receiving key per lock), the claim and refund
+    leaves (opcodes `0xe5` to `0xe7`) and the lock's P2TR script, the seller's
+    receiving script `wsh(and_v(v:pk(K),older(1)))`, the buyer's
+    leaf-for-leaf checks on a mined lock, the payment proof (built from a
+    block's header, transaction ids, coinbase and payment, and checked as the
+    node checks it), the claim signed before the payment and completed
+    without a key, the refund with its anchor floor, the buyer's cancel of its
+    own payment, the top fee tier and the timeline states. The claim and the
+    refund pay their fee from the locked asset, from a fee pot (a second
+    output of the lock under the same leaves, named in the terms, which the
+    claim spends with the same proof), or from a coin of the signer's own that
+    its wallet signs (`FeeSource`, `FeePlan`, `lock_spend`). Heights above
+    2,147,483,647 are refused, a lock whose deadline is more than 1,008
+    Bitcoin blocks ahead is not payable, and the cancel pays at least the BIP125
+    floor (`cancel_fee_floor`). `verify_claim` checks a signed claim as a node
+    will, short of its proof: the buyer's signature on every lock input and a
+    fee coin's P2WPKH signature. `lwk_paylock` reads the chains over it.
   - `xchain.rs`: cross-chain (BTC to Sequentia-asset) swap glue for the taker:
     HTLC key derivation (canonical absolute paths outside the receive/change
     branches, plus a legacy relative mode recorded in persisted state), the
@@ -501,6 +521,32 @@ Changes by file:
   `lwk_wasm/tests/node/stake_records.js` when the node package is linked.
 - `examples/rescue_test.rs`: live functional test of bump/replace/CPFP against
   the testnet (needs a funded wallet).
+
+## `lwk_paylock`
+
+A crate of this fork's own, over `lwk_wollet::btc::paylock`: the reads the
+payment lock needs from a Sequentia node and a Bitcoin daemon (JSON-RPC), the
+claim completed with a proof linked to the lowest anchor the chain recorded at
+or above the payment, the activation read from the node's `getdeploymentinfo`
+(`btc_payment` and `lost_blocks`; an entry the node does not report is not
+active), the claim's fee routes judged by the node's `getfeeassetinfo`, the
+completion service (one job per lock, into which every post merges; the
+payment known from Bitcoin alone, any transaction mined in the lock's heights
+paying the receiving script at least the price, so completing the claim needs
+nothing a client posts; payments handed over held by the coins they spend, with
+their cancels, a payment the daemon pools or has mined never refused nor
+crowded out, one it cannot check yet held within a bound and checked again;
+cancels by witness id, checked by the Bitcoin daemon; nothing the service keeps
+of its own read from a request; bounded: cancels on a thread of their own with
+a time budget per pass, sent whatever the node says of the lock, jobs worked
+nearest deadline first within time and block budgets, a scan that keeps its
+place, finished jobs watched until buried and then archived; a new job only on
+a real lock, a quota of live jobs per client, the clients taking turns at the
+cancel sends; each request on its own thread under deadlines, connections
+shared between addresses with idle ones giving way; reads without signed
+transactions, a token beyond loopback),
+and the `paylock` command for every step. Its `README.md` says how to run it
+and its regtest proof.
 
 ## `lwk_contracts`
 

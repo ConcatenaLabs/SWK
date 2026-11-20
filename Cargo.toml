@@ -19,6 +19,7 @@ members = [
     "lwk_payment_instructions",
     "lwk_simplicity",
     "lwk_contracts",
+    "lwk_paylock",
     "amp2_mock",
 ]
 resolver = "2"

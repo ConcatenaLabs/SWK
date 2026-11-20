@@ -2766,6 +2766,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lwk_paylock"
+version = "0.1.0"
+dependencies = [
+ "jsonrpc",
+ "lwk_wollet",
+ "serde_json",
+ "socket2",
+ "tiny_http",
+]
+
+[[package]]
 name = "lwk_payment_instructions"
 version = "0.18.1"
 dependencies = [
