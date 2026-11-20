@@ -45,9 +45,12 @@
 //! candidate passed over comes back when the node's floors read differently in any way
 //! from the reading each refused tier was refused at (at the next read, when that reading
 //! is not known), when an asset no tier could pay in is accepted, or at a reorganization
-//! of either chain; never because a block arrived and never at the reading that refused
-//! it. Those retries take turns with intake, a retry first; background work ends at once
-//! when a chain moves; each job works within a time and block budget, the whole round within a
+//! of either chain, one made while the service was stopped included; a tier refused for
+//! its fee rate never because a block arrived, and never at the reading that refused it;
+//! a tier refused for want of room (`mempool full`) also as Sequentia blocks are mined,
+//! with a backoff. Those retries, the first tries of claims worth less than the floor,
+//! and intake take turns, one of each, a retry first; background work ends at once when a
+//! chain moves; each job works within a time and block budget, the whole round within a
 //! budget of its own. A job that fails retries with a backoff.
 //! Each signed payment and cancel is held once however many jobs hold it (a payment the
 //! daemon vouched for, once per transaction id whatever its witness; its coins with it,
