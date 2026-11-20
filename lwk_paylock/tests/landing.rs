@@ -1791,3 +1791,81 @@ fn proofs_of_payments_in_one_block_read_it_once() {
         "block reads grow with the claims: {reads:?}"
     );
 }
+
+/// The upkeep of claims already pooled is background too: a round raising the attacker's
+/// many pooled claims (each answer takes the node 30 ms) when the buyer's payment is mined
+/// and anchored ends at the next look at the chains, and the next round pools the buyer's
+/// claim, well under the three seconds the raises take.
+#[test]
+fn a_buyer_mined_during_the_upkeep_of_pooled_claims_is_not_kept_behind_it() {
+    const N: u32 = 100;
+    let (w, store, dir, mut limits, buyer_terms) = retry_world(N, 20_000, "upkeep-moves");
+    {
+        let mut b = w.btc.lock().unwrap();
+        let p = b.branches[0][1].block_hash();
+        b.branches[0][2] = block(p, 77, &[]);
+        let p = b.branches[0][2].block_hash();
+        b.branches[0][3] = block(p, 78, &[]);
+    }
+    w.seq.lock().unwrap().floor = 200;
+    for _ in 0..5 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    }
+    assert!(w.seq.lock().unwrap().order.len() >= N as usize);
+    {
+        let mut st = store.lock().unwrap();
+        let s = w.seq.lock().unwrap();
+        let mut j = job(&buyer_terms, &s.lock.clone(), None);
+        j.client = "203.0.113.91".into();
+        st.add(j, &limits).unwrap();
+    }
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    // A block that leaves every pooled claim out: each is raised, slowly.
+    w.seq.lock().unwrap().send_delay = Duration::from_millis(30);
+    mine(&w, 141, &[]);
+    limits.round_time = Duration::from_secs(20);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let (store, stop) = (Arc::new(store), stop.clone());
+        let (seq, btc) = (
+            SeqChain {
+                rpc: rpc(&w.seq_url),
+            },
+            BtcChain {
+                rpc: rpc(&w.btc_url),
+            },
+        );
+        let limits = limits.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                service::work_round(&store, &seq, &btc, &limits);
+            }
+        })
+    };
+    std::thread::sleep(Duration::from_millis(400));
+    let busy = w.seq.lock().unwrap().order.len();
+    mine(&w, 142, &[payment(&buyer_terms, 42, 0)]);
+    let t0 = Instant::now();
+    let script = buyer_terms.receive_script_pubkey();
+    let mut took = None;
+    while t0.elapsed() < Duration::from_secs(15) {
+        if proven_by(&w.seq.lock().unwrap(), &script) {
+            took = Some(t0.elapsed());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    worker.join().unwrap();
+    let all = w.seq.lock().unwrap().order.len();
+    eprintln!(
+        "{} raises sent before the buyer's block; the buyer pooled {took:?} after it was anchored; {all} claims pooled in all",
+        busy.saturating_sub(N as usize)
+    );
+    let took = took.expect("the buyer's claim was pooled");
+    assert!(
+        took < Duration::from_millis(1_500),
+        "the buyer waited {took:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

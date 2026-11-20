@@ -3215,7 +3215,7 @@ static WORK_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 ///   whoever made it an output in a new Bitcoin block or a claim the node takes (and pays
 ///   for: a claim pooled pays its fee once mined, and its job leaves); the upkeep of
 ///   claims already pooled or mined comes after it;
-/// - the second to fourth are background: while they run, the chains' tips are looked at every
+/// - all but the claims to make are background (the upkeep of claims made too): while they run, the chains' tips are looked at every
 ///   [`MOVE_CHECK`], and a move ends the round, the next starting at once. So background
 ///   work keeps a buyer whose payment was just mined or anchored waiting one job's work
 ///   at most, however long it is.
@@ -3405,13 +3405,13 @@ fn round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: &Limits) 
             }
         }
     }
-    // Classes 0 to 2 are the work something new on the chains asks for; the rest is
-    // background. While it runs, the chains' tips are looked at every
+    // Classes 0 and 1 are the claims something new on the chains asks for; the rest,
+    // the upkeep of claims made included, is background. While it runs, the chains' tips are looked at every
     // [`MOVE_CHECK`]: once either moves, the round ends, and the next one starts at
     // once, with whatever the move brings first. So background work (retries at new
     // floors, first tries, the per-block tick) never keeps a buyer whose payment was
     // just mined or anchored waiting longer than one job's work and one check.
-    let urgent = due.iter().filter(|x| x.0 <= 2).count();
+    let urgent = due.iter().filter(|x| x.0 <= 1).count();
     let mut checked = Instant::now();
     let mut moved = false;
     let mut worked = 0;

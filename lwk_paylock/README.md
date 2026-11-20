@@ -329,8 +329,9 @@ order:
 
 Within each, the jobs take turns by receiving script, least recently worked
 first (in the third, the claims that clear by the most first: to go ahead of
-another, a claim must pay more, and then it lands and its job leaves). The first
-is the work something new on the chains asks for; the rest is background,
+another, a claim must pay more, and then it lands and its job leaves). The claims
+something new on the chains asks for come first; the rest, the upkeep of claims
+already made included, is background,
 and while it runs the service looks at both chains' tips every 200 ms: once
 either moves, the round ends and the next one starts at once, so retries after
 a change of floors, first tries and the per-block tick keep a buyer whose payment
