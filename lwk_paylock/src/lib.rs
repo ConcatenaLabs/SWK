@@ -485,10 +485,15 @@ pub struct Candidate {
 /// candidate whose lightest proof is at least `proof` bytes is passed over with it.
 ///
 /// It is tried again only once what refused it can have changed ([`Passed::retry_due`]):
-/// the node's floors read differently in any way from the reading each tier was refused
-/// at ([`Refusal::due`]), or an asset no tier could pay in became accepted. No arithmetic
-/// on the refusal's figures decides it. A block arriving changes neither, so it never
-/// brings a candidate back; a reorganization of either chain clears every one.
+/// for a tier refused for its fee rate, the node's floors read differently in any way from
+/// the reading it was refused at; for a tier refused because the node's mempool was full,
+/// that too, or a Sequentia block mined since, which frees room ([`Refusal::due`]); or an
+/// asset no tier could pay in became accepted. No arithmetic on the refusal's figures
+/// decides it. A block arriving changes no floor, so it never brings back a candidate
+/// refused for its fee rate alone; a reorganization of either chain clears every one, and
+/// so does one of Sequentia that the service did not see (it was stopped): `seq`, the
+/// Sequentia block the candidate was passed over at, is checked against the node's best
+/// chain when the service starts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Passed {
     /// The candidate.
@@ -499,6 +504,10 @@ pub struct Passed {
     pub why: String,
     /// Bitcoin's tip when it was passed over.
     pub tip: u32,
+    /// Sequentia's tip when it was passed over, by its block's hash; `None` when it could
+    /// not be read. A candidate whose block is no longer on the node's best chain when the
+    /// service starts, or that has none, is tried again.
+    pub seq: Option<String>,
     /// What brings it back.
     pub retry: Retry,
 }
@@ -506,12 +515,12 @@ pub struct Passed {
 /// What brings a candidate passed over back ([`Passed`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Retry {
-    /// Refused for the claim's fee rate at the tiers of `refused`, and not tried in the
-    /// assets of `untried` (the node did not accept them): tried again once the floors read
-    /// differently from the reading one of the first was refused at ([`Refusal::due`]), or
-    /// one of the second is accepted.
+    /// Refused for the claim's fee rate, or for want of room in the node's mempool, at the
+    /// tiers of `refused`, and not tried in the assets of `untried` (the node did not accept
+    /// them): tried again once one of the first is due ([`Refusal::due`]), or one of the
+    /// second is accepted.
     Floor {
-        /// The refusal of each tier refused for its fee rate.
+        /// The refusal of each tier refused for its fee rate or for want of room.
         refused: Vec<Refusal>,
         /// The claims' fee assets the node did not accept.
         untried: Vec<AssetId>,
@@ -523,14 +532,22 @@ pub enum Retry {
     Unknown,
 }
 
-/// The node's refusal of one tier's claim for its fee rate, with the node's floors read
-/// around it: `before`, read just before the claim was sent, and `after`, read once it was
-/// refused ([`Floors::reading`]). When the two agree, that is the reading the node refused
-/// the claim at, and the claim is tried again at any reading that differs from it in any
-/// way: the relay floor, the mempool's minimum, the rate of any asset, an asset accepted
-/// or dropped. When they differ, or either could not be read, the reading that refused it
-/// is not known, and the claim is tried again at the next reading; that try's own refusal
-/// then records a reading of its own.
+/// The node's refusal of one tier's claim for its weight, with the node's floors read
+/// around it: `before`, read just before that tier's claim was sent, and `after`, read once
+/// it was refused ([`Floors::reading`]). When the two agree, that is the reading the node
+/// refused the claim at, and the claim is tried again at any reading that differs from it
+/// in any way: the relay floor, the mempool's minimum, the rate of any asset, an asset
+/// accepted or dropped. When they differ, or either could not be read, the reading that
+/// refused it is not known, and the claim is tried again at the next reading; that try's
+/// own refusal then records a reading of its own.
+///
+/// A refusal for want of room (`mempool full`, [`refused_for_capacity`]) depends on what
+/// else the mempool holds, not on the floors, so `capacity` also brings it back once a
+/// Sequentia block is mined, which takes transactions out of the mempool: at the first
+/// block after the refusal, then after a backoff of 2 and then
+/// [`CAPACITY_BACKOFF_MAX`] blocks while the mempool stays full. What that costs is bounded
+/// by what fills a mempool: transactions paying at least the floor, which the node mines
+/// and their senders pay for, so it is never free to keep a node full.
 ///
 /// The claim's signed fee (`atoms` of `asset`), the node's figures (`paid`, what it said
 /// the fee was worth, rounded down; `need`, what it asked) and the floors (`relay`,
@@ -557,6 +574,40 @@ pub struct Refusal {
     pub before: String,
     /// The floors read once the node refused the claim; empty when they could not be read.
     pub after: String,
+    /// For a refusal for want of room, when it is tried again by the blocks mined; `None`
+    /// for a refusal for the claim's fee rate.
+    pub capacity: Option<Capacity>,
+}
+
+/// When a claim refused for want of room in the node's mempool is tried again by the
+/// Sequentia blocks mined since ([`Refusal`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capacity {
+    /// Sequentia's height when the node refused it (0 when not known: tried again at the
+    /// first floors read).
+    pub at: u32,
+    /// How many times in a row this tier was refused for want of room, this one included.
+    pub tries: u32,
+}
+
+/// The most Sequentia blocks a claim refused for want of room waits before it is tried
+/// again ([`Capacity::wait`]).
+pub const CAPACITY_BACKOFF_MAX: u32 = 4;
+
+impl Capacity {
+    /// How many Sequentia blocks after `at` the claim is tried again: 1 after its first
+    /// such refusal, then 2, then [`CAPACITY_BACKOFF_MAX`].
+    pub fn wait(&self) -> u32 {
+        (1u32 << self.tries.saturating_sub(1).min(2)).min(CAPACITY_BACKOFF_MAX)
+    }
+}
+
+/// Whether the node refused a claim for want of room in its mempool (`mempool full`): the
+/// claim was taken, then evicted as the lowest paying while the mempool was over its size.
+/// It depends on what else the mempool holds, which a block mined changes, more than on
+/// the floors.
+pub fn refused_for_capacity(message: &str) -> bool {
+    message.contains("mempool full")
 }
 
 /// What `atoms` of an asset are worth to a node at `rate`: `atoms × rate / 10^8`, rounded
@@ -595,7 +646,18 @@ impl Refusal {
             rate,
             before: before.reading().unwrap_or_default(),
             after: after.and_then(Floors::reading).unwrap_or_default(),
+            capacity: refused_for_capacity(message).then_some(Capacity { at: 0, tries: 1 }),
         }
+    }
+
+    /// The same refusal, made at Sequentia height `at`, the `tries`th in a row for want of
+    /// room when it was one ([`Capacity`]); a refusal for the fee rate is left as it is.
+    pub fn made_at(mut self, at: u32, tries: u32) -> Refusal {
+        if let Some(c) = self.capacity.as_mut() {
+            c.at = at;
+            c.tries = tries.max(1);
+        }
+        self
     }
 
     /// The reading of the floors the node refused the claim at: the one both reads agree
@@ -604,17 +666,25 @@ impl Refusal {
         (!self.before.is_empty() && self.before == self.after).then_some(self.before.as_str())
     }
 
-    /// Whether the claim this refusal was for is tried again at `floors`: they were read,
-    /// the node accepts the asset, and they read differently in any way from the reading
-    /// the claim was refused at, or that reading is not known ([`Refusal::refused_at`]).
-    /// Never at the very reading that refused it, so a claim is sent at most once for each
-    /// change of the floors, and never in a loop.
-    pub fn due(&self, floors: &Floors) -> bool {
+    /// Whether the claim this refusal was for is tried again at `floors`, with Sequentia's
+    /// tip at height `seq_tip`: they were read, the node accepts the asset, and they read
+    /// differently in any way from the reading the claim was refused at, or that reading is
+    /// not known ([`Refusal::refused_at`]); or, refused for want of room, enough Sequentia
+    /// blocks were mined since ([`Capacity::wait`]), whatever the floors. A refusal for the
+    /// fee rate is never tried at the very reading that refused it, so it is sent at most
+    /// once for each change of the floors; one for want of room, at most once more for each
+    /// block, fewer while the mempool stays full. Never in a loop.
+    pub fn due(&self, floors: &Floors, seq_tip: u32) -> bool {
         let Some(now) = floors.reading() else {
             return false;
         };
         if !floors.accepts(&self.asset) {
             return false;
+        }
+        if let Some(c) = &self.capacity {
+            if seq_tip >= c.at.saturating_add(c.wait()) {
+                return true;
+            }
         }
         self.refused_at() != Some(now.as_str())
     }
@@ -653,24 +723,26 @@ impl Refusal {
 }
 
 impl Passed {
-    /// Whether it is tried again at `floors`: what refused it can have changed.
-    pub fn retry_due(&self, floors: &Floors) -> bool {
+    /// Whether it is tried again at `floors`, with Sequentia's tip at height `seq_tip`:
+    /// what refused it can have changed.
+    pub fn retry_due(&self, floors: &Floors, seq_tip: u32) -> bool {
         match &self.retry {
             Retry::Never => false,
             Retry::Unknown => true,
             Retry::Floor { refused, untried } => {
-                refused.iter().any(|r| r.due(floors)) || untried.iter().any(|a| floors.accepts(a))
+                refused.iter().any(|r| r.due(floors, seq_tip))
+                    || untried.iter().any(|a| floors.accepts(a))
             }
         }
     }
 
     /// How far its best refusal tried again at `floors` clears the node's ask there
     /// ([`Refusal::margin`]); 0 when none tells.
-    pub fn margin(&self, floors: &Floors) -> f64 {
+    pub fn margin(&self, floors: &Floors, seq_tip: u32) -> f64 {
         match &self.retry {
             Retry::Floor { refused, .. } => refused
                 .iter()
-                .filter(|r| r.due(floors))
+                .filter(|r| r.due(floors, seq_tip))
                 .map(|r| r.margin(floors))
                 .fold(0.0, f64::max),
             _ => 0.0,

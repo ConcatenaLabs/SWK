@@ -300,6 +300,8 @@ struct Seq {
     /// Once this many claims are refused in all, the fee asset's rate becomes the second
     /// figure: a rate that moves between a refusal and the read after it.
     rate_after: Option<(usize, u64)>,
+    /// More such changes, in order: once that many claims are refused in all, the rate.
+    rates_after: Vec<(usize, u64)>,
     /// Refuses as `mempool full` every claim paying at least this many atoms (0: none).
     full_from: u64,
     /// Another accepted fee asset's rate, reported beside the fee asset's (0: none).
@@ -320,15 +322,24 @@ fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
             "getbestblockhash" => Ok(json!(hash(s.anchors.len() as u64 - 1, s.generation))),
             "getblockhash" => Ok(json!(hash(p[0].as_u64().unwrap(), s.generation))),
             "getblockheader" => {
-                let h = ((u64::from_str_radix(p[0].as_str().unwrap(), 16).unwrap() - 0x5e9_0000)
-                    & 0xffff_ffff) as usize;
+                let n = u64::from_str_radix(p[0].as_str().unwrap(), 16).unwrap() - 0x5e9_0000;
+                let h = (n & 0xffff_ffff) as usize;
+                // A block of another generation, or above the tip, is not on the best chain.
+                let confirmations = if n >> 32 == s.generation && h < s.anchors.len() {
+                    (s.anchors.len() - h) as i64
+                } else {
+                    -1
+                };
+                if h >= s.anchors.len() {
+                    return Err((-5, "Block not found".into()));
+                }
                 let a = s.anchors[h];
                 let b = btc.lock().unwrap();
                 let anchor = b.branches[b.node][(a - BASE) as usize]
                     .block_hash()
                     .to_string();
                 Ok(
-                    json!({"height": h, "confirmations": 1, "anchorheight": a, "anchorhash": anchor}),
+                    json!({"height": h, "confirmations": confirmations, "anchorheight": a, "anchorhash": anchor}),
                 )
             }
             "getrawtransaction" if p[0].as_str() == Some(&lock_id) => Ok(
@@ -403,6 +414,13 @@ fn fake_seq(state: Arc<Mutex<Seq>>, btc: Arc<Mutex<Btc>>) -> String {
                             s.rate = r;
                             s.rate_after = None;
                         }
+                    }
+                    while let Some(&(n, r)) = s.rates_after.first() {
+                        if s.refused.len() < n {
+                            break;
+                        }
+                        s.rate = r;
+                        s.rates_after.remove(0);
                     }
                     return Err((-26, m));
                 }
@@ -519,6 +537,7 @@ fn world(
         refused: vec![],
         first_pooled: None,
         rate_after: None,
+        rates_after: vec![],
         full_from: 0,
         other_rate: 0,
         tick_delay: Duration::ZERO,
@@ -1750,6 +1769,7 @@ fn seq_like(s: &Seq) -> Seq {
         refused: vec![],
         first_pooled: None,
         rate_after: None,
+        rates_after: vec![],
         full_from: 0,
         other_rate: 0,
         tick_delay: Duration::ZERO,
@@ -1937,7 +1957,7 @@ fn until_pooled(w: &World, j: &mut Job, n: usize) -> usize {
     w.seq.lock().unwrap().refused.len() - before
 }
 
-/// KR117's race. The fee asset's rate is 1 when the claims are sent (each refused, its
+/// The before/after race. The fee asset's rate is 1 when the claims are sent (each refused, its
 /// fee read as worth 0), and back to 1:1 a moment later, when the service reads the floors
 /// again. The reading that refused the claims is not known, so they are tried again at the
 /// next reading, which is the later one, and land. A record that took the later read as
@@ -2031,7 +2051,7 @@ fn a_refused_claim_comes_back_at_any_change_of_the_floors() {
     }
 }
 
-/// The prover's round-10 low. The going tier is refused with figures, the top tier
+/// A tier refused without figures. The going tier is refused with figures, the top tier
 /// `mempool full`, without. Each tier keeps its own record, so when the mempool clears
 /// and the rate rises enough for the top tier but not the going one, the claim is tried
 /// again and lands at the top tier. Judged by the going tier's record alone it would wait
@@ -2094,7 +2114,7 @@ fn a_sequentia_reorganization_brings_a_refused_claim_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The prover's round-10 low: retries starved by intake. 300 jobs are changed by intake
+/// Retries starved by intake. 300 jobs are changed by intake
 /// all through the round (new cancels posted to each, as a flood does), and each takes the
 /// node 40 ms to work, 12 s in all, past the round's 10 s. The fee asset's rate is back
 /// after refusing the buyer's claim. Retries and intake take turns, a retry first, so the
@@ -2170,4 +2190,224 @@ fn a_refused_buyer_is_retried_within_a_round_of_an_intake_flood() {
         "the refused buyer was not retried in the round after the floors changed"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Sequentia block on top of the tip, anchoring the same Bitcoin block.
+fn seq_block(w: &World) {
+    let mut s = w.seq.lock().unwrap();
+    let a = *s.anchors.last().unwrap();
+    s.anchors.push(a);
+}
+
+/// A refusal for want of room. Both tiers are refused `mempool full`, a refusal for want of room,
+/// which depends on what else the mempool holds and not on the floors. While the mempool
+/// stays full, the claim is tried again at the next Sequentia block, then after 2 blocks,
+/// then every 4 ([`lwk_paylock::CAPACITY_BACKOFF_MAX`]), never at the same block. Once the
+/// mempool has room, with the floors read exactly as before, a block brings the claim back
+/// within that backoff, and it lands. Judged by the floors alone it would never come back.
+#[test]
+fn a_claim_refused_for_want_of_room_is_tried_again_as_blocks_are_mined() {
+    let (w, mut j, buyer) = buyer_world();
+    let refused = |w: &World| w.seq.lock().unwrap().refused.len();
+    w.seq.lock().unwrap().full = true;
+    let _ = tick(&w, &mut j);
+    assert_eq!(refused(&w), 2, "both tiers refused");
+    // No block: not tried again, however often the job is worked.
+    for _ in 0..3 {
+        let _ = tick(&w, &mut j);
+    }
+    assert_eq!(refused(&w), 2, "tried again with no block mined");
+    // Blocks while the mempool stays full: tried at the 1st, then the 3rd, then every 4th.
+    let mut tried_at = vec![];
+    for b in 1..=11u32 {
+        let before = refused(&w);
+        seq_block(&w);
+        let _ = tick(&w, &mut j);
+        let _ = tick(&w, &mut j);
+        if refused(&w) > before {
+            tried_at.push(b);
+        }
+    }
+    eprintln!("mempool full: tried again at blocks {tried_at:?}");
+    assert_eq!(tried_at, vec![1, 3, 7, 11]);
+    // The mempool clears, the floors read as before.
+    w.seq.lock().unwrap().full = false;
+    let mut blocks = 0;
+    while proven(&w.seq).is_none() && blocks < 8 {
+        seq_block(&w);
+        blocks += 1;
+        let _ = tick(&w, &mut j);
+    }
+    let v = j.public_json();
+    eprintln!(
+        "room again at unchanged floors: pooled after {blocks} block(s); {}",
+        v["note"]
+    );
+    assert_eq!(proven(&w.seq), Some(id(&buyer)), "{}", v["note"]);
+    assert!(
+        blocks <= lwk_paylock::CAPACITY_BACKOFF_MAX as usize,
+        "{blocks}"
+    );
+}
+
+/// A reorganization while stopped. The service is stopped with a claim passed over, and while it is
+/// down Sequentia reorganizes (its tip rebuilt at the same height), the floors read as
+/// before and no block added. No round saw the reorganization, so the first round after
+/// the start checks the Sequentia block each candidate was passed over at against the
+/// node's best chain: gone, the candidate is tried again, and the buyer lands. Started
+/// again without a reorganization, nothing is tried again.
+#[test]
+fn a_sequentia_reorganization_while_the_service_is_stopped_brings_a_refused_claim_back() {
+    let (w, j, buyer) = buyer_world();
+    let (store, dir, limits) = store("offline-reorg");
+    store.lock().unwrap().add(j, &limits).unwrap();
+    let refused = |w: &World| w.seq.lock().unwrap().refused.len();
+    let passed = |st: &Mutex<Store>| {
+        st.lock()
+            .unwrap()
+            .jobs
+            .values()
+            .map(|j| j.scan.passed.len())
+            .sum::<usize>()
+    };
+    w.seq.lock().unwrap().full = true;
+    for _ in 0..3 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    }
+    let n = refused(&w);
+    assert_eq!(n, 2, "both tiers refused once");
+    assert_eq!(passed(&store), 1);
+    // Stopped. The mempool has room again; the floors and the tip are as they were.
+    drop(store);
+    w.seq.lock().unwrap().full = false;
+    let store = Mutex::new(Store::open(&dir).unwrap());
+    for _ in 0..2 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    }
+    assert_eq!(refused(&w), n, "tried again with nothing changed");
+    assert_eq!(passed(&store), 1);
+    assert!(proven(&w.seq).is_none());
+    // Stopped again; Sequentia reorganizes meanwhile.
+    drop(store);
+    w.seq.lock().unwrap().generation += 1;
+    let store = Mutex::new(Store::open(&dir).unwrap());
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    eprintln!(
+        "offline Sequentia reorganization: refusals {n} -> {}, passed {}",
+        refused(&w),
+        passed(&store)
+    );
+    assert_eq!(
+        proven(&w.seq),
+        Some(id(&buyer)),
+        "not tried again after a reorganization while stopped"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// First tries under the floor. An attacker posts 300 jobs on scripts of their own, pays them all in
+/// one transaction and prices every claim under the floor: once that payment is mined and
+/// anchored, each is a claim to make, and each takes the node 40 ms to work, 12 s in all,
+/// past the round's 10 s. A buyer refused before is due again in that same round (the
+/// fee asset's rate is back). The attacker's first tries take turns with retries, a retry
+/// first, so the buyer's claim is pooled in that round, in its first turns.
+#[test]
+fn a_refused_buyer_is_retried_within_a_round_of_first_tries_under_the_floor() {
+    const N: u32 = 300;
+    let (w, j, buyer) = buyer_world();
+    let tip = 1_003;
+    let (store, dir, limits) = store("first-try-flood");
+    store.lock().unwrap().add(j, &limits).unwrap();
+    w.seq.lock().unwrap().rate = 1;
+    for _ in 0..4 {
+        service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    }
+    assert!(proven(&w.seq).is_none());
+    let refused_buyer = w.seq.lock().unwrap().refused.len();
+    assert!(refused_buyer >= 2);
+    let att: Vec<PayLockTerms> = (0..N).map(|n| terms_n(BASE, tip + 7, n)).collect();
+    let mut pay = payment(&att[0], 200, 0);
+    pay.output = att
+        .iter()
+        .map(|t| bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(t.price_sat),
+            script_pubkey: t.receive_script_pubkey(),
+        })
+        .collect();
+    {
+        let mut st = store.lock().unwrap();
+        let mut s = w.seq.lock().unwrap();
+        for (n, t) in att.iter().enumerate() {
+            let lock = lock_tx(t);
+            s.locks.insert(lock.txid().to_string(), lock.clone());
+            let op = OutPoint::new(lock.txid(), 0);
+            let c = paylock::sign_claim(
+                t,
+                op,
+                Script::from(vec![0x51]),
+                1,
+                BlockHash::all_zeros(),
+                &key(1),
+            )
+            .unwrap();
+            let mut j = Job::from_request(&json!({"terms": t.to_json(),
+                "lock": format!("{}:0", op.txid), "claims": [hex_encode(&serialize(&c))]}))
+            .unwrap();
+            j.client = format!("100.64.{}.{}", n / 250, n % 250);
+            st.add(j, &limits).unwrap();
+        }
+    }
+    mine(&w, 140, &[pay]);
+    {
+        let mut s = w.seq.lock().unwrap();
+        s.rate = 100_000_000;
+        s.tick_delay = Duration::from_millis(40);
+    }
+    let start = Instant::now();
+    service::work_round(&store, &w.seq_chain, &w.btc_chain, &limits);
+    let took = start.elapsed();
+    let s = w.seq.lock().unwrap();
+    let attacker_refused = s.refused.len() - refused_buyer;
+    eprintln!(
+        "{N} first tries under the floor: round {took:?}, {attacker_refused} attacker claims refused, buyer pooled after {:?}",
+        s.first_pooled.map(|t| t - start)
+    );
+    drop(s);
+    assert_eq!(
+        proven(&w.seq),
+        Some(id(&buyer)),
+        "the refused buyer was not retried in the round of the attacker's first tries"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Each tier's own floor reads. The fee asset's rate is 1,000,000: the going
+/// tier (1,000 atoms) is refused and the top tier (50,000) would land. The rate drops to 1
+/// as the going tier is refused, so the top tier is sent at 1 and refused, and is back at
+/// 1,000,000 as the top tier is refused. Read once before the first tier and once after
+/// the last, the floors agree, and both tiers would wait for a change that never comes.
+/// Each tier keeps the reads around its own send, which disagree, so the claim is tried
+/// again at the next reading and the top tier lands.
+#[test]
+fn each_tier_keeps_the_floors_read_around_its_own_send() {
+    let (w, mut j, buyer) = buyer_world();
+    {
+        let mut s = w.seq.lock().unwrap();
+        s.rate = 1_000_000;
+        s.rates_after = vec![(1, 1), (2, 1_000_000)];
+    }
+    let _ = tick(&w, &mut j);
+    let refused = w.seq.lock().unwrap().refused.clone();
+    eprintln!("refused {refused:?}");
+    assert_eq!(refused.len(), 2, "{refused:?}");
+    assert_eq!(w.seq.lock().unwrap().rate, 1_000_000);
+    until_pooled(&w, &mut j, 3);
+    let v = j.public_json();
+    eprintln!("then: {}", v["note"]);
+    assert_eq!(proven(&w.seq), Some(id(&buyer)), "{}", v["note"]);
+    assert!(
+        v["note"].as_str().unwrap().contains("top tier"),
+        "{}",
+        v["note"]
+    );
 }

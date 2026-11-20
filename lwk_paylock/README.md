@@ -154,23 +154,34 @@ the only refusals that depend on which payment the claim proves) moves to the
 next tier; refused at every tier, the candidate is passed over, with every one
 whose proof would be as heavy, and the next is tried in the same round. A
 candidate is passed over only for that, and comes back only once what refused
-it can have changed. Each tier's refusal keeps the node's floors as read just
-before the claim was sent and again once it was refused: the relay floor (the
-higher of the mempool's minimum and the relay minimum) and every accepted fee
-asset with its rate. When the two reads agree, that is the reading the claim was
+it can have changed. Each tier's refusal keeps the node's floors as read before
+that tier's claim was sent (for the first tier just before it, for each later one
+once the tier before it was refused) and again once it was refused: the relay
+floor (the higher of the mempool's minimum and the relay minimum) and every
+accepted fee asset with its rate. When the two reads agree, that is the reading the claim was
 refused at, and the candidate comes back as soon as a read differs from it in any
 way: a floor up or down, any asset's rate, an asset accepted or dropped. When they
 differ, or one could not be made, the reading that refused it is not known, and the
 candidate comes back at the next read; that try's refusal records a reading of its
 own. No arithmetic on the refusal's figures decides a retry (they only order the
 retries), and a claim is never tried again at the very reading that refused it,
-so it costs at most one try for each change of the floors. It also comes back
-once an asset the node did not accept, in which a tier is signed, is accepted. A
-claim refused for its size at every tier never comes back. A block arriving
-changes none of this, so it brings nothing back. When no tier is in an asset
+when that reading is known, so it costs at most one try for each change of the
+floors. A tier refused for want of room (`mempool full`) depends on what else the
+mempool holds, not on the floors, so it also comes back as Sequentia blocks are
+mined, whatever the floors read: at the first block after the refusal, then after
+2 blocks, then every 4 while the mempool stays full. That is at most one try a
+block for each such tier, and only while a node is full, which takes transactions
+paying its floor, mined and paid for. It also comes back once an asset the node
+did not accept, in which a tier is signed, is accepted. A claim refused for its
+size at every tier never comes back. A block arriving changes no floor, so it
+brings back nothing refused for its fee rate alone. When no tier is in an asset
 the node accepts, every candidate is passed over until one is. A reorganization
 of either chain (of Bitcoin below the scan's place, or a Sequentia block replaced
-at a height already seen) drops everything passed over. Anything else that keeps a
+at a height already seen) drops everything passed over. So does one while the
+service is stopped: each candidate passed over keeps the Sequentia block it was
+passed over at, and the first round after a start tries again every one whose
+block is no longer on the node's best chain or is not known (with more than 1,000
+blocks to look up, every one, once). Anything else that keeps a
 claim from being made waits on the chain and never passes a payment over: no
 Sequentia block anchored at the payment yet, the Bitcoin daemon and the node's
 anchors not agreeing (or the daemon switching branches between reading a block
@@ -311,41 +322,44 @@ claims on many payments in one block cost one read of it, not one each. The node
 A job is worked only when something it waits on can have changed, in this
 order:
 
-1. something new on the chains concerns it. First the jobs a claim must be made
-   for: a Bitcoin block pays its receiving script or spends its payments' coins;
-   a Sequentia block anchors a candidate not passed over; its claim is gone from
-   the mempool. Jobs whose claims are worth less than the node's floor asks for
-   the lightest proof their payment can make (read from the blocks already held,
-   so before they are first tried) take their turns after the others here. Then
-   the jobs whose claim is made: pooled by someone, left out of a block (to raise
-   it), or mined. The tips are told apart by their blocks' hashes, so a block
+1. something new on the chains concerns it and a claim must be made for it,
+   worth at least what the node's floor asks for the lightest proof its payment
+   can make (read from the blocks already held, so before it is first tried): a
+   Bitcoin block pays its receiving script or spends its payments' coins; a
+   Sequentia block anchors a candidate not passed over; its claim is gone from
+   the mempool. The tips are told apart by their blocks' hashes, so a block
    rebuilt at the same height counts;
-2. intake changed it since it was last worked;
-3. a candidate it passed over is due again (the floors read differently from
-   the reading a tier was refused at, or an asset became accepted), the claims
-   that clear the ask by the most first. These and the jobs of 2 take turns, one
-   of these first, so however much intake there is (a flood of new cancels, say),
-   a refused claim is tried again in the first background turns of the round
-   after the floors change; then a job whose last round failed, once its backoff
-   is over, fewest failures first;
-4. the rest, once per Bitcoin block, for the deadline and the state a read
+2. its claim is made and something new concerns it: pooled by someone, left out
+   of a block (to raise it), or mined;
+3. three kinds of work taking turns, one of each in this order: a candidate it
+   passed over is due again (the floors read differently from the reading a tier
+   was refused at, a block mined after a tier was refused for want of room, or an
+   asset became accepted), the claims that clear the ask by the most first; a
+   claim to make as in 1 whose claims are all worth less than the floor asks;
+   intake changed it since it was last worked. So however many jobs an attacker
+   pays under the floor, or floods with intake (new cancels, say), a refused
+   claim is tried again in the first background turns of the round after what
+   refused it changes;
+4. a job whose last round failed, once its backoff is over, fewest failures
+   first;
+5. the rest, once per Bitcoin block, for the deadline and the state a read
    shows, and a job holding a payment or cancel the daemon cannot check yet,
    whenever a chain moves and at least every ten seconds.
 
 Within each, the jobs take turns by receiving script, least recently worked
-first (in the third, the claims that clear by the most first: to go ahead of
-another, a claim must pay more, and then it lands and its job leaves). The claims
-something new on the chains asks for come first; the rest, the upkeep of claims
-already made included, is background,
+first (among the retries of the third, the claims that clear by the most first:
+to go ahead of another, a claim must pay more, and then it lands and its job
+leaves). The claims of 1 come first; the rest, the upkeep of claims already made
+and the claims under the floor included, is background,
 and while it runs the service looks at both chains' tips every 200 ms: once
-either moves, the round ends and the next one starts at once, so retries after
-a change of floors, first tries and the per-block tick keep a buyer whose payment
+either moves, the round ends and the next one starts at once, so retries, first
+tries under the floor and the per-block tick keep a buyer whose payment
 was just mined or anchored waiting for one job's work at most. A candidate
-passed over is never tried again merely because a block arrived, so a job whose claims cannot land (priced under the floor, in assets the
+refused for its fee rate is never tried again merely because a block arrived, so a job whose claims cannot land (priced under the floor, in assets the
 node does not accept) is tried once and then costs a lookup a round, however many
 there are and on however many scripts. A buyer whose payment is mined is worked
 in the first turns of the round after a Sequentia block anchors it, behind only
-the jobs that a claim must be made for in that round, each of which cost whoever
+the jobs of 1 in that round, each of which cost whoever
 made it an output in a new Bitcoin block or a claim the node takes (a claim
 pooled pays its fee once mined, and its job leaves); the upkeep of claims already
 pooled or mined comes after it.

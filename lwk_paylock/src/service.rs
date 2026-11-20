@@ -106,8 +106,8 @@ use serde_json::{json, Value};
 pub use crate::CANCEL_KEEP_BLOCKS;
 use crate::{
     http, outpoint, prove_claim, proven_payment, refused_for_weight, script_key, Accept, Advance,
-    BlockCache, BtcChain, Candidate, Completion, Error, Floors, Found, Passed, PaymentScan,
-    Refusal, Retry, SeqChain, Settled, TxStatus,
+    BlockCache, BtcChain, Candidate, Capacity, Completion, Error, Floors, Found, Passed,
+    PaymentScan, Refusal, Retry, SeqChain, Settled, TxStatus,
 };
 
 /// How often a lock the node did not know is looked up again, in seconds.
@@ -715,7 +715,9 @@ fn retry_json(r: &Retry) -> Value {
             "kind": "floor",
             "refused": refused.iter().map(|r| json!({"asset": r.asset.to_string(), "atoms": r.atoms,
                 "paid": r.paid, "need": r.need, "relay": r.relay, "rate": r.rate,
-                "before": r.before, "after": r.after})).collect::<Vec<_>>(),
+                "before": r.before, "after": r.after,
+                "capacity": r.capacity.as_ref().map(|c| json!({"at": c.at, "tries": c.tries}))}))
+                .collect::<Vec<_>>(),
             "untried": untried.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
         }),
     }
@@ -739,7 +741,16 @@ fn retry_from(v: Option<&Value>) -> Retry {
                     let t = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
                     // A record without the floors read around it (written before they were
                     // kept) does not say what refused it: tried again at the first floors
-                    // read.
+                    // read. One for want of room without its height is due at the first.
+                    let capacity = match r.get("capacity") {
+                        Some(c) if !c.is_null() => Some(Capacity {
+                            at: c.get("at").and_then(Value::as_u64).unwrap_or(0) as u32,
+                            tries: c.get("tries").and_then(Value::as_u64).unwrap_or(1) as u32,
+                        }),
+                        // Stored before refusals were told apart by cause: one without
+                        // figures may have been for want of room.
+                        _ => (n("need") == 0).then_some(Capacity { at: 0, tries: 1 }),
+                    };
                     Some(Refusal {
                         asset: r.get("asset")?.as_str()?.parse().ok()?,
                         atoms: n("atoms"),
@@ -749,6 +760,7 @@ fn retry_from(v: Option<&Value>) -> Retry {
                         rate: n("rate"),
                         before: t("before"),
                         after: t("after"),
+                        capacity,
                     })
                 })
                 .collect(),
@@ -1199,7 +1211,8 @@ impl Job {
             .iter()
             .map(
                 |p| json!({"height": p.at.height, "block": p.at.block, "txid": p.at.txid,
-                "proof": p.proof, "why": p.why, "tip": p.tip, "retry": retry_json(&p.retry)})
+                "proof": p.proof, "why": p.why, "tip": p.tip, "seq": p.seq,
+                "retry": retry_json(&p.retry)})
             )
             .collect::<Vec<_>>());
         v["lock_known"] = json!(self.lock_known);
@@ -1323,6 +1336,7 @@ impl Job {
                         proof: p.get("proof")?.as_u64()? as usize,
                         why: p.get("why")?.as_str()?.to_string(),
                         tip: p.get("tip")?.as_u64()? as u32,
+                        seq: p.get("seq").and_then(Value::as_str).map(String::from),
                         retry: retry_from(p.get("retry")),
                     })
                 })
@@ -2048,7 +2062,9 @@ enum Landing {
 /// candidate is passed over until one of those assets is accepted. A candidate whose proof
 /// waits on the chain (no anchor at its height yet, the two chains not agreeing, too many
 /// links) is left for a later round and the next one is tried. Any other refusal does not
-/// depend on the payment: it ends the round in error, to be retried.
+/// depend on the payment: it ends the round in error, to be retried. `retried` holds the
+/// candidates passed over that this round tries again, whose records of refusals for want
+/// of room carry their count on ([`Capacity`]).
 fn land(
     seq: &SeqChain,
     btc: &BtcChain,
@@ -2056,6 +2072,7 @@ fn land(
     seq_tip: u32,
     btc_tip: u32,
     until: Instant,
+    retried: &[Passed],
 ) -> Result<Landing, Error> {
     if !job.scan.live() {
         return Ok(Landing::Nothing);
@@ -2080,6 +2097,7 @@ fn land(
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        let at = seq_best(seq);
         for c in job.scan.candidates.clone() {
             if job.scan.is_passed(&c).is_none() {
                 pass_over(
@@ -2087,7 +2105,7 @@ fn land(
                     &c,
                     usize::MAX,
                     why.clone(),
-                    btc_tip,
+                    (btc_tip, at.clone()),
                     Retry::Floor {
                         refused: vec![],
                         untried: tiers.unaccepted.clone(),
@@ -2107,12 +2125,14 @@ fn land(
         }
         let mut heavy: Option<(String, usize)> = None;
         let mut every_tier = true;
-        // Each tier's refusal for the claim's fee rate (the claim's signed fee and the
-        // node's message); a tier refused for its size, which no floor changes, is left out.
-        let mut refused: Vec<(AssetId, u64, String)> = vec![];
-        // The node's floors read just before this candidate's first claim is sent, so the
-        // record of a refusal holds a reading taken around it, not the round's.
-        let mut before: Option<Floors> = None;
+        // Each tier's refusal for its fee rate or for want of room, with the floors read
+        // around that tier's own claim; a tier refused for its size, which no floor
+        // changes, is left out.
+        let mut refused: Vec<Refusal> = vec![];
+        // The node's floors read last: just before the first tier's claim is sent, then
+        // once each tier is refused, which is also the read before the next tier's claim
+        // goes out. Each tier's record so holds the two reads around its own send.
+        let mut last: Option<Floors> = None;
         for &t in &tiers.usable {
             match prove_claim(seq, btc, &job.terms, &job.lock, &job.claims[t], &c.at)? {
                 Completion::Ready {
@@ -2120,21 +2140,25 @@ fn land(
                     height,
                     proof_bytes,
                     ..
-                } => match send_read(seq, &tx, &mut before) {
-                    Ok(_) => {
-                        job.tier = t;
-                        job.pooled_at = Some(seq_tip);
-                        job.state = State::Pooled;
-                        job.decided_at = None;
-                        job.buried = false;
-                        job.scan.found = Some(c.at.clone());
-                        let passed = match job.scan.passed.len() {
+                } => {
+                    let before = last
+                        .take()
+                        .unwrap_or_else(|| seq.floors().unwrap_or_default());
+                    match seq.send(&tx) {
+                        Ok(_) => {
+                            job.tier = t;
+                            job.pooled_at = Some(seq_tip);
+                            job.state = State::Pooled;
+                            job.decided_at = None;
+                            job.buried = false;
+                            job.scan.found = Some(c.at.clone());
+                            let passed = match job.scan.passed.len() {
                             0 => String::new(),
                             n => format!(
                                 "; {n} heavier payment(s) passed over, the node refusing every claim on them"
                             ),
                         };
-                        job.note = format!(
+                            job.note = format!(
                             "the claim ({} tier, fee {}) is pooled with a proof of the payment {} in Bitcoin block {height}{passed}",
                             if is_top(job, t) { "top" } else { "going" },
                             fee_of(&tx)
@@ -2142,22 +2166,41 @@ fn land(
                                 .unwrap_or_default(),
                             c.at.txid,
                         );
-                        return Ok(Landing::Done);
-                    }
-                    Err(e) if refused_for_weight(&e.0) => {
-                        if let (Some((asset, atoms)), false) =
-                            (fee_of(&tx), e.0.contains("tx-size"))
-                        {
-                            refused.push((asset, atoms, e.0.clone()));
+                            return Ok(Landing::Done);
                         }
-                        heavy = Some((e.0, proof_bytes));
+                        Err(e) if refused_for_weight(&e.0) => {
+                            if let (Some((asset, atoms)), false) =
+                                (fee_of(&tx), e.0.contains("tx-size"))
+                            {
+                                let after = seq.floors().ok();
+                                // The refusals for want of room this tier met in a row.
+                                let tries = retried
+                                    .iter()
+                                    .filter(|p| p.at == c.at)
+                                    .filter_map(|p| match &p.retry {
+                                        Retry::Floor { refused, .. } => Some(refused),
+                                        _ => None,
+                                    })
+                                    .flatten()
+                                    .filter(|r| r.asset == asset && r.atoms == atoms)
+                                    .filter_map(|r| r.capacity.as_ref().map(|c| c.tries))
+                                    .max()
+                                    .unwrap_or(0);
+                                refused.push(
+                                    Refusal::new(asset, atoms, &e.0, &before, after.as_ref())
+                                        .made_at(seq_tip, tries + 1),
+                                );
+                                last = after;
+                            }
+                            heavy = Some((e.0, proof_bytes));
+                        }
+                        Err(e) => {
+                            job.state = State::Waiting;
+                            job.note = format!("the node refused the completed claim: {e}");
+                            return Err(Error(job.note.clone()));
+                        }
                     }
-                    Err(e) => {
-                        job.state = State::Waiting;
-                        job.note = format!("the node refused the completed claim: {e}");
-                        return Err(Error(job.note.clone()));
-                    }
-                },
+                }
                 Completion::Waiting(why) => {
                     waiting.get_or_insert(why);
                     every_tier = false;
@@ -2167,25 +2210,13 @@ fn land(
                     // No proof can carry it: this candidate alone, never a heavier one, and
                     // for good (short of a reorganization).
                     every_tier = false;
-                    pass_over(job, &c, usize::MAX, why, btc_tip, Retry::Never);
+                    let at = seq_best(seq);
+                    pass_over(job, &c, usize::MAX, why, (btc_tip, at), Retry::Never);
                     break;
                 }
             }
         }
         if let Some((why, proof)) = heavy.filter(|_| every_tier) {
-            // The floors read again now: each tier's record holds both reads, so a floor
-            // that moved while the claims were sent leaves the reading that refused them
-            // unknown, and they are tried again at the next one.
-            let after = if refused.is_empty() {
-                None
-            } else {
-                seq.floors().ok()
-            };
-            let before = before.unwrap_or_default();
-            let refused: Vec<Refusal> = refused
-                .iter()
-                .map(|(asset, atoms, m)| Refusal::new(*asset, *atoms, m, &before, after.as_ref()))
-                .collect();
             let retry = if refused.is_empty() && tiers.unaccepted.is_empty() {
                 // Refused for its size at every tier: no floor brings it back.
                 Retry::Never
@@ -2195,7 +2226,8 @@ fn land(
                     untried: tiers.unaccepted.clone(),
                 }
             };
-            pass_over(job, &c, proof, why, btc_tip, retry);
+            let at = seq_best(seq);
+            pass_over(job, &c, proof, why, (btc_tip, at), retry);
         }
     }
     Ok(match waiting {
@@ -2204,22 +2236,27 @@ fn land(
     })
 }
 
-/// Sends `tx`, reading the node's floors into `before` first if they are not read yet: the
-/// reading taken just before a candidate's first claim goes out ([`Refusal`]).
-fn send_read(
-    seq: &SeqChain,
-    tx: &Transaction,
-    before: &mut Option<Floors>,
-) -> Result<lwk_wollet::elements::Txid, Error> {
-    if before.is_none() {
-        *before = Some(seq.floors().unwrap_or_default());
-    }
-    seq.send(tx)
+/// Sequentia's best block by its hash, read once a candidate is refused: the block the
+/// refusals came at, or one built on it, so a reorganization that replaces the first
+/// replaces the one recorded ([`Passed::seq`]). `None` when the node does not answer.
+fn seq_best(seq: &SeqChain) -> Option<String> {
+    seq.rpc
+        .call("getbestblockhash", json!([]))
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
 }
 
-/// Passes candidate `c` over (see [`Passed`]). The payment a claim was accepted on is no
-/// longer known once its claim is refused at every tier: it withholds no cancel.
-fn pass_over(job: &mut Job, c: &Candidate, proof: usize, why: String, tip: u32, retry: Retry) {
+/// Passes candidate `c` over (see [`Passed`]) at `tips`: Bitcoin's height and Sequentia's
+/// best block. The payment a claim was accepted on is no longer known once its claim is
+/// refused at every tier: it withholds no cancel.
+fn pass_over(
+    job: &mut Job,
+    c: &Candidate,
+    proof: usize,
+    why: String,
+    tips: (u32, Option<String>),
+    retry: Retry,
+) {
     if job.scan.found.as_ref() == Some(&c.at) {
         job.scan.found = None;
     }
@@ -2227,7 +2264,8 @@ fn pass_over(job: &mut Job, c: &Candidate, proof: usize, why: String, tip: u32, 
         at: c.at.clone(),
         proof,
         why,
-        tip,
+        tip: tips.0,
+        seq: tips.1,
         retry,
     });
 }
@@ -2402,9 +2440,13 @@ pub fn tick_with(
     let btc_tip = btc.tip()?;
     let d = job.terms.deadline;
     // What is passed over is tried again once what refused it can have changed: the node's
-    // floors read differently from the reading that refused it, or an asset no tier could
-    // pay in is accepted. Never merely because a block arrived.
-    job.scan.passed.retain(|p| !p.retry_due(floors));
+    // floors read differently from the reading that refused it, a Sequentia block mined
+    // since a refusal for want of room, or an asset no tier could pay in accepted. A
+    // refusal for the fee rate alone, never merely because a block arrived.
+    let (retried, kept): (Vec<Passed>, Vec<Passed>) = std::mem::take(&mut job.scan.passed)
+        .into_iter()
+        .partition(|p| p.retry_due(floors, seq_tip));
+    job.scan.passed = kept;
 
     // A claim pooled at the tier wanted: the node accepted it, so the payment it proves
     // is the swap's. Raised, a lower tier pooled is replaced by a top one below.
@@ -2419,7 +2461,7 @@ pub fn tick_with(
     }
     // The payment is the candidate whose completed claim the node accepts.
     if !job.scan.candidates.is_empty() {
-        match land(seq, btc, job, seq_tip, btc_tip, until)? {
+        match land(seq, btc, job, seq_tip, btc_tip, until, &retried)? {
             Landing::Done => return Ok(()),
             Landing::Waiting(why) => {
                 job.state = State::Waiting;
@@ -2854,6 +2896,9 @@ pub struct Store {
     pub blocks: Arc<Mutex<BlockCache>>,
     /// Sequentia's tip when the work thread last read it: its height and hash. Not stored.
     seq_seen: Option<(u32, String)>,
+    /// Whether the candidates passed over were checked against Sequentia's best chain
+    /// since the store was opened ([`recheck_passed`]).
+    passed_checked: bool,
 }
 
 impl Store {
@@ -2913,6 +2958,7 @@ impl Store {
             jobs,
             blocks: Arc::new(Mutex::new(BlockCache::default())),
             seq_seen: None,
+            passed_checked: false,
         };
         let done: Vec<String> = st
             .jobs
@@ -3215,6 +3261,46 @@ fn under_floor(j: &Job, floors: &Floors, hit: Option<usize>) -> bool {
     })
 }
 
+/// The most Sequentia blocks [`recheck_passed`] looks up; past that it tries every
+/// candidate passed over again.
+pub const PASSED_CHECKS: usize = 1_000;
+
+/// Checks what was passed over against Sequentia's best chain, once after the store is
+/// opened: a reorganization while the service was stopped is seen by no round. A candidate
+/// passed over at a Sequentia block no longer on the node's best chain, or at a block not
+/// known (none recorded, or the node not finding it), is tried again, as a reorganization
+/// seen online brings it back. With more blocks to look up than [`PASSED_CHECKS`], every
+/// one is tried again: in doubt, once at startup. The store's lock is not held while the
+/// node is asked.
+fn recheck_passed(store: &Mutex<Store>, seq: &SeqChain) {
+    let blocks: std::collections::BTreeSet<String> = lock(store)
+        .jobs
+        .values()
+        .flat_map(|j| j.scan.passed.iter().filter_map(|p| p.seq.clone()))
+        .collect();
+    let on_chain: Option<std::collections::HashSet<String>> =
+        (blocks.len() <= PASSED_CHECKS).then(|| {
+            blocks
+                .into_iter()
+                .filter(|h| {
+                    seq.rpc
+                        .call("getblockheader", json!([h, true]))
+                        .ok()
+                        .and_then(|v| v.get("confirmations").and_then(Value::as_i64))
+                        .is_some_and(|c| c >= 0)
+                })
+                .collect()
+        });
+    let mut st = lock(store);
+    for j in st.jobs.values_mut() {
+        j.scan.passed.retain(|p| match (&p.seq, &on_chain) {
+            (Some(h), Some(on)) => on.contains(h),
+            _ => false,
+        });
+    }
+    st.passed_checked = true;
+}
+
 /// The order jobs are worked in: an increasing count.
 static WORK_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -3226,38 +3312,46 @@ static WORK_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 ///   its receiving script nor spend its payments' coins by a lookup, without a call to
 ///   either chain ([`BlockCache::advance`]);
 /// - a job is worked only when something it waits on can have changed, and in this order:
-///   1. something new on the chains concerns it. First those a claim must be made for: a
-///      block that pays its script or spends its coins; a candidate payment not passed
-///      over that a Sequentia block now anchors; its claim gone from the mempool. Those
-///      whose claims are worth at least the node's floor go first, the rest after. Then
-///      those whose claim is made: pooled by someone, left out of a block (to raise it),
-///      or mined;
-///   2. intake changed it since it was last worked, or its search reached a block not read
-///      yet;
-///   3. a candidate it passed over is due again: the node's floors read differently in any
-///      way from the reading a refused tier was refused at, or that reading is not known
-///      ([`lwk_paylock::Refusal::due`]), or an asset no tier could pay in is accepted, the
-///      claims clearing the ask by the most first. These and the jobs of 2 take turns, one
-///      of these first, so however much intake there is, a refused claim is tried again in
-///      the first background turns of the round after the floors change; then a job whose
-///      last round failed, once its backoff is over, fewest failures first;
-///   4. the rest, once per Bitcoin block (for the deadline and the state they show), and
+///   1. something new on the chains concerns it and a claim must be made for it, its claims
+///      worth at least the node's floor: a block that pays its script or spends its coins;
+///      a candidate payment not passed over that a Sequentia block now anchors; its claim
+///      gone from the mempool;
+///   2. its claim is made and something new concerns it: pooled by someone, left out of a
+///      block (to raise it), or mined;
+///   3. three kinds of work that take turns, one of each in this order: a candidate it
+///      passed over is due again (the node's floors read differently in any way from the
+///      reading a refused tier was refused at, or that reading is not known; a Sequentia
+///      block mined since a tier was refused for want of room, with a backoff
+///      ([`lwk_paylock::Refusal::due`]); an asset no tier could pay in accepted), the claims
+///      clearing the ask by the most first; a claim to make as in 1 whose claims are all
+///      worth less than the floor; intake changed it since it was last worked, or its
+///      search reached a block not read yet. So however many jobs an attacker pays under
+///      the floor, or floods with intake, a refused claim is tried again in the first
+///      background turns of the round after what refused it changes, and a buyer's claim
+///      judged under the floor is tried among the first of its kind;
+///   4. a job whose last round failed, once its backoff is over, fewest failures first;
+///   5. the rest, once per Bitcoin block (for the deadline and the state they show), and
 ///      those holding a payment or cancel Bitcoin cannot check yet, whenever a chain moves
 ///      and at least every ten seconds.
 ///
-///   A candidate passed over is never tried again merely because a block arrived, so a
-///   job whose claims cannot land (priced under the floor, in an asset the node does not
-///   accept) costs a lookup a round once it has been tried, however many there are;
+///   A candidate refused for its fee rate is never tried again merely because a block
+///   arrived, so a job whose claims cannot land (priced under the floor, in an asset the
+///   node does not accept) costs a lookup a round once it has been tried, however many
+///   there are;
 /// - a reorganization of Sequentia (a block at a height already seen replaced) brings back
-///   every candidate passed over, as a reorganization of Bitcoin does;
+///   every candidate passed over, as a reorganization of Bitcoin does; so does one while
+///   the service was stopped, seen in the first round after it starts, which tries again
+///   every candidate passed over at a Sequentia block no longer on the node's best chain
+///   ([`recheck_passed`]);
 /// - within each of those, the jobs take turns by receiving script, each script's least
-///   recently worked first (in the third, the one clearing the node's ask by the most). So a
-///   buyer whose payment is mined is worked in the first turns of the next round, behind
-///   only the jobs that a claim must be made for in that round, each of which cost
+///   recently worked first (among the retries of the third, the one clearing the node's ask
+///   by the most). So a buyer whose payment is mined is worked in the first turns of the
+///   next round, behind only the jobs of 1 in that round, each of which cost
 ///   whoever made it an output in a new Bitcoin block or a claim the node takes (and pays
 ///   for: a claim pooled pays its fee once mined, and its job leaves); the upkeep of
 ///   claims already pooled or mined comes after it;
-/// - all but the claims to make are background (the upkeep of claims made too): while they run, the chains' tips are looked at every
+/// - all but the claims of 1 are background (the upkeep of claims made and the claims to
+///   make under the floor too): while they run, the chains' tips are looked at every
 ///   [`MOVE_CHECK`], and a move ends the round, the next starting at once. So background
 ///   work keeps a buyer whose payment was just mined or anchored waiting one job's work
 ///   at most, however long it is.
@@ -3342,6 +3436,11 @@ fn round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: &Limits) 
             .is_some_and(|now| now != hash),
         None => false,
     };
+    // The first round since the store was opened, with the node answering: what was passed
+    // over while the service was stopped is checked against Sequentia's best chain.
+    if !seq_hash.starts_with("height ") && !lock(store).passed_checked {
+        recheck_passed(store, seq);
+    }
     // (class, receiving script, rank, last worked, deadline, id). The rank is the job's
     // failures, except in class 4, where it is how far its claim clears the node's ask
     // now, the farthest first.
@@ -3410,12 +3509,12 @@ fn round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: &Limits) 
             2
         } else if advance == Advance::Unread || j.worked == 0 || j.changed != j.seen {
             3
-        } else if j.failures == 0 && j.scan.passed.iter().any(|p| p.retry_due(&floors)) {
+        } else if j.failures == 0 && j.scan.passed.iter().any(|p| p.retry_due(&floors, seq_tip)) {
             let margin = j
                 .scan
                 .passed
                 .iter()
-                .map(|p| p.margin(&floors))
+                .map(|p| p.margin(&floors, seq_tip))
                 .fold(0.0, f64::max);
             rank = u32::MAX - (margin.clamp(0.0, 4_000.0) * 1_000_000.0) as u32;
             4
@@ -3468,27 +3567,34 @@ fn round(store: &Mutex<Store>, seq: &SeqChain, btc: &BtcChain, limits: &Limits) 
             }
         }
     }
-    // Retries at new floors (class 4) and intake (class 3) take turns, a retry first: intake
-    // however heavy never keeps a refused claim from its retry past the first background
-    // turns of a round, and a flood of retries never stops intake.
-    let mut order: Vec<String> = by_class[..3].concat();
-    let intake = std::mem::take(&mut by_class[3]);
-    let retries = std::mem::take(&mut by_class[4]);
-    let (mut a, mut b) = (retries.into_iter(), intake.into_iter());
+    // Claims to make worth at least the floor (class 0) first, then the upkeep of claims
+    // made (class 2). Then retries passed over (class 4), claims to make under the floor
+    // (class 1) and intake (class 3) take turns, a retry first: however many jobs an
+    // attacker pays under the floor or floods with intake, a refused claim is tried again,
+    // and a claim to make under the floor tried, in the first background turns of a
+    // round, and neither flood stops the others.
+    let mut order: Vec<String> = by_class[0].clone();
+    order.extend(std::mem::take(&mut by_class[2]));
+    let mut queues: Vec<std::vec::IntoIter<String>> = [4usize, 1, 3]
+        .iter()
+        .map(|&c| std::mem::take(&mut by_class[c]).into_iter())
+        .collect();
     loop {
-        match (a.next(), b.next()) {
-            (None, None) => break,
-            (x, y) => order.extend(x.into_iter().chain(y)),
+        let turn: Vec<String> = queues.iter_mut().filter_map(Iterator::next).collect();
+        if turn.is_empty() {
+            break;
         }
+        order.extend(turn);
     }
     order.extend(by_class[5..].concat());
-    // Classes 0 and 1 are the claims something new on the chains asks for; the rest,
-    // the upkeep of claims made included, is background. While it runs, the chains' tips are looked at every
-    // [`MOVE_CHECK`]: once either moves, the round ends, and the next one starts at
-    // once, with whatever the move brings first. So background work (retries at new
-    // floors, first tries, the per-block tick) never keeps a buyer whose payment was
-    // just mined or anchored waiting longer than one job's work and one check.
-    let urgent = due.iter().filter(|x| x.0 <= 1).count();
+    // Class 0 is the claims something new on the chains asks for that are worth the floor;
+    // the rest, claims under the floor and the upkeep of claims made included, is
+    // background. While it runs, the chains' tips are looked at every [`MOVE_CHECK`]: once
+    // either moves, the round ends, and the next one starts at once, with whatever the
+    // move brings first. So background work (retries, first tries under the floor, the
+    // per-block tick) never keeps a buyer whose payment was just mined or anchored waiting
+    // longer than one job's work and one check.
+    let urgent = due.iter().filter(|x| x.0 == 0).count();
     let mut checked = Instant::now();
     let mut moved = false;
     let mut worked = 0;
@@ -3799,7 +3905,7 @@ mod tests {
             .unwrap_or(false)
     }
 
-    /// KR117's low: a copy replaced by the one kept, or handed over and dropped, is let go
+    /// A copy replaced by the one kept, or handed over and dropped, is let go
     /// at once, not at the next prune ten minutes later; a copy still held stays shared.
     #[test]
     fn a_replaced_or_dropped_copy_is_let_go_at_once() {
